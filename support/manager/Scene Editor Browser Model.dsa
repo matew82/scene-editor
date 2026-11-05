@@ -1,0 +1,257 @@
+/* Pure mutable-file browser policy. Host owns native IO and inspection validity. */
+var SceneEditorBrowserModel = (function () {
+    function own(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+    function array(o) { return Object.prototype.toString.call(o) === '[object Array]'; }
+    function copy(o) { return JSON.parse(JSON.stringify(o)); }
+    function fail(code, message) { var e = Error(message); e.code = code; throw e; }
+    function finite(o) { return typeof o === 'number' && isFinite(o); }
+    function text(o) { return o === null || o === undefined ? '' : String(o); }
+    function slash(path) {
+        var p = text(path).replace(/\\/g, '/');
+        return p === '/' || /^[A-Za-z]:\/$/.test(p) ? p : p.replace(/\/+$/, '');
+    }
+    function pathKey(path) {
+        var p = slash(path);
+        return /^[A-Za-z]:\//.test(p) || /^\/\//.test(p) ? p.toLowerCase() : p;
+    }
+    function trim(value) { return text(value).replace(/^\s+|\s+$/g, ''); }
+    function labelBase(value) { return trim(value).replace(/\s*\([0-9]+\)$/, '').toLowerCase(); }
+    function labelMatches(actual, wanted, mode) {
+        var a = labelBase(actual), b = labelBase(wanted);
+        if (!b) fail('FILTER_LABEL', 'Object label must not be empty');
+        if (mode === 'prefix') return trim(actual).toLowerCase().indexOf(trim(wanted).toLowerCase()) === 0;
+        if (mode !== 'exact' && mode !== undefined) fail('FILTER_MATCH', 'Unknown label match mode ' + mode);
+        return a === b;
+    }
+    function normalizedState(input) {
+        var s = input === undefined || input === null ? {} : copy(input), i, k;
+        if (!s || typeof s !== 'object' || array(s)) fail('STATE', 'Central state is not an object');
+        if (s.schema !== undefined && s.schema !== 1) fail('STATE', 'Unsupported central state schema');
+        s.schema = 1;
+        if (s.recentFolders === undefined) s.recentFolders = [];
+        if (s.metadata === undefined) s.metadata = {};
+        if (s.settings === undefined) s.settings = {};
+        if (!array(s.recentFolders) || !s.metadata || typeof s.metadata !== 'object' || array(s.metadata) ||
+                !s.settings || typeof s.settings !== 'object' || array(s.settings)) fail('STATE', 'Invalid central state fields');
+        for (i = 0; i < s.recentFolders.length; i++) if (typeof s.recentFolders[i] !== 'string') fail('STATE', 'Invalid recent folder');
+        for (k in s.metadata) if (own(s.metadata, k)) {
+            var m = s.metadata[k];
+            if (!m || typeof m !== 'object' || array(m) || m.note !== undefined && typeof m.note !== 'string' ||
+                    m.important !== undefined && typeof m.important !== 'boolean') fail('STATE', 'Invalid scene metadata');
+        }
+        return s;
+    }
+    function bounds(filters) {
+        var names = ['dateMin', 'dateMax', 'sizeMin', 'sizeMax'], i, n;
+        for (i = 0; i < names.length; i++) {
+            n = names[i];
+            if (filters[n] !== undefined && filters[n] !== null && !finite(filters[n])) fail('FILTER_BOUND', 'Invalid ' + n);
+        }
+        if (finite(filters.dateMin) && finite(filters.dateMax) && filters.dateMin > filters.dateMax) fail('FILTER_BOUND', 'Date minimum exceeds maximum');
+        if (finite(filters.sizeMin) && filters.sizeMin < 0 || finite(filters.sizeMax) && filters.sizeMax < 0) fail('FILTER_BOUND', 'Size must not be negative');
+        if (finite(filters.sizeMin) && finite(filters.sizeMax) && filters.sizeMin > filters.sizeMax) fail('FILTER_BOUND', 'Size minimum exceeds maximum');
+        var clauses = filters.objects || [];
+        if (!array(clauses)) fail('FILTER_OBJECTS', 'Object filters must be an array');
+        for (i = 0; i < clauses.length; i++) {
+            var c = clauses[i];
+            if (!c || !trim(c.label)) fail('FILTER_LABEL', 'Object label must not be empty');
+            if (c.match !== undefined && c.match !== 'exact' && c.match !== 'prefix') fail('FILTER_MATCH', 'Unknown object label mode');
+            if (c.presence !== undefined && c.presence !== 'present' && c.presence !== 'absent') fail('FILTER_PRESENCE', 'Unknown object presence mode');
+        }
+        return clauses;
+    }
+    function inspectionObjects(inspection) {
+        if (!inspection || inspection.error || inspection.complete === false || inspection.partial === true ||
+                inspection.status === 'partial') fail('FILTER_INSPECTION', 'Inspection is incomplete; object absence cannot be proved');
+        var objects = inspection.searchObjects || inspection.nodes || inspection.scene && inspection.scene.nodes ||
+            inspection.tabs && inspection.tabs.objects;
+        if (!array(objects)) fail('FILTER_INSPECTION', 'Inspection has no authoritative object list');
+        return objects;
+    }
+    function objectMatch(inspection, clauses) {
+        var objects = inspectionObjects(inspection), i, j, found, row;
+        for (i = 0; i < clauses.length; i++) {
+            found = false;
+            for (j = 0; j < objects.length; j++) {
+                row = objects[j];
+                if (!row || typeof row !== 'object' || typeof row.label !== 'string' && typeof row.name !== 'string') fail('FILTER_INSPECTION', 'Object label is unavailable; absence cannot be proved');
+                if (labelMatches(row.label || row.name, clauses[i].label, clauses[i].match)) { found = true; break; }
+            }
+            if (clauses[i].presence === 'absent' ? found : !found) return false;
+        }
+        return true;
+    }
+    function clearFilters(filters) {
+        filters = filters || {};
+        return {name:'', importantOnly:false, recursive:false, objects:[], dateMin:null, dateMax:null, sizeMin:null, sizeMax:null,
+            sort:filters.sort === 'date' || filters.sort === 'size' ? filters.sort : 'name', descending:filters.descending === true};
+    }
+    function create(host, initialState) {
+        if (!host || typeof host.canonical !== 'function' || typeof host.parent !== 'function' || typeof host.list !== 'function') fail('HOST', 'Browser filesystem host is incomplete');
+        var state = normalizedState(initialState);
+        function canonical(path) {
+            var p = host.canonical(path);
+            if (typeof p !== 'string' || !p) fail('PATH', 'Cannot canonicalize path ' + path);
+            return slash(p);
+        }
+        function key(path) { return pathKey(canonical(path)); }
+        function persist(next) {
+            if (typeof host.saveState !== 'function') fail('STATE_IO', 'Central state writer unavailable');
+            host.saveState(copy(next));
+            state = next;
+        }
+        function metadataAtCanonical(path) { var k = '$' + pathKey(path); return own(state.metadata, k) ? copy(state.metadata[k]) : {important:false, note:''}; }
+        function metadata(path) { return metadataAtCanonical(canonical(path)); }
+        function setMetadata(path, change) {
+            if (!change || typeof change !== 'object') fail('METADATA', 'Missing metadata change');
+            if (own(change, 'important') && typeof change.important !== 'boolean' || own(change, 'note') && typeof change.note !== 'string') fail('METADATA', 'Invalid Important or note type');
+            var next = copy(state), k = '$' + key(path), m = own(next.metadata, k) ? next.metadata[k] : {important:false, note:''};
+            if (own(change, 'important')) m.important = change.important;
+            if (own(change, 'note')) m.note = change.note;
+            m.path = canonical(path); next.metadata[k] = m; persist(next); return copy(m);
+        }
+        function recordSuccess(path, kind, receipt) {
+            if (kind !== 'edit' && kind !== 'load' && kind !== 'apply') fail('HISTORY_EFFECT', 'Inspection/browsing does not qualify for recent folders');
+            if (!receipt || receipt.success !== true || receipt.cancelled === true) return false;
+            if (kind === 'edit' ? receipt.saved !== true || receipt.changed !== true : receipt.performed !== true) return false;
+            if (receipt.scenePath !== undefined && key(receipt.scenePath) !== key(path)) fail('HISTORY_SOURCE', 'Successful receipt belongs to another source scene');
+            var folder = canonical(host.parent(canonical(path))), identity = pathKey(folder), next = copy(state), out = [folder], seen = {};
+            seen['$' + identity] = true;
+            for (var i = 0; i < next.recentFolders.length && out.length < 10; i++) {
+                var p = canonical(next.recentFolders[i]), k = '$' + pathKey(p);
+                if (!own(seen, k)) { seen[k] = true; out.push(p); }
+            }
+            next.recentFolders = out; persist(next); return true;
+        }
+        function sortRows(rows, sort, descending) {
+            sort = sort || 'name';
+            if (sort !== 'name' && sort !== 'date' && sort !== 'size') fail('SORT', 'Unknown scene sort ' + sort);
+            function compareText(a, b) { return a < b ? -1 : a > b ? 1 : 0; }
+            rows.sort(function (a, b) {
+                var ka = a.kind === 'parent' ? 0 : a.kind === 'folder' ? 1 : 2,
+                    kb = b.kind === 'parent' ? 0 : b.kind === 'folder' ? 1 : 2, result, av, bv;
+                if (ka !== kb) return ka - kb;
+                av = sort === 'name' ? a.name.toLowerCase() : sort === 'date' ? a.mtime : a.size;
+                bv = sort === 'name' ? b.name.toLowerCase() : sort === 'date' ? b.mtime : b.size;
+                if (av === null || av === undefined) result = bv === null || bv === undefined ? 0 : 1;
+                else if (bv === null || bv === undefined) result = -1;
+                else result = compareText(av, bv) * (descending ? -1 : 1);
+                return result || compareText(a.name.toLowerCase(), b.name.toLowerCase()) || compareText(a.pathKey, b.pathKey) || a.order - b.order;
+            });
+            return rows;
+        }
+        function browse(folder, filters, guard) {
+            filters = filters || {}; guard = guard || function () {};
+            var clauses = bounds(filters), root = canonical(folder), query = trim(filters.name).toLowerCase(), rows = [], scenes = [],
+                diagnostics = [], visited = {}, fileKeys = {}, queue = [root], at = 0, order = 0, parentPath = host.parent(root), inspected = 0;
+            parentPath = parentPath ? canonical(parentPath) : root;
+            rows.push({kind:'parent', name:'..', path:parentPath, pathKey:pathKey(parentPath), disabled:pathKey(parentPath) === pathKey(root), order:order++});
+            while (at < queue.length) {
+                var directory = queue[at++], directoryKey = '$' + pathKey(directory);
+                if (own(visited, directoryKey)) continue;
+                visited[directoryKey] = true;
+                guard('List folder ' + directory);
+                var entries = host.list(directory);
+                if (!array(entries)) fail('DIRECTORY', 'Directory listing did not return all entries');
+                for (var i = 0; i < entries.length; i++) {
+                    guard('Search scenes ' + scenes.length);
+                    var entry = entries[i], path = canonical(entry.path), identity = pathKey(path), name = text(entry.name || path.substring(path.lastIndexOf('/') + 1));
+                    if (entry.isDir === true) {
+                        if (name === '.' || name === '..') continue;
+                        if (directory === root && identity !== pathKey(root) && identity !== pathKey(parentPath)) rows.push({kind:'folder', name:name, shortcut:entry.symLink===true&&/\.lnk$/i.test(name), shortcutPath:entry.path, path:path, pathKey:identity, size:finite(entry.size)&&entry.size>=0?entry.size:null, mtime:finite(entry.mtime)?entry.mtime:null, order:order++});
+                        if (filters.recursive === true && !own(visited, '$' + identity)) queue.push(path);
+                        continue;
+                    }
+                    if (!/\.duf$/i.test(name) || own(fileKeys, '$' + identity)) continue;
+                    fileKeys['$' + identity] = true;
+                    if (query && name.toLowerCase().indexOf(query) < 0) continue;
+                    var meta = metadataAtCanonical(path);
+                    if (filters.importantOnly === true && meta.important !== true) continue;
+                    var size = finite(entry.size) && entry.size >= 0 ? entry.size : null, mtime = finite(entry.mtime) ? entry.mtime : null, unknown = false, unknownReason = '';
+                    if (finite(filters.dateMin) && mtime !== null && mtime < filters.dateMin || finite(filters.dateMax) && mtime !== null && mtime > filters.dateMax ||
+                            finite(filters.sizeMin) && size !== null && size < filters.sizeMin || finite(filters.sizeMax) && size !== null && size > filters.sizeMax) continue;
+                    if ((finite(filters.dateMin) || finite(filters.dateMax)) && mtime === null || (finite(filters.sizeMin) || finite(filters.sizeMax)) && size === null) { unknown = true; unknownReason = 'File date/size is unavailable'; }
+                    if (clauses.length) {
+                        guard('Inspect scene for filters ' + path);
+                        try {
+                            if (typeof host.inspect !== 'function') fail('FILTER_INSPECTION', 'Cached DUF inspection host unavailable');
+                            var inspection = host.inspect(path, guard); inspected++;
+                            if (!objectMatch(inspection, clauses)) continue;
+                        } catch (e) {
+                            if (e && e.code === 'CANCELLED') throw e;
+                            unknown = true; unknownReason = String(e.message || e);
+                        }
+                    }
+                    if (unknown) diagnostics.push({scenePath:path, message:unknownReason, includedAsUnknown:true});
+                    var thumbnail = entry.thumbnail || (typeof host.thumbnail === 'function' ? host.thumbnail(path) : null);
+                    scenes.push({kind:'scene', name:name, path:path, pathKey:identity, size:size, mtime:mtime, important:meta.important === true, note:meta.note || '',
+                        thumbnail:thumbnail, placeholder:!thumbnail,
+                        filterUnknown:unknown, filterUnknownReason:unknownReason, order:order++});
+                }
+            }
+            rows = rows.concat(scenes); sortRows(rows, filters.sort || 'name', filters.descending === true);
+            return {folder:root, rows:rows, sceneCount:scenes.length, folderCount:rows.length - scenes.length - 1, diagnostics:diagnostics, inspected:inspected,
+                complete:true, matchesCertain:diagnostics.length === 0, unknownCount:diagnostics.length, filters:copy(filters), historyUnchanged:true};
+        }
+        function withinFolder(source, folder, recursive) {
+            var p = pathKey(canonical(host.parent(canonical(source)))), f = pathKey(canonical(folder));
+            return p === f || recursive === true && p.indexOf(f.replace(/\/$/, '') + '/') === 0;
+        }
+        function ownedEntries(guard) {
+            guard = guard || function () {};
+            if (typeof host.cacheEntries !== 'function' || typeof host.isOwnedCache !== 'function') fail('CACHE_HOST', 'Cache ownership enumeration unavailable');
+            var input = host.cacheEntries(guard), out = [], seen = {}, protectedPaths = (host.protectedPaths || []).slice(0);
+            if (host.statePath) protectedPaths.push(host.statePath);
+            if (!array(input)) fail('CACHE_HOST', 'Cache listing must be complete');
+            for (var i = 0; i < input.length; i++) {
+                guard('Enumerate owned caches ' + i + ' / ' + input.length);
+                var e = input[i];
+                if (!e || typeof e.cachePath !== 'string' || host.isOwnedCache(e) !== true) continue;
+                var cache = canonical(e.cachePath), k = '$' + pathKey(cache);
+                if (/\.(duf|dsf)$/i.test(cache) || e.sourcePath && key(e.sourcePath) === pathKey(cache)) fail('CACHE_SCOPE', 'Refusing source asset/scene as cache ' + cache);
+                for (var pi = 0; pi < protectedPaths.length; pi++) if (pathKey(cache) === key(protectedPaths[pi])) fail('CACHE_SCOPE', 'Refusing protected central metadata/settings as cache ' + cache);
+                if (own(seen, k)) continue;
+                var normalized = copy(e);
+                normalized.cachePath = cache; normalized.sourcePath = e.sourcePath || null;
+                normalized.bytes = finite(e.bytes) && e.bytes >= 0 ? e.bytes : null; normalized.kind = e.kind || 'cache';
+                seen[k] = true; out.push(normalized);
+            }
+            return out;
+        }
+        function cacheUsage(guard) {
+            var items = ownedEntries(guard), total = 0, unknown = 0;
+            for (var i = 0; i < items.length; i++) if (items[i].bytes === null) unknown++; else total += items[i].bytes;
+            return {files:items.length, bytes:total, unknownSizeFiles:unknown};
+        }
+        function cleanupPlan(scope, folder, recursive, guard) {
+            if (scope !== 'nonexistent' && scope !== 'folder' && scope !== 'all') fail('CACHE_SCOPE', 'Unknown cache cleanup scope');
+            if (scope === 'nonexistent' && typeof host.exists !== 'function') fail('CACHE_HOST', 'Source existence check unavailable');
+            if (scope === 'folder' && !folder) fail('CACHE_SCOPE', 'Current folder is required');
+            var items = ownedEntries(guard), out = [], total = 0;
+            for (var i = 0; i < items.length; i++) {
+                var e = items[i], include = scope === 'all' || e.sourcePath && (scope === 'nonexistent' ? host.exists(e.sourcePath) === false : withinFolder(e.sourcePath, folder, recursive));
+                if (include) { out.push(e); if (e.bytes !== null) total += e.bytes; }
+            }
+            return {scope:scope, folder:folder || null, recursive:recursive === true, entries:out, knownBytes:total, metadataExcluded:true};
+        }
+        function cleanup(scope, folder, recursive, guard) {
+            guard = guard || function () {};
+            if (typeof host.removeCacheEntry !== 'function') fail('CACHE_HOST', 'Cache removal host unavailable');
+            var plan = cleanupPlan(scope, folder, recursive, guard), removed = [], total = 0, result = {status:'completed', removed:removed, removedKnownBytes:0, planned:plan.entries.length, metadataPreserved:true};
+            try {
+                for (var i = 0; i < plan.entries.length; i++) {
+                    var e = plan.entries[i]; guard('Clear caches ' + i + ' / ' + plan.entries.length);
+                    if (host.isOwnedCache(e) !== true) fail('CACHE_SCOPE', 'Cache ownership changed before removal ' + e.cachePath);
+                    if (host.removeCacheEntry(copy(e)) !== true) fail('CACHE_REMOVE', 'Cache removal failed ' + e.cachePath);
+                    removed.push(e.cachePath); if (e.bytes !== null) total += e.bytes;
+                }
+            } catch (error) { result.status = error && error.code === 'CANCELLED' ? 'cancelled' : 'partial-error'; result.error = String(error.message || error); }
+            result.removedKnownBytes = total; return result;
+        }
+        return {browse:browse, clearFilters:clearFilters, metadata:metadata, setMetadata:setMetadata, recordSuccess:recordSuccess, recentFolders:function(){return state.recentFolders.slice(0, 10);},
+            getState:function(){return copy(state);}, settings:function(){return copy(state.settings);}, setSettings:function(settings){if(!settings || typeof settings !== 'object' || array(settings))fail('SETTINGS','Invalid settings');var next=copy(state);next.settings=copy(settings);persist(next);},
+            cacheUsage:cacheUsage, cleanupPlan:cleanupPlan, cleanup:cleanup, canonical:canonical, pathKey:function(path){return key(path);}};
+    }
+    return {create:create, clearFilters:clearFilters, pathKey:pathKey, labelBase:labelBase, labelMatches:labelMatches, objectMatch:objectMatch,
+        filterSemantics:'Name is literal case-insensitive filename substring, not @Participants syntax. Date bounds are inclusive epoch milliseconds; size bounds inclusive bytes. All object clauses combine with AND. Exact labels are case-insensitive after trimming and removing only a terminal numeric (N) instance suffix. Prefix is a literal case-insensitive label prefix, not a substring. Unknown inspection/date/size retains the scene with an explicit diagnostic; cancellation publishes no partial result. Recursive search follows canonical directories once. Clear Filters resets name/Important/date/size/object/recursive filters, retaining folder and sort. Cache cleanup never receives central state or source DUFs.'};
+}());

@@ -1,0 +1,145 @@
+// ES5. Candidate only. Caller owns Undo, rollback, native host acceptance and scene scope.
+var SaveGuardCameraProperties = (function () {
+    function create(env,trace) {
+        function phase(name,detail){try{if(typeof trace==='function')trace(name,detail);}catch(traceError){if(name==='property-write.before'||name==='property-write.after')throw traceError;}}
+        function need(v, m) { if (!v) throw Error(m); }
+        function same(a,b) { return a===null&&b===null||a!==null&&b!==null&&env.pointersAreEqual(a,b) === true; }
+        function num(v) { need(v !== null && v !== undefined && isFinite(Number(v)), 'Invalid numeric property data'); return Number(v); }
+        function count(v,max) { v=num(v); need(v>=0 && v===Math.floor(v) && v<=max,'Camera property budget exceeded'); return v; }
+        function call(o,n) { need(typeof o[n]==='function','Required property API unavailable: '+n); return o[n](); }
+        function eq(a,b) { return JSON.stringify(a)===JSON.stringify(b); }
+        // Per-operation identity tokens keep native QObject pointers out of JSON comparisons.
+        var nodePointers=[];
+        function nodeToken(node){if(node===null)return null;need(node!==undefined&&typeof node.isInScene==='function'&&node.isInScene()===true,'Reference node is not live');for(var i=0;i<nodePointers.length;i++)if(same(nodePointers[i],node))return i;nodePointers.push(node);return nodePointers.length-1;}
+        function nodePointer(token){return token===null?null:nodePointers[token];}
+        var types = {DzFloatProperty:'',DzIntProperty:'',DzBoolProperty:'',DzEnumProperty:'',DzFloat2Property:'Float2',DzInt2Property:'Int2',DzColorProperty:'Color',DzFloatColorProperty:'FloatColor',DzStringProperty:'String',DzFileProperty:'String',DzNodeProperty:'Node',DzNumericNodeProperty:''};
+        var transformControls=['getOriginXControl','getOriginYControl','getOriginZControl','getEndXControl','getEndYControl','getEndZControl','getOrientXControl','getOrientYControl','getOrientZControl','getXPosControl','getYPosControl','getZPosControl','getXRotControl','getYRotControl','getZRotControl','getXScaleControl','getYScaleControl','getZScaleControl','getScaleControl','getDisableTransformControl','getIgnoreLocalTransformControl','getPointAtControl'];
+        function properties(camera){var out=[],n=count(camera.getNumProperties(),9007199254740991),i,j,p;for(i=0;i<n;i++)out.push(camera.getProperty(i));for(i=0;i<transformControls.length;i++){p=call(camera,transformControls[i]);need(p,'Missing camera transform control: '+transformControls[i]);for(j=0;j<out.length;j++)if(same(out[j],p))break;if(j===out.length)out.push(p);}return out;}
+        function plain(v,t) {
+            if(t==='String') { need(typeof v==='string','Non-string property value'); return v; }
+            if(t==='Float2'||t==='Int2') return [num(v.x),num(v.y)];
+            if(t==='Color'||t==='FloatColor') return [num(v.red),num(v.green),num(v.blue),num(v.alpha)];
+            return num(v);
+        }
+        function state(p,type,budget) {
+            var t=types[type], str=t==='String', suffix=str?'':t;
+            if(type==='DzNodeProperty') {var current=nodeToken(call(p,'getValue')),defNode=nodeToken(call(p,'getDefaultValue')),nodeKeys=[],nodeCount=count(call(p,'getNumKeys'),9007199254740991);budget.n+=nodeCount;for(var ni=0;ni<nodeCount;ni++){var ip=p.getKeyInterpolationTypeValues(ni),params=[];need(ip&&ip.length===4,'Node key interpolation metadata unavailable');for(var nj=0;nj<4;nj++)params.push(num(ip[nj]));nodeKeys.push({time:num(p.getKeyTime(ni)),value:nodeToken(p.getKeyValue(ni)),interpolation:num(p.getKeyInterpolationType(ni)),parameters:params});}return {reference:true,canAnimate:call(p,'canAnimate'),raw:current,value:current,defaultValue:defNode,keys:nodeKeys,blend:null};}
+            var raw=plain(call(p,str?'getValue':'getRaw'+suffix+'Value'),t);
+            var value=plain(call(p,'get'+suffix+'Value'),t);
+            var def=plain(call(p,'getDefault'+suffix+'Value'),t), keys=[];
+            var n=count(call(p,'getNumKeys'),9007199254740991); budget.n+=n;
+            need(!str||n===0,'Native '+type+' is documented non-animatable; keyed values have no supported API');
+            for(var i=0;i<n;i++) {
+                var a=p.getKeyInterpolationTypeValues(i), params=[];
+                need(a&&a.length===4,'Key interpolation metadata unavailable');
+                for(var j=0;j<4;j++)params.push(num(a[j]));
+                keys.push({time:num(p.getKeyTime(i)),value:plain(p['getKey'+suffix+'Value'](i),t),interpolation:num(p.getKeyInterpolationType(i)),parameters:params});
+            }
+            return {raw:raw,value:value,defaultValue:def,keys:keys,blend:t==='Color'||t==='FloatColor'?num(call(p,'getAnimationBlendMode')):null,node:type==='DzNumericNodeProperty'?nodeToken(call(p,'getNode')):undefined,mustHaveNode:type==='DzNumericNodeProperty'?call(p,'isInvalidWithoutNode'):undefined};
+        }
+        function flags(p) {
+            // isLinked/isMaster belong to DzNumericProperty, not DzProperty.
+            // Strings/files/node pointers do not inherit the numeric direct-link API.
+            var type=String(p.className()),nonNumeric=type==='DzStringProperty'||type==='DzFileProperty'||type==='DzNodeProperty';
+            function direct(name) { return nonNumeric&&typeof p[name]!=='function'?false:call(p,name); }
+            return {alias:call(p,'isAlias'),linked:direct('isLinked'),master:direct('isMaster'),editing:call(p,'isEditing'),locked:call(p,'isLocked'),incoming:count(call(p,'getNumControllers'),9007199254740991),outgoing:count(call(p,'getNumSlaveControllers'),9007199254740991)};
+        }
+        function safe(f) { need(f.alias===false&&f.linked===false&&f.master===false&&f.editing===false&&f.incoming===0&&f.outgoing===0,'Camera linked/controller/editing property unsupported'); }
+        function unsafe(f) { return !(f.alias===false&&f.linked===false&&f.master===false&&f.editing===false&&f.incoming===0&&f.outgoing===0); }
+        function lampLink(p,f,notes) {
+            notes=notes||{};
+            if(String(p.getName())!=='Headlamp Intensity'||String(p.className())!=='DzFloatProperty'||f.alias!==false||f.linked!==false||f.master!==false||f.editing!==false||f.incoming!==0||f.outgoing!==1){notes.failureReason='Headlamp candidate name/class/source flags differ from supported sole outgoing relationship';return null;}
+            try { var l=p.getSlaveController(0),o=l.getOwner(),owner=o.getOwner();
+                need(String(l.className())==='DzERCLink'&&same(l.getProperty(),p)&&same(l.getCurrentProperty(),p)&&String(o.className())==='DzFloatProperty'&&String(o.getName())==='Intensity'&&String(owner.className())==='DzHeadLight','Headlight endpoint class/name/source mismatch');
+                var of=flags(o);notes.outputFlags=of;need(of.alias===false&&of.linked===false&&of.master===false&&of.editing===false&&of.incoming===1&&of.outgoing===0&&same(o.getController(0),l),'Headlight output flags or incoming link mismatch');
+                var meta={},names=['type','scalar','addend','active','autoOverride','isUserLink','saveWithOutput','keyInterpolation'];notes.metadata=meta;for(var i=0;i<names.length;i++){var v=l[names[i]];meta[names[i]]=typeof v==='number'&&isFinite(v)||typeof v==='boolean'?v:null;need(typeof v==='number'&&isFinite(v)||typeof v==='boolean','Headlight ERC metadata unavailable: '+names[i]);}
+                notes.keyCount=call(l,'getNumKeyValues');need(notes.keyCount===0,'Keyed headlight link unsupported');
+                return {link:l,output:o,owner:owner,metadata:meta,flags:of,state:state(o,'DzFloatProperty',{n:0})};
+            }catch(e){notes.failureReason=String(e);return null;}
+        }
+        function nativeLamp(l){return !!l&&l.metadata.type===3&&l.metadata.scalar===1&&l.metadata.addend===0&&l.metadata.isUserLink===false;}
+        function lampStructure(a,b){return !a&&!b||!!a&&!!b&&same(a.link,b.link)&&same(a.output,b.output)&&same(a.owner,b.owner)&&eq(a.metadata,b.metadata)&&eq(a.flags,b.flags);}
+        function lampEqual(a,b) {return !a&&!b||!!a&&!!b&&same(a.link,b.link)&&same(a.output,b.output)&&same(a.owner,b.owner)&&eq(a.metadata,b.metadata)&&eq(a.flags,b.flags)&&eq(a.state,b.state);}
+        function describeEndpoint(endpoint,camera) {
+            if(!endpoint)return null;
+            var out={className:typeof endpoint.className==='function'?String(endpoint.className()):null,name:typeof endpoint.getName==='function'?String(endpoint.getName()):null};
+            if(typeof endpoint.getOwner==='function'){var owner=endpoint.getOwner();out.owner=owner?{className:typeof owner.className==='function'?String(owner.className()):null,name:typeof owner.getName==='function'?String(owner.getName()):null,isCapturedCamera:same(owner,camera)}:null;}
+            return out;
+        }
+        function descriptors(p,f,camera,diagnosticBudget) {
+            var result={incoming:[],outgoing:[],limitPerDirection:8};
+            if(f.linked||f.master){try{result.linkProperty=typeof p.getLinkProperty==='function'?describeEndpoint(p.getLinkProperty(),camera):{unavailable:true};}catch(linkError){result.linkPropertyError=String(linkError);}}
+            for(var d=0;d<2;d++) { var total=d?f.outgoing:f.incoming,key=d?'outgoing':'incoming',method=d?'getSlaveController':'getController',take=Math.min(total,8,diagnosticBudget.remaining);
+                for(var i=0;i<take;i++) { var row={index:i};diagnosticBudget.remaining--;
+                    try { need(typeof p[method]==='function','Controller accessor unavailable');var c=p[method](i);need(c,'Null controller');row.className=typeof c.className==='function'?String(c.className()):null;
+                        // Established pose path uses these methods; omit absent optional descriptors.
+                        var methods=['getProperty','getCurrentProperty','getOwner'];for(var j=0;j<methods.length;j++)if(typeof c[methods[j]]==='function')row[methods[j]]=describeEndpoint(c[methods[j]](),camera);
+                    }catch(e){row.error=String(e);}result[key].push(row);
+                }result[key+'Truncated']=total>take;
+            }return result;
+        }
+        function capture(camera) {
+            phase('property-capture.before');
+            need(typeof camera.inherits==='function'&&camera.inherits('DzCamera')===true&&camera.inherits('DzLight')!==true&&typeof camera.isViewCamera==='function'&&camera.isViewCamera()===false,'An exact non-view camera is required');
+            var all=properties(camera),n=all.length, rows=[], seen={},budget={n:0},diagnostics=[],diagnosticBudget={remaining:32};
+            for(var i=0;i<n;i++) {
+                var p=all[i], name=String(p.getName()), type=String(p.className());
+                need(name&&!seen['$'+name],'Duplicate camera property internal name');seen['$'+name]=true;
+                need(Object.prototype.hasOwnProperty.call(types,type),'Unsupported camera property class: '+type);
+                need(same(p.getOwner(),camera),'Camera property ownership mismatch');
+                var f=flags(p);
+                var lampNotes={},lamp=unsafe(f)?lampLink(p,f,lampNotes):null;
+                if(unsafe(f)&&!lamp){var diagnostic={name:name,className:type,flags:f,controllers:descriptors(p,f,camera,diagnosticBudget)};if(name==='Headlamp Intensity'&&type==='DzFloatProperty')diagnostic.headlampCandidate=lampNotes;diagnostics.push(diagnostic);}
+                rows.push({property:p,name:name,type:type,flags:f,lamp:lamp});
+            }
+            if(diagnostics.length){var error=Error('Camera linked/controller/editing property unsupported: '+diagnostics.length+' control(s); '+diagnostics[0].name);error.cameraPropertyDiagnostics={propertyCount:n,controllerDescriptorLimit:32,unsafe:diagnostics};throw error;}
+            for(i=0;i<rows.length;i++){try{rows[i].state=state(rows[i].property,rows[i].type,budget);}catch(stateError){stateError.message='Camera property '+rows[i].name+' ('+rows[i].type+'): '+stateError.message;throw stateError;}}
+            rows.sort(function(a,b){return a.name<b.name?-1:a.name>b.name?1:0;});
+            phase('property-capture.after',{properties:rows.length,keys:budget.n});return {camera:camera,nativeClass:String(camera.className()),rows:rows,keyCount:budget.n};
+        }
+        function matching(a,b) { need(a.nativeClass===b.nativeClass,'Camera native classes differ; conversion is not supported');need(a.rows.length===b.rows.length,'Camera property sets differ');for(var i=0;i<a.rows.length;i++)need(a.rows[i].name===b.rows[i].name&&a.rows[i].type===b.rows[i].type,'Camera property binding differs'); }
+        function topology(s) {
+            try { var all=properties(s.camera),n=all.length,byName={};if(n!==s.rows.length)return false;for(var j=0;j<n;j++){var p=all[j],name=String(p.getName());if(byName['$'+name])return false;byName['$'+name]=p;}for(var i=0;i<s.rows.length;i++){var r=s.rows[i],q=byName['$'+r.name];if(!q||!same(r.property,q)||!same(q.getOwner(),s.camera)||String(q.className())!==r.type||!eq(r.flags,flags(q))||!lampEqual(r.lamp,r.lamp?lampLink(q,flags(q)):null))return false;}return true; } catch(e){return false;}
+        }
+        function verify(s) {
+            try { var now=capture(s.camera);matching(s,now);for(var i=0;i<s.rows.length;i++)if(!same(s.rows[i].property,now.rows[i].property)||!eq(s.rows[i].flags,now.rows[i].flags)||!eq(s.rows[i].state,now.rows[i].state)||!lampEqual(s.rows[i].lamp,now.rows[i].lamp))return false;return true; } catch(e){return false;}
+        }
+        function values(s) { return {raw:s.raw,value:s.value,keys:s.keys,blend:s.blend,node:s.node,mustHaveNode:s.mustHaveNode,referenceDefault:s.reference?s.defaultValue:undefined}; }
+        function equivalent(a,b) { try {matching(a,b);for(var i=0;i<a.rows.length;i++)if(!eq(values(a.rows[i].state),values(b.rows[i].state)))return false;return true;}catch(e){return false;} }
+        function copyDiagnostics(source,target,after) {
+            var out={propertyCount:source.rows.length,mismatches:[],keyEvidenceLimit:5120},remaining=5120;
+            for(var i=0;i<source.rows.length;i++){
+                var s=source.rows[i],b=target.rows[i],a=after.rows[i],fields=[],detail={},names=['raw','value','keys','blend','defaultValue'];
+                for(var j=0;j<names.length;j++){var k=names[j],expected=k==='defaultValue'&&!dofEligible(s,b)?b.state[k]:s.state[k],actual=a.state[k];if(eq(expected,actual))continue;fields.push(k);
+                    if(k==='keys'){var diffs=[],total=Math.max(expected.length,actual.length,b.state.keys.length),differenceCount=0;for(var n=0;n<total;n++){if(eq(expected[n],actual[n]))continue;differenceCount++;if(remaining>0){diffs.push({index:n,before:b.state.keys[n]||null,expected:expected[n]||null,actual:actual[n]||null});remaining--;}}detail.keys={beforeCount:b.state.keys.length,expectedCount:expected.length,actualCount:actual.length,differenceCount:differenceCount,differences:diffs,truncated:diffs.length<differenceCount};}
+                    else detail[k]={before:b.state[k],expected:expected,actual:actual};
+                }
+                if(fields.length)out.mismatches.push({name:s.name,className:s.type,changedFields:fields,details:detail});
+            }return out;
+        }
+        function copyFailure(message,diagnostics){var e=Error(message);e.cameraCopyDiagnostics=diagnostics;throw e;}
+        function dofEligible(s,t){return s.name==='DOF'&&s.type==='DzBoolProperty'&&t.type===s.type&&(s.state.raw===0||s.state.raw===1)&&(t.state.raw===0||t.state.raw===1)&&s.state.raw!==t.state.raw&&s.state.value===s.state.raw&&s.state.defaultValue===s.state.raw&&t.state.value===t.state.raw&&t.state.defaultValue===t.state.raw&&s.state.keys.length===0&&t.state.keys.length===0&&t.flags.locked===false&&!unsafe(s.flags)&&!unsafe(t.flags);}
+        function copy(source,target,beforeWrites,referenceMap,referenceReceipt) {
+            matching(source,target);need(topology(source)&&topology(target),'Camera property ownership changed before copy');target=capture(target.camera);matching(source,target);
+            var i,referencePlans=[];
+            function referencePlan(sr,tr){
+                var ss=sr.state,remaps=false,entries=[],mappedKeys=[],mappedDefault=null,mappedValue=null,mappedNode=null;
+                function map(token){var original=nodePointer(token),mapped=null;if(original!==null){need(typeof referenceMap==='function','Camera reference requires an exact per-action node mapping: '+sr.name);mapped=referenceMap(original);need(mapped&&typeof mapped.isInScene==='function'&&mapped.isInScene()===true,'Mapped camera reference is not live: '+sr.name);}if(!same(original,mapped))remaps=true;entries.push({original:original,mapped:mapped});if(sr.type==='DzNodeProperty'&&mapped!==null)need(typeof tr.property.isExcluded==='function'&&tr.property.isExcluded(mapped)===false,'Mapped node is excluded by target property: '+sr.name);return mapped;}
+                if(sr.type==='DzNodeProperty'){mappedValue=map(ss.value);mappedDefault=map(ss.defaultValue);for(var ki=0;ki<ss.keys.length;ki++)mappedKeys.push(map(ss.keys[ki].value));need(typeof tr.property.setDefaultValue==='function'&&typeof tr.property.copyFrom==='function','Node reference copy APIs unavailable: '+sr.name);if(ss.keys.length)need(typeof tr.property.setKeyValue==='function','Node key pointer API unavailable: '+sr.name);else if(ss.canAnimate===false)need(typeof tr.property.setValue==='function','Static node pointer API unavailable: '+sr.name);else {need(ss.canAnimate===true,'Node animation capability unavailable: '+sr.name);need(same(mappedValue,nodePointer(ss.value))&&same(mappedDefault,nodePointer(ss.defaultValue)),'Zero-key animatable node pointer remap has no documented key-free current-value setter: '+sr.name);}}
+                else {mappedNode=map(ss.node);need(typeof ss.mustHaveNode==='boolean'&&typeof tr.property.setNode==='function'&&typeof tr.property.setMustHaveNode==='function','Numeric-node pointer APIs unavailable: '+sr.name);/* isInvalidWithoutNode is a value-validity policy, not a prohibition on an unset node. Preserve native null plus that policy. */}
+                function validate(){need(same(sr.property.getOwner(),source.camera)&&same(tr.property.getOwner(),target.camera),'Reference property owner changed');for(var ei=0;ei<entries.length;ei++){var e=entries[ei];if(e.original!==null)need(same(referenceMap(e.original),e.mapped)&&e.mapped.isInScene()===true,'Reference node ownership changed before write');}if(sr.type==='DzNumericNodeProperty')need(same(sr.property.getNode(),nodePointer(ss.node)),'Source numeric-node reference changed');else{need(same(sr.property.getValue(),nodePointer(ss.value))&&same(sr.property.getDefaultValue(),nodePointer(ss.defaultValue))&&sr.property.getNumKeys()===ss.keys.length,'Source node references changed');for(var vi=0;vi<ss.keys.length;vi++)need(same(sr.property.getKeyValue(vi),nodePointer(ss.keys[vi].value))&&num(sr.property.getKeyTime(vi))===ss.keys[vi].time,'Source node key reference changed');}}
+                function write(method,args){validate();phase('property-write.before',{name:tr.name,referenceMethod:method});need(tr.property[method].apply(tr.property,args)!==false,'Reference setter returned false: '+method);phase('property-write.after',{name:tr.name,referenceMethod:method});}
+                return {remaps:remaps,validate:validate,apply:function(){if(sr.type==='DzNodeProperty'&&!ss.keys.length&&ss.canAnimate===true)return;if(sr.type==='DzNumericNodeProperty'){write('setNode',[mappedNode]);write('setMustHaveNode',[ss.mustHaveNode]);}else{write('setDefaultValue',[mappedDefault]);for(var wi=0;wi<mappedKeys.length;wi++)write('setKeyValue',[wi,mappedKeys[wi]]);if(!mappedKeys.length&&ss.canAnimate===false)write('setValue',[mappedValue]);}}};
+            }
+            for(i=0;i<source.rows.length;i++){var ds=source.rows[i],dt=target.rows[i];if(ds.name==='DOF'&&ds.type==='DzBoolProperty'&&!eq(values(ds.state),values(dt.state))){if((ds.state.keys.length||dt.state.keys.length)&&typeof dt.property.canAnimate==='function'&&dt.property.canAnimate()===true)continue;if(!dofEligible(ds,dt))copyFailure('DOF source/default/API state outside supported copy contract',{propertyCount:source.rows.length,mismatches:[],dofPreflight:{source:ds.state,before:dt.state}});var methods=['beginEdit','finishEdit','cancelEdit','setDefaultBoolValue'];for(var mi=0;mi<methods.length;mi++)need(typeof dt.property[methods[mi]]==='function','DOF static-default API unavailable: '+methods[mi]);}}
+            for(i=0;i<source.rows.length;i++)if(source.rows[i].lamp||target.rows[i].lamp){var sl=source.rows[i].lamp,tl=target.rows[i].lamp;if(!(!sl&&nativeLamp(tl))&&(!sl||!tl||!eq(sl.metadata,tl.metadata))){var differences=[],sm=sl&&sl.metadata||{},tm=tl&&tl.metadata||{},mk;for(mk in sm)if(Object.prototype.hasOwnProperty.call(sm,mk)&&!eq(sm[mk],tm[mk]))differences.push(mk+': saved='+String(sm[mk])+', target='+String(tm[mk]));if(!sl||!tl)differences.push('saved relationship='+!!sl+', target relationship='+!!tl);copyFailure('Headlamp controller relationships differ ('+differences.join('; ')+'). No target property values were written.',{phase:'headlamp-prewrite',property:source.rows[i].name,source:sl?{metadata:sl.metadata,flags:sl.flags}:null,target:tl?{metadata:tl.metadata,flags:tl.flags}:null,targetPropertyWritesStarted:false});}}
+            for(i=0;i<source.rows.length;i++)if(!eq(values(source.rows[i].state),values(target.rows[i].state)))need(target.rows[i].flags.locked===false,'Changed camera property is locked: '+target.rows[i].name);
+            for(i=0;i<source.rows.length;i++)if(source.rows[i].type==='DzNumericNodeProperty'||source.rows[i].type==='DzNodeProperty'){referencePlans[i]=referencePlan(source.rows[i],target.rows[i]);referencePlans[i].validate();if(referencePlans[i].remaps)need(target.rows[i].flags.locked===false,'Changed camera reference property is locked: '+target.rows[i].name);}
+            if(typeof beforeWrites==='function')beforeWrites();
+            for(i=0;i<source.rows.length;i++)if(!eq(values(source.rows[i].state),values(target.rows[i].state))||(referencePlans[i]&&referencePlans[i].remaps)){var tr=target.rows[i];if(referencePlans[i])referencePlans[i].validate();phase('property-write.before',{name:tr.name,type:tr.type,sourceKeys:source.rows[i].state.keys.length,targetKeys:tr.state.keys.length});if(dofEligible(source.rows[i],tr)){need(topology(target),'Camera topology changed before static DOF write');var editing=false;try{tr.property.beginEdit();editing=true;tr.property.setDefaultBoolValue(source.rows[i].state.defaultValue===1);tr.property.finishEdit();editing=false;}catch(editError){if(editing)try{tr.property.cancelEdit();}catch(cancelError){editError.cameraDofCancelError=String(cancelError);}throw editError;}}else {if(referencePlans[i]&&referenceReceipt)referenceReceipt.incomplete=true;var copyResult=tr.property.copyFrom(source.rows[i].property);if(referencePlans[i])need(copyResult!==false,'Native reference copy returned false');}if(tr.lamp){var retained=lampLink(tr.property,flags(tr.property));need(lampStructure(tr.lamp,retained),'Target Headlamp relationship changed during value copy');}phase('property-write.after',{name:tr.name});if(referencePlans[i]){referencePlans[i].apply();if(referenceReceipt)referenceReceipt.incomplete=false;}}
+            return {copyAdjustments:[],outputAudited:false};
+        }
+        return {capture:capture,copy:copy,verify:verify,equivalent:equivalent,topology:topology};
+    }
+    return {create:create};
+}());

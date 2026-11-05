@@ -1,0 +1,64 @@
+// Read-only polygon-buffer verification for a future scoped loadObject profile.
+// No native qualification is granted by this module. It never drops unsupported content.
+var SaveGuardStaticMeshAudit = (function () {
+    function own(o,k) { return !!o && Object.prototype.hasOwnProperty.call(o,k); }
+    function array(v) { return Object.prototype.toString.call(v) === "[object Array]"; }
+    function need(v,s) { if (!v) { throw Error("Static object scope: " + s); } }
+    function num(v) { if (v !== null && v !== undefined && typeof v.valueOf === "function") { v=v.valueOf(); } need(typeof v === "number" && isFinite(v),"non-finite number"); return v; }
+    function call(o,k,arg) { need(o && typeof o[k] === "function","missing read API " + k); return arg === undefined ? o[k]() : o[k](arg); }
+    function keys(o,allowed) { for(var k in o) { if(own(o,k)) { need(allowed.indexOf(k)>=0,"unsupported saved field " + k); } } }
+    function counted(a,what) { need(a && array(a.values) && a.count===a.values.length && a.count>0,"invalid " + what); return a.values; }
+    function create() {
+        var prepared=null, plans={}, last=null;
+        function assess(entry, expected) {
+            var doc=entry.built.document, scene=doc.scene, defs={}, next={}, used={}, vertices=0, facets=0, i,j,k,g,record;
+            need(entry.kind==="merge" && expected && array(expected.nodes) && expected.nodes.length>0,"expected node closure");
+            need(!entry.built.dependencies || entry.built.dependencies.length===0,"external assets require additional acceptance");
+            keys(doc,["file_version","asset_info","node_library","geometry_library","scene"]);keys(scene,["nodes"]);
+            var geometries=doc.geometry_library||[];need(array(geometries),"geometry library");
+            for(i=0;i<geometries.length;i+=1){g=geometries[i];need(g&&typeof g.id==="string"&&g.id&&!own(defs,"$"+g.id),"geometry identity");
+                keys(g,["id","name","label","type","vertices","polygon_groups","polygon_material_groups","polylist"]);
+                need(!own(g,"type")||g.type==="polygon_mesh","only static polygon meshes are covered");
+                var vs=counted(g.vertices,"vertices"),fs=counted(g.polylist,"facets"),groups=counted(g.polygon_groups,"face groups"),materials=counted(g.polygon_material_groups,"default material group");
+                vertices+=vs.length;facets+=fs.length;
+                for(j=0;j<groups.length;j+=1){need(typeof groups[j]==="string"&&groups[j]&&groups.indexOf(groups[j])===j,"face group name");}
+                need(materials.length===1,"single default material group required by this verifier");need(typeof materials[0]==="string"&&materials[0],"default material group name");
+                for(j=0;j<vs.length;j+=1){need(array(vs[j])&&vs[j].length===3,"vertex width");for(k=0;k<3;k+=1){num(vs[j][k]);}}
+                for(j=0;j<fs.length;j+=1){var f=fs[j];need(array(f)&&(f.length===5||f.length===6),"tri/quad width");
+                    for(k=0;k<f.length;k+=1){need(num(f[k])===Math.floor(f[k])&&f[k]>=0,"face index");}
+                    need(f[0]<groups.length&&f[1]===0,"face/material group index");var seen={};for(k=2;k<f.length;k+=1){need(f[k]<vs.length&&!own(seen,"$"+f[k]),"vertex index or repeated corner");seen["$"+f[k]]=true;}
+                }
+                defs["$"+g.id]=g;
+            }
+            for(i=0;i<expected.nodes.length;i+=1){var d=expected.nodes[i];record=d.record;need(d.type==="node"&&record&&record.id===d.id,"only plain nodes are covered");
+                var chain=d.definitionChain||[];for(j=0;j<chain.length;j+=1){keys(chain[j],["id","name","label","type","url","parent","rotation_order","inherits_scale","center_point","end_point","orientation","rotation","translation","scale","general_scale","geometries"]);if(chain[j]!==record){need(!chain[j].geometries||chain[j].geometries.length===0,"definition-attached geometry needs separate coverage");}}
+                var refs=record.geometries||[];need(array(refs)&&refs.length<=1,"one geometry instance per node");
+                if(!refs.length){next["$"+d.id]=null;continue;}
+                var ref=refs[0];keys(ref,["id","url"]);need(typeof ref.id==="string"&&ref.id&&typeof ref.url==="string"&&ref.url.charAt(0)==="#","new local geometry instance required");
+                var id=decodeURIComponent(ref.url.substring(1));need(own(defs,"$"+id),"missing local geometry definition");used["$"+id]=true;next["$"+d.id]=JSON.parse(JSON.stringify(defs["$"+id]));
+            }
+            for(i=0;i<geometries.length;i+=1){need(own(used,"$"+geometries[i].id),"unreferenced geometry payload");}
+            plans=next;prepared=entry;last={phase:"scope",ok:true,nodes:expected.nodes.length,vertices:vertices,facets:facets,nativeAcceptance:false};return true;
+        }
+        function verify(node, expected, entry) {
+            var report={phase:"native-content",stagedId:expected.id,ok:false,nativeAcceptance:false};
+            try { need(prepared===entry&&own(plans,"$"+expected.id),"unprepared node");var g=plans["$"+expected.id],object=call(node,"getObject"),i,j;
+                if(!g){need(!object,"unexpected geometry on a plain parent");}
+                else { need(object&&num(call(object,"getNumShapes"))===1&&num(call(object,"getNumModifiers"))===0,"shape or modifier count");
+                    var shape=call(object,"getShape",0),mesh=call(shape,"getGeometry"),vs=g.vertices.values,fs=g.polylist.values;
+                    need(num(call(mesh,"getNumVertices"))===vs.length&&num(call(mesh,"getNumFacets"))===fs.length,"vertex/facet count");
+                    for(i=0;i<vs.length;i+=1){var v=call(mesh,"getVertex",i),xyz=[num(v.x),num(v.y),num(v.z)];for(j=0;j<3;j+=1){need(Math.abs(xyz[j]-vs[i][j])<=0.0001,"vertex coordinates at " + i);}}
+                    for(i=0;i<fs.length;i+=1){var f=call(mesh,"getFacet",i),want=fs[i],row=[num(f.faceGroupIndex),num(f.materialIndex),num(f.vertIdx1),num(f.vertIdx2),num(f.vertIdx3),num(f.vertIdx4)];
+                        need(call(f,want.length===6?"isQuad":"isTri")===true,"facet shape at " + i);if(want.length===5){need(row[5]===-1,"triangle fourth index");}
+                        for(j=0;j<want.length;j+=1){need(row[j]===want[j],"facet indices at " + i);}
+                    }
+                    report.vertices=vs.length;report.facets=fs.length;
+                }
+                report.ok=true;
+            } catch(e) {report.error=String(e.message||e);}
+            last=report;return report.ok;
+        }
+        return { assess:assess, verify:verify, lastReport:function(){return last?JSON.parse(JSON.stringify(last)):null;} };
+    }
+    return { create:create };
+}());

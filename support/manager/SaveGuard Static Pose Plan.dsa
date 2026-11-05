@@ -1,0 +1,60 @@
+var SaveGuardStaticPosePlan = (function () {
+    function fail(code, message) { var e = new Error(message); e.code = code; throw e; }
+    function key(s) { return "$" + String(s); }
+    function canonical(s) { return decodeURIComponent(String(s || "")).replace(/^\/data\/DAZ 3D\/Genesis (8\/(?:Male|Female)(?: 8_1)?\/Genesis8(?:_1)?(?:Male|Female)\.dsf#|9\/Base\/Genesis9\.dsf#)/,"/data/Daz 3D/Genesis $1"); }
+    function figureIdentity(url){var value=canonical(url),match=/^\/[^?#]+\.(?:dsf|duf)#([^?#/]+)$/i.exec(value);return match?match[1]:null;}
+    function withoutAnimations(doc){var out={},scene={},k;for(k in doc)if(Object.prototype.hasOwnProperty.call(doc,k))out[k]=doc[k];for(k in doc.scene)if(Object.prototype.hasOwnProperty.call(doc.scene,k))scene[k]=doc.scene[k];scene.animations=[];out.scene=scene;return out;}
+    // Resolve saved instance identity before narrowing the source. A definition URL alone
+    // cannot distinguish two Genesis figures using the same asset.
+    function scopeAnimations(doc,sourceId,selective){
+        var cat=selective.catalog(doc,{fullData:true}),by={},rows=cat.rows,tracks=doc.scene&&doc.scene.animations||[],result={ignoredChannels:0,singleFrameZero:[]},i,j;
+        if(cat.errors.length)fail('POSE_SOURCE',cat.errors.join('; '));
+        if(Object.prototype.toString.call(tracks)!=='[object Array]')fail('POSE_ANIMATION_BINDING','Saved animation list is malformed.');
+        for(i=0;i<rows.length;i++)by[key(rows[i].id)]=rows[i];
+        if(!by[key(sourceId)]||by[key(sourceId)].type!=='figure')fail('POSE_SOURCE','Choose a saved figure.');
+        function inside(id,ancestor){var seen={},r=by[key(id)];while(r&&!seen[key(r.id)]){if(r.id===ancestor)return true;seen[key(r.id)]=true;r=by[key(r.parentId)];}return false;}
+        for(i=0;i<tracks.length;i++){
+            var a=tracks[i],ref=selective.parseURI(a.url),candidates=[],node=null,query=canonical(ref.query||'');
+            if(ref.kind==='unsafe')fail('POSE_ANIMATION_BINDING','Cannot prove saved animation ownership: '+a.url);
+            if(!query||query.charAt(0)!=='?')fail('POSE_ANIMATION_BINDING','Saved animation channel path is missing: '+a.url);
+            if(!/^\?rotation(?:\/|$)/.test(query)){result.ignoredChannels++;continue;}
+            if(ref.kind==='local'&&!ref.nodePath){node=by[key(ref.fragment)];if(node)candidates.push(node);}
+            else if(ref.kind==='external'&&ref.nodePath){var parts=ref.nodePath.split('/'),anchor='',previous='';for(j=0;j<parts.length;j++)if(parts[j]){anchor=canonical(parts[j]);if(!by[key(anchor)]||previous&&(anchor===previous||!inside(anchor,previous)))fail('POSE_ANIMATION_BINDING','Saved animation instance path is missing or inconsistent: '+a.url);previous=anchor;}if(!by[key(anchor)])fail('POSE_ANIMATION_BINDING','Saved animation instance is missing: '+a.url);for(j=0;j<rows.length;j++)if(canonical(rows[j].sourceUrl)===canonical(ref.file+'#'+encodeURIComponent(ref.fragment))&&inside(rows[j].id,anchor))candidates.push(rows[j]);}
+            if(candidates.length!==1)fail('POSE_ANIMATION_BINDING','Saved rotation channel has missing or ambiguous ownership: '+a.url);
+            node=candidates[0];if(node.type!=='bone'||node.figureId!==sourceId){result.ignoredChannels++;continue;}
+            var axis=/^\?rotation\/([xyz])\/value$/.exec(query),keys=a.keys;
+            if(!axis||Object.prototype.toString.call(keys)!=='[object Array]'||keys.length!==1||Object.prototype.toString.call(keys[0])!=='[object Array]'||keys[0][0]!==0||typeof keys[0][1]!=='number'||!isFinite(keys[0][1]))fail('POSE_ANIMATION','Selected saved bone rotation has an unsupported track (multiple keys or a key outside frame 0): '+a.url+'. Static pose does not import this track.');
+            result.singleFrameZero.push({nodeId:node.id,axis:['x','y','z'].indexOf(axis[1]),value:keys[0][1],url:a.url});
+        }
+        return result;
+    }
+    function extract(doc, sourceId, selective, options) {
+        var animationScope=scopeAnimations(doc,sourceId,selective),source = selective.poseSource(withoutAnimations(doc), sourceId, options), i, n, roots = [], bones = [], seen = {}, byId = {};
+        if (!source.ready) { fail("POSE_SOURCE", source.errors.join("; ")); }
+        function noKeys(v) { var p; if (!v || typeof v !== "object") { return; } for (p in v) { if (Object.prototype.hasOwnProperty.call(v,p)) { if ((p === "keys" || p === "keyframes") && v[p] && v[p].length) { fail("POSE_ANIMATION", "Selected saved bone rotation contains inline keys; this serialization requires separate static-pose support."); } noKeys(v[p]); } } }
+        for (i=0;i<source.nodes.length;i+=1) { n=source.nodes[i]; if (byId[key(n.id)]) { fail("POSE_DUPLICATE", "Duplicate source node."); } byId[key(n.id)]=n; if(n.id===sourceId){roots.push(n);} }
+        if(roots.length!==1 || roots[0].type!=="figure" || !figureIdentity(roots[0].sourceUrl)) { fail("POSE_FIGURE", "Pose requires an exact external figure definition."); }
+        for(i=0;i<doc.scene.nodes.length;i+=1){if(doc.scene.nodes[i].id!==sourceId&&byId[key(doc.scene.nodes[i].id)]){noKeys(doc.scene.nodes[i].rotation);}}
+        for(i=0;i<source.nodes.length;i+=1){
+            n=source.nodes[i]; if(n.id===sourceId){continue;} if(n.type!=="bone"){fail("POSE_BONE","Unexpected source node type.");}
+            var identity=canonical(n.sourceUrl)+"|"+n.internalName, r=n.state.rotation, parent=byId[key(n.parentId)];
+            if(seen[key(identity)] || !parent || !n.internalName || !n.sourceUrl){fail("POSE_IDENTITY","Missing or duplicate bone identity/hierarchy.");}seen[key(identity)]=true;
+            if(!r || r.length!==3){fail("POSE_VALUE","Incomplete rotation defaults.");}
+            for(var a=0;a<3;a+=1){if(typeof r[a]!=="number" || !isFinite(r[a])){fail("POSE_VALUE","Non-finite rotation.");}}
+            var orientation = [], rawOrientation = n.state.orientation; if (!rawOrientation || rawOrientation.length !== 3) { fail("POSE_ORIENTATION", "Missing resolved orientation."); } for(var o=0;o<3;o+=1){var ov=rawOrientation[o]; ov=typeof ov==="number"?ov:(typeof ov.current_value==="number"?ov.current_value:ov.value); if(typeof ov!=="number" || !isFinite(ov)){fail("POSE_ORIENTATION","Invalid orientation.");}orientation.push(ov);} bones.push({sourceNodeId:n.id,sourceUrl:canonical(n.sourceUrl),internalName:n.internalName,parentSourceNodeId:n.parentId,rotationOrder:n.state.rotation_order,orientation:orientation,rotation:[r[0],r[1],r[2]]});
+        }
+        if(!bones.length){fail("POSE_EMPTY","No source bones.");}
+        var singleSeen={};for(i=0;i<animationScope.singleFrameZero.length;i++){var entry=animationScope.singleFrameZero[i],token=key(entry.nodeId+':'+entry.axis),found=null;for(var bi=0;bi<bones.length;bi++)if(bones[bi].sourceNodeId===entry.nodeId)found=bones[bi];if(singleSeen[token]||!found||found.rotation[entry.axis]!==entry.value)fail('POSE_ANIMATION','Saved frame-zero rotation key is duplicate or differs from the saved pose value: '+entry.url);singleSeen[token]=true;}
+        return {schema:1,scope:"static-bone-rotations-only",sourceFigureId:sourceId,sourceUrl:canonical(roots[0].sourceUrl),rootTransformsIncluded:false,animationKeysApplied:false,nativeVerified:false,definitionFiles:source.definitionFiles,bones:bones};
+    }
+    function match(plan,target){
+        if(!target || canonical(target.sourceUrl)!==plan.sourceUrl || !target.key){fail("POSE_TARGET","Select the same base figure asset as the saved pose.");}
+        var map={}, bySource={}, assignments=[], i,n,b,t,p,keys={};
+        for(i=0;i<target.bones.length;i+=1){n=target.bones[i];var identity=canonical(n.sourceUrl)+"|"+n.internalName;if(map[key(identity)] || !n.key || keys[key(n.key)]){fail("POSE_TARGET_DUPLICATE","Duplicate target bone identity.");}map[key(identity)]=n;keys[key(n.key)]=true;}
+        bySource[key(plan.sourceFigureId)]={key:target.key};
+        for(i=0;i<plan.bones.length;i+=1){b=plan.bones[i];t=map[key(b.sourceUrl+"|"+b.internalName)];if(!t){fail("POSE_TARGET_MISSING","Missing compatible target bone: "+b.internalName);}bySource[key(b.sourceNodeId)]=t;}
+        for(i=0;i<plan.bones.length;i+=1){b=plan.bones[i];t=bySource[key(b.sourceNodeId)];p=bySource[key(b.parentSourceNodeId)];if(!p || t.parentKey!==p.key || t.rotationOrder!==b.rotationOrder){fail("POSE_TARGET_RIG","Target hierarchy or rotation order differs.");}for(var a=0;a<3;a+=1){assignments.push({targetKey:t.key,sourceNodeId:b.sourceNodeId,axis:["x","y","z"][a],value:b.rotation[a]});}}
+        return assignments;
+    }
+    return {canonical:canonical,figureIdentity:figureIdentity,extract:extract,match:match,scopeAnimations:scopeAnimations,withoutAnimations:withoutAnimations,nativeVerified:false};
+}());

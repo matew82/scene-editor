@@ -1,0 +1,66 @@
+// Session-local plain data only. Never retains DAZ objects or reads scene properties.
+var SaveGuardLastErrorReport = (function () {
+ var last = null;
+ function clean(value) {
+  var s=String(value===undefined?'unknown':value);
+  s=s.replace(/(?:https?:\/\/)[^\s<>"']+/gi,'[URL]');
+  s=s.replace(/(?:[A-Za-z]:[\\\/]|\\\\|\/(?:Users|home|tmp|var|mnt|opt|Volumes)\/)[^\r\n"<>]*/g,'[private path]');
+  s=s.replace(/\b(?:ghp_|github_pat_|sk-proj-)[A-Za-z0-9_-]+/g,'[credential]').replace(/\bAKIA[A-Z0-9]{16}\b/g,'[credential]');
+  return s.length>4096?s.slice(0,4096)+' [truncated]':s;
+ }
+ function details(error) { try { return {message:clean(error&&error.message!==undefined?error.message:error),code:clean(error&&error.code),stack:error&&error.stack?clean(error.stack):'unavailable'}; } catch(ignore) { return {message:'Error details unavailable',stack:'unavailable'}; } }
+ // Unified catalog/inspect/host envelope. recoveryRequired stays explicit — never inferred from message text.
+ function envelope(error, stage, extras) {
+  extras = extras || {};
+  var code = "UNKNOWN", message = "", recoveryRequired = extras.recoveryRequired === true, cancelled = extras.cancelled === true;
+  try {
+   if (error && typeof error === "object") {
+    if (error.code !== undefined && error.code !== null && String(error.code)) { code = String(error.code); }
+    if (error.message !== undefined) { message = String(error.message); }
+    else if (error.error !== undefined) { message = String(error.error); }
+    if (error.recoveryRequired === true) { recoveryRequired = true; }
+    if (error.cancelled === true || code === "CANCELLED") { cancelled = true; }
+   } else if (error !== undefined && error !== null) { message = String(error); }
+  } catch (ignoreEnvelope) { message = "Error envelope unavailable"; }
+  if (!message) { message = code; }
+  return { code: clean(code), stage: clean(stage || "unknown"), message: clean(message), recoveryRequired: recoveryRequired, cancelled: cancelled };
+ }
+ function fromCatch(error, stage, extras) {
+  var body = envelope(error, stage, extras), e = new Error(body.message);
+  e.code = body.code; e.stage = body.stage; e.recoveryRequired = body.recoveryRequired; e.cancelled = body.cancelled;
+  return e;
+ }
+ function buildIdentity() {
+  // Generated bundles inject the digest of their source with this identity declaration omitted.
+  // Standalone source must not claim a product version or a digest it cannot establish.
+  var identity=typeof SaveGuardBuildIdentity!=='undefined'?SaveGuardBuildIdentity:null;
+  return identity&&typeof identity.sourceSHA256==='string'&&/^[a-f0-9]{64}$/.test(identity.sourceSHA256)?'source-sha256:'+identity.sourceSHA256:'unavailable (source-only or unverified bundle)';
+ }
+ function candidateIdentity() { var identity=typeof SaveGuardBuildIdentity!=='undefined'?SaveGuardBuildIdentity:null;return identity&&typeof identity.candidateId==='string'&&/^[a-zA-Z0-9._-]{1,128}$/.test(identity.candidateId)?identity.candidateId:'unknown'; }
+ function capture(meta,error,result) {
+  try {
+   if(meta&&meta.cancelled===true)return false;
+   if(meta&&meta.stage==='cleanup-failed'&&last){last.cleanupError=details(error).message;return true;}
+   var record={reportVersion:1,timeUTC:new Date().toISOString(),candidateId:candidateIdentity(),build:buildIdentity(),message:details(error).message},keys=['stage','action','dazVersion','elapsedMillis','sourceId','sourceFrame','sourceFPS','context'],i,k;
+   for(i=0;i<keys.length;i++){k=keys[i];record[k]=meta&&meta[k]!==undefined?clean(meta[k]):'unknown';}
+   var info=result&&result.errorDetails?result.errorDetails:details(error);record.stack=clean(info.stack);record.code=result&&result.code!==undefined?clean(result.code):clean(info.code);
+   try {
+    var env = result && result.envelope ? result.envelope : envelope(error, meta && meta.stage, { recoveryRequired: result && result.recoveryRequired === true, cancelled: meta && meta.cancelled === true });
+    record.recoveryRequired = error&&typeof error.recoveryRequired==='boolean'?String(error.recoveryRequired):result&&typeof result.recoveryRequired==='boolean'?String(result.recoveryRequired):result&&result.envelope&&typeof result.envelope.recoveryRequired==='boolean'?String(result.envelope.recoveryRequired):'unknown';
+    if (env.stage && record.stage === "unknown") { record.stage = env.stage; }
+   } catch (ignoreEnvelopeField) { record.recoveryRequired = "unknown"; }
+   keys=['nativeExecuted','nativeCode','nativeMillis','mutationStarted','undoAccepted','undoStateUnknown','cursorReturnRequested','temporaryRemoved','cleanupMillis','cleanupError','undoError','cursorReturnError','selectionError'];
+   for(i=0;i<keys.length;i++){k=keys[i];record[k]=result&&result[k]!==undefined?clean(result[k]):'unknown';}
+   last=record;return true;
+  } catch(ignoreCapture) { return false; }
+ }
+ function text(product) { if(!last)return '';var lines=[(product||'SaveGuard')+' Last Error Report','No scene-output audit. Unknown fields are not inferred.'],k;for(k in last)if(Object.prototype.hasOwnProperty.call(last,k))lines.push(k+': '+last[k]);return lines.join('\n'); }
+ function show(env,parent) {
+  if(!last)return;var popup=new env.DzBasicDialog(parent),edit=new env.DzTextEdit(popup),copy=new env.DzPushButton(popup),handler;
+  popup.caption=(env.productName||'SaveGuard')+' - Last Error Report';popup.getWidget().objectName='SceneEditorLastErrorReportV1';popup.minWidth=650;popup.minHeight=420;popup.showHelpButton(false);popup.showCancelButton(false);popup.setAcceptButtonText('Close');
+  edit.readOnly=true;edit.acceptRichText=false;edit.plainText=text(env.productName);edit.minHeight=320;copy.text='Copy';popup.addWidget(edit);popup.addWidget(copy);
+  handler=function(){try{edit.selectAll();edit.copy();}catch(ignoreCopy){copy.text='Copy unavailable - select text and press Ctrl+C';}};
+  env.connect(copy,'clicked()',handler);try{popup.exec();}finally{env.disconnect(copy,'clicked()',handler);}
+ }
+ return {clean:clean,details:details,envelope:envelope,fromCatch:fromCatch,capture:capture,text:text,has:function(){return last!==null;},show:show};
+}());

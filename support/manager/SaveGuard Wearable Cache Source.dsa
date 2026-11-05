@@ -1,0 +1,33 @@
+// Source-only fitted-wearable cache projection. Native planning/binding remains per action.
+var SaveGuardWearableCacheSource=(function(){
+ function need(v,m){if(!v)throw Error("Wearable cache: "+m);}
+ function clone(v){return JSON.parse(JSON.stringify(v));}
+ function own(o,k){return Object.prototype.hasOwnProperty.call(o,k);}
+ function records(d,g){return g.indexOf("scene.")===0?(d.scene[g.substring(6)]||[]):(d[g]||[]);}
+ function sourceIds(doc){var all=[],i,j;var gs=["node_library","geometry_library","modifier_library","material_library","image_library","uv_set_library","scene.nodes","scene.uvs","scene.modifiers","scene.materials","scene.animations","scene.extra"];for(i=0;i<gs.length;i++){var a=records(doc,gs[i]);for(j=0;j<a.length;j++){if(typeof a[j].id==="string")all.push(a[j].id);if(gs[i]==="scene.nodes")for(var gi=0;gi<(a[j].geometries||[]).length;gi++)if(typeof a[j].geometries[gi].id==="string")all.push(a[j].geometries[gi].id);}}return all;}
+ function project(doc,id,resolve,occupied){
+  need(doc&&doc.scene&&doc.scene.nodes,"Source nodes unavailable");need(!(doc.scene.animations||[]).length,"Animated source uses normal preparation");
+  var rows=doc.scene.nodes,root=null,by={},i,j,k;
+  for(i=0;i<rows.length;i++){need(!own(by,"$"+rows[i].id),"Duplicate source node");by["$"+rows[i].id]=i;if(rows[i].id===id)root=rows[i];}
+  need(root&&root.conform_target&&SaveGuardSelective.parseURI(root.url).kind==="external","This cache projection supports external fitted wearables");
+  var prepared=SaveGuardWearablePlan.prepare(doc,id,SaveGuardSelective,{resolveAssetDocument:resolve});need(!prepared.localRig&&!prepared.targetContract.shell&&!prepared.targetContract.boneParent,"Subtype uses normal preparation");
+  var selected={},locators=prepared.plan.locators,out={},groups=[],p;
+  function keep(g,n){need(n>=0&&n<records(doc,g).length,"Missing source record");if(!selected[g]){selected[g]={};groups.push(g);}selected[g]["$"+n]=true;}
+  for(i=0;i<locators.length;i++){p=/^([^\[]+)\[([0-9]+)\]$/.exec(locators[i]);need(p,"Unsupported nested locator");keep(p[1],Number(p[2]));}
+  var pending=[prepared.sourceTargetId],seen={};
+  while(pending.length){var owner=pending.pop();need(owner&&!seen["$"+owner],"Ambiguous owner ancestry");seen["$"+owner]=true;need(own(by,"$"+owner),"Missing source owner");var n=rows[by["$"+owner]];need(SaveGuardSelective.parseURI(n.url||"").kind==="external","Local owner context uses normal preparation");keep("scene.nodes",by["$"+owner]);if(n.parent){var r=SaveGuardSelective.parseURI(n.parent);need(r.kind==="local"&&!r.query&&!r.nodePath,"Unsupported owner ancestry");pending.push(r.fragment);}}
+  for(k in doc)if(own(doc,k)&&k!=="scene"&&k!=="saveguard_cache_source_ids"&&!/_library$/.test(k))out[k]=clone(doc[k]);out.scene={};
+  if(doc.scene.extra){for(i=0;i<doc.scene.extra.length;i++)need(doc.scene.extra[i].type==="studio_scene_settings","Unscoped scene extension uses normal preparation");out.scene.extra=clone(doc.scene.extra);}
+  for(i=0;i<groups.length;i++){var g=groups[i],values=records(doc,g),kept=[];for(j=0;j<values.length;j++)if(selected[g]["$"+j])kept.push(clone(values[j]));if(g.indexOf("scene.")===0)out.scene[g.substring(6)]=kept;else out[g]=kept;}
+  // Preserve source-name occupancy without retaining unrelated scene records.
+  var ids=occupied,all=[];
+  if(ids){need(Object.prototype.toString.call(ids)==="[object Array]","Invalid source ID inventory");for(i=0;i<ids.length;i++){need(typeof ids[i]==="string"&&ids[i]&&all.indexOf(ids[i])<0,"Invalid or duplicate source ID");all.push(ids[i]);}}
+  else all=sourceIds(doc);
+  
+  if(occupied){var required=sourceIds(out);for(i=0;i<required.length;i++)if(required[i])need(all.indexOf(required[i])>=0,"Missing retained source ID");}
+  var check=SaveGuardWearablePlan.prepare(out,id,SaveGuardSelective,{resolveAssetDocument:resolve});need(JSON.stringify(check.targetContract)===JSON.stringify(prepared.targetContract),"Projected binding contract differs");
+  var unique=[],used={};for(i=0;i<all.length;i++)if(all[i]&&!used["$"+all[i]]){used["$"+all[i]]=true;unique.push(all[i]);}return {document:out,sourceOccupiedIds:unique};
+ }
+ function readRecords(doc,requests){var out={},g,i,n,a;for(g in requests)if(own(requests,g)){a=records(doc,g);out[g]=[];for(i=0;i<requests[g].length;i++){n=requests[g][i];need(typeof n==="number"&&n>=0&&n%1===0&&n<a.length,"Invalid cached record index");out[g].push({index:n,record:a[n]});}}return out;}
+ return {project:project,readRecords:readRecords};
+}());

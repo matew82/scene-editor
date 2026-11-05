@@ -1,0 +1,95 @@
+var SaveGuardCameraActions = (function () {
+    function wrap(base, root, env) {
+        var out = {}, key, current = null, checker = null, pending = null, camera = null,
+            closed = false, busy = false, blocked = false;
+        for (key in base) { if (Object.prototype.hasOwnProperty.call(base, key)) { out[key] = base[key]; } }
+        // Share Host's capability bag (do not snapshot). Lazy ensureNativeCapabilities fills flags in place.
+        out.capabilities = base.capabilities;
+        var supported = SaveGuardNativeRuntime.hostSupported(env);
+        function syncCameraCapabilities() {
+            out.capabilities = base.capabilities;
+            out.capabilities.addCamera = supported; out.capabilities.replaceCamera = supported;
+            return out.capabilities;
+        }
+        syncCameraCapabilities();
+        out.ensureNativeCapabilities = function () {
+            if (typeof base.ensureNativeCapabilities === "function") { base.ensureNativeCapabilities(); }
+            return syncCameraCapabilities();
+        };
+        function isCancelled() { return typeof base.isActionCancelled === 'function' && base.isActionCancelled() === true; }
+        function isCamera(r) { return r && (r.actionKey === 'addCamera' || r.actionKey === 'replaceCamera'); }
+        function need(v, message) { if (!v) { throw Error(message); } }
+        function release() { pending = null; if (camera) { camera.close(); camera = null; } }
+        function errorText(e) { return e && e.message ? String(e.message) : String(e); }
+        function signature(r) { return JSON.stringify([r.actionKey,r.versionId,r.manifestPath,r.rowId,r.rowKey,r.sourceId,r.rowType,r.inspectionToken,r.tabKey]); }
+        function validate(r) {
+            need(!closed && !blocked && supported && current, 'Camera actions are unavailable; inspect a saved copy on a supported host.');
+            need(r && isCamera(r) && r.tabKey === 'cameras' && r.versionId === current.version.id && r.manifestPath === current.version.manifestPath && r.inspectionToken === current.token, 'Saved camera selection changed; inspect again.');
+            var pin = current.rows['$' + r.rowKey];
+            need(pin && pin.id === r.rowId && pin.sourceId === r.sourceId && pin.type === r.rowType, 'Saved camera row changed; select it again.');
+            need(typeof checker === 'function' && checker(r) === true, 'Camera selection changed; select it again.');
+            var prefs = base.readSettings();
+            need(prefs.lowRamMode !== true, 'Camera actions require Low RAM mode off; change settings and inspect again.');
+            need(base.isInspectionCurrent(current.version,current.token,prefs) === true, 'Saved copy or inspection settings changed; inspect again.');
+            return base.validateVersion(current.version);
+        }
+        out.inspectVersion = function (version, options) {
+            need(!busy, 'Wait for the current camera action.'); release(); current = null;
+            var result = base.inspectVersion(version, options);
+            if (!result || result.error) { return result; }
+            var rows = result.tabs && result.tabs.cameras || [], pins = {}, i, row;
+            for (i = 0; i < rows.length; i += 1) {
+                row = rows[i];
+                // Clone: inspector rows can also occur in All Objects and its identity cache.
+                var copy = {}; for (key in row) { if (Object.prototype.hasOwnProperty.call(row,key)) { copy[key] = row[key]; } }
+                copy.actionKeys = [];
+                if (row.actionKeys && row.actionKeys.indexOf('loadCamera') >= 0 && row.sourceId && row.rowKey) {
+                    need(!pins['$' + row.rowKey], 'Duplicate saved camera row.');
+                    pins['$' + row.rowKey] = {id:String(row.id),sourceId:String(row.sourceId),type:row.type};
+                    copy.actionKeys = ['addCamera','replaceCamera'];
+                }
+                rows[i] = copy;
+            }
+            current = {version:version,token:result.inspectionToken,rows:pins};
+            return result;
+        };
+        out.bindActionSelectionChecker = function (fn) {
+            release(); checker = fn; var unbind = base.bindActionSelectionChecker(fn);
+            return function () { if (checker === fn) { checker = null; release(); } unbind(); };
+        };
+        out.prepareAction = function (request) {
+            if (!isCamera(request)) { return base.prepareAction.apply(base, arguments); }
+            need(!busy, 'Wait for the current camera action.'); busy = true;
+            try {
+                release(); var version = validate(request);
+                camera = SaveGuardCameraManager.create(env, root + '/camera-actions');
+                var loaded = camera.open(version.path,{version:current.version,request:request,mode:base.readSettings().loadCacheMode||"protected",deep:base.readSettings().deepValidation===true,isCancelled:isCancelled}), found = null, i;
+                for (i = 0; i < loaded.cameras.length; i += 1) { if (loaded.cameras[i].id === request.sourceId) { need(!found,'Duplicate saved camera identity.'); found = loaded.cameras[i]; } }
+                need(found, 'Selected saved camera is unavailable.'); need(!found.error, errorText(found && found.error));
+                validate(request);
+                var receipt = {ok:true,request:request};
+                pending = {receipt:receipt,request:JSON.parse(JSON.stringify(request)),signature:signature(request)};
+                return receipt;
+            } catch (e) { release(); return {ok:false,error:errorText(e),cancelled:!!(e&&e.code==='CANCELLED'),code:e&&e.code}; }
+            finally { busy = false; }
+        };
+        out.runAction = function (receipt) {
+            if ((!pending || receipt !== pending.receipt) && !(receipt && isCamera(receipt.request))) { return base.runAction(receipt); }
+            need(!busy, 'Wait for the current camera action.'); busy = true;
+            try {
+                need(pending && receipt === pending.receipt && signature(receipt.request) === pending.signature, 'Camera action receipt changed or expired.');
+                var request = pending.request; validate(request); pending = null;
+                var report = camera.apply(request.sourceId,request.actionKey === 'addCamera' ? 'add' : 'replace',false,{isCancelled:isCancelled}), result = report.result;
+                if (typeof print === 'function') { print('SAVEGUARD_CAMERA_MANAGER_RESULT ' + JSON.stringify(report)); }
+                if (camera.isBlocked() || result && result.status === 'recovery-required') { blocked = true; out.capabilities.addCamera = false; out.capabilities.replaceCamera = false; }
+                if (!result || result.ok !== true) { return {ok:false,error:errorText(report.error || result && result.error || 'Camera action failed.') + (blocked ? result && result.candidate === 'native-camera-output-v1' ? ' STOP: Undo ownership or completion is uncertain; inspect the scene before continuing.' : ' STOP: rollback could not be verified.' : result && result.rollback && result.rollback.verified ? ' Previous camera state restored.' : ''),cameraReport:report,cancelled:report.cancelled===true||!!(result&&result.cancelled),code:report.cancelled===true||result&&result.cancelled?'CANCELLED':undefined}; }
+                return {ok:true,message:(result.operation === 'add-new-camera' ? 'Camera added.' : 'Existing camera replaced.'),cameraReport:report};
+            } catch (e) { return {ok:false,error:errorText(e),cancelled:!!(e&&e.code==='CANCELLED'),code:e&&e.code}; }
+            finally { release(); busy = false; }
+        };
+        out.cancelAction = function (receipt) { if (pending && receipt === pending.receipt || receipt && isCamera(receipt.request)) { release(); return {ok:true,cancelled:true}; } return base.cancelAction(receipt); };
+        out.close = function () { if (closed) { return; } closed = true; checker = null; current = null; release(); base.close(); };
+        return out;
+    }
+    return {wrap:wrap};
+}());

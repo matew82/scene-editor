@@ -1,0 +1,20 @@
+// Pure comparison only. Never sets or clears a native dirty flag.
+var SaveGuardRollbackFlags = (function () {
+    function compare(before, after, fields) {
+        var result = { policy: "preserve-or-raise-v1", ok: true, exact: true, raised: [], errors: [] };
+        for (var i = 0; i < fields.length; i += 1) {
+            var field = fields[i], a = before && before[field.name], b = after && after[field.name];
+            if (field.optional === true && a === null && b === null) { continue; }
+            if (typeof a !== "boolean" || typeof b !== "boolean") {
+                result.errors.push(field.name + " is unavailable or changed availability."); result.exact = false;
+            } else if (a === false && b === true) {
+                result.raised.push(field.name); result.exact = false;
+            } else if (a !== b) {
+                result.errors.push(field.name + " was unexpectedly cleared."); result.exact = false;
+            }
+        }
+        result.ok = result.errors.length === 0;
+        return result;
+    }
+    return { compare: compare, policy: "preserve-or-raise-v1" };
+}());

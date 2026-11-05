@@ -1,0 +1,849 @@
+// Pure ES5 DSON catalog and dependency extraction. No scene or filesystem APIs.
+var SaveGuardMinimalSelector = (function () {
+    function own(o, k) { return !!o && Object.prototype.hasOwnProperty.call(o, k); }
+    function key(s) { return "$" + s; }
+    function array(a) { return Object.prototype.toString.call(a) === "[object Array]"; }
+    function obj(a) { return !!a && typeof a === "object" && !array(a); }
+    function str(a, k) { return a && typeof a[k] === "string" ? a[k] : ""; }
+    function fail(code, message) { var e = new Error(message); e.code = code; throw e; }
+function check(options){if(options&&typeof options.isCancelled==='function'&&options.isCancelled()){fail('CANCELLED','Cancelled while preparing native source closure');}}
+    function get(a, s) { return own(a, key(s)) ? a[key(s)] : null; }
+    function addUnique(a, s) { if (a.indexOf(s) < 0) { a.push(s); } }
+    function clone(v) {
+        if(!v||typeof v!=='object')return v;
+        var stack=[];
+        function enter(value){for(var i=0;i<stack.length;i++)if(stack[i].value===value)fail('OBJECT_CYCLE','Cyclic saved record.');var frame={value:value,out:array(value)?[]:{},keys:Object.keys(value),next:0};stack.push(frame);return frame.out;}
+        var result=enter(v);while(stack.length){var frame=stack[stack.length-1];if(frame.next===frame.keys.length){stack.pop();continue;}var k=frame.keys[frame.next++];if(k==='__proto__')fail('UNSAFE_KEY','Unsupported JSON member __proto__.');var item=frame.value[k],copied=item&&typeof item==='object'?enter(item):item;
+            if(k==='selected')Object.defineProperty(frame.out,k,{value:copied,enumerable:true,writable:true,configurable:true});else frame.out[k]=copied;
+        }return result;
+    }
+    function decode(s) { try { return decodeURIComponent(s); } catch (e) { fail("URI", "Invalid URI escape in " + s); } }
+    var libraries = ["geometry_library", "node_library", "uv_set_library", "modifier_library", "image_library", "material_library"];
+    var sceneGroups = ["nodes", "uvs", "modifiers", "materials", "animations", "extra"];
+    // Puppeteer pose_node_data.node is a saved bone name, not a DSON URI.
+    // Require the exact typed ancestry; identically named fields elsewhere remain references.
+    function isPuppeteerNodeName(stack,k){if(k!=="node"||stack.length<7)return false;var n=stack.length,r=stack[n-7].value,layers=stack[n-6].value,layer=stack[n-5].value,poses=stack[n-4].value,pose=stack[n-3].value,nodes=stack[n-2].value;return !!(r&&r.type==="studio/element_data/puppeteer"&&r.layers===layers&&array(layers)&&layer&&layer.poses===poses&&array(poses)&&pose&&pose.pose_node_data===nodes&&array(nodes));}
+    var uriFields = { url: 1, source: 1, parent: 1, parent_in_place: 1, conform_target: 1, node: 1,
+        geometry: 1, uv_set: 1, default_uv_set: 1, image: 1, image_file: 1, output: 1, current_camera: 1,
+        target: 1, geometry_url: 1, node_url: 1 };
+
+    // Only ID-based DSON object references are accepted for imports. Never labels.
+    function parseURI(raw) {
+        if (typeof raw !== "string" || !raw) { return { kind: "empty", raw: raw || "" }; }
+        var text = raw, scheme = "", nodePath = "", file = "", hash, query = "", fragment = "", prefix, at;
+        if (/^name:/.test(text) || text.indexOf("@selection") >= 0) { return { kind: "unsafe", raw: raw, reason: "Name/selection addressing can bind an unrelated current scene node." }; }
+        if (/^id:\//.test(text)) { scheme = "id:/"; text = text.substring(4); }
+        hash = text.indexOf("#");
+        if (hash < 0) { return { kind: "file", raw: raw, file: text, nodePath: "", fragment: "", query: "", scheme: scheme }; }
+        if (text.indexOf("#", hash + 1) >= 0) { return { kind: "unsafe", raw: raw, reason: "Multiple fragment delimiters." }; }
+        prefix = text.substring(0, hash); fragment = text.substring(hash + 1);
+        at = fragment.indexOf("?"); if (at >= 0) { query = fragment.substring(at); fragment = fragment.substring(0, at); }
+        if (!fragment || prefix.indexOf("?") >= 0) { return { kind: "unsafe", raw: raw, reason: "Unsupported URI/property selector form." }; }
+        at = prefix.indexOf(":");
+        if (at >= 0) { nodePath = prefix.substring(0, at); file = prefix.substring(at + 1); }
+        else { file = prefix; }
+        return { kind: file ? "external" : "local", raw: raw, nodePath: nodePath, file: file,
+            fragment: decode(fragment), query: query, scheme: scheme };
+    }
+    function pathIds(uri) {
+        var out = [], p = (uri.nodePath || "").split("/"), i;
+        for (i = 0; i < p.length; i += 1) { if (p[i]) { out.push(decode(p[i])); } }
+        return out;
+    }
+    function simpleLocal(raw) {
+        var p = parseURI(raw); return p.kind === "local" && (!p.nodePath || p.nodePath === p.fragment) && !p.query ? p.fragment : "";
+    }
+    function recordsFor(doc, group) { var a = group.indexOf("scene.") === 0 ? (doc.scene || {})[group.substring(6)] : doc[group]; return array(a) ? a : []; }
+    function index(doc, options) {
+        check(options);
+        if (!obj(doc) || !obj(doc.scene)) { fail("DOCUMENT", "A complete saved scene document is required."); }
+        var byId = {}, byLocator = {}, records = [], nodes = [], errors = [], i, j, a, g;
+        function record(value, group, n, owner) {
+            check(options);
+            if (!obj(value)) { fail("DOCUMENT", "Non-object record in " + group); }
+            var r = { value: value, group: group, index: n, locator: group + "[" + n + "]", owner: owner || null, id: str(value, "id") };
+            records.push(r); byLocator[key(r.locator)] = r;
+            if (r.id) {
+                if (own(byId, key(r.id))) { byId[key(r.id)] = null; errors.push("Duplicate file-scoped ID: " + r.id); }
+                else { byId[key(r.id)] = r; }
+            } else if (group !== "scene.animations" && group !== "scene.extra") { errors.push("Missing ID in " + r.locator); }
+            return r;
+        }
+        for (i = 0; i < libraries.length; i += 1) {
+            g = libraries[i]; a = recordsFor(doc, g);
+            for (j = 0; j < a.length; j += 1) { record(a[j], g, j); }
+        }
+        for (i = 0; i < sceneGroups.length; i += 1) {
+            g = "scene." + sceneGroups[i]; a = recordsFor(doc, g);
+            for (j = 0; j < a.length; j += 1) {
+                var r = record(a[j], g, j), geos, k;
+                if (g === "scene.nodes") {
+                    nodes.push(r); geos = a[j].geometries;
+                    if (geos && !array(geos)) { fail("INCOMPLETE_DATA", "Geometry payload was projected to metadata in " + r.locator); }
+                    for (k = 0; geos && k < geos.length; k += 1) { record(geos[k], r.locator + ".geometries", k, r); }
+                }
+            }
+        }
+        return { cancellationOptions:options, document: doc, byId: byId, byLocator: byLocator, records: records, nodes: nodes, errors: errors };
+    }
+    function definition(ix, node, seen) {
+        var p = parseURI(str(node, "url") || str(node, "source")), r;
+        if (p.kind !== "local") { return null; }
+        r = get(ix.byId, p.fragment); if (!r || r.group !== "node_library") { return null; }
+        seen = seen || {}; if (get(seen, r.id)) { return r.value; } seen[key(r.id)] = true;
+        return r.value;
+    }
+    function effectiveType(ix, n) {
+        var d = definition(ix, n), t = str(d, "type"), seen = {}, inherited;
+        while (d && !t && str(d, "source") && !get(seen, str(d, "id"))) {
+            check(ix.cancellationOptions);seen[key(str(d, "id"))] = true; inherited = definition(ix, d); d = inherited; t = str(d, "type");
+        }
+        if (t) { return { type: t, evidence: "saved-definition" }; }
+        if (n.preview && /^(figure|bone|camera|light|node)$/.test(n.preview.type)) { return { type: n.preview.type, evidence: "saved-preview" }; }
+        d = definition(ix, n); return { type: d && !d.source ? "node" : "unknown", evidence: d && !d.source ? "definition-default" : "unresolved-external-definition" };
+    }
+    function hasExtra(n, re) {
+        var a = n && n.extra || [], i; for (i = 0; i < a.length; i += 1) { if (re.test(str(a[i], "type"))) { return true; } } return false;
+    }
+    function channels(material, result) {
+        var a = material && material.extra || [], i, j, c;
+        result = result || {};
+        for (i = 0; i < a.length; i += 1) {
+            for (j = 0; a[i].channels && j < a[i].channels.length; j += 1) {
+                c = a[i].channels[j].channel; if (c && c.id) { result[key(c.id)] = c; }
+            }
+        }
+        return result;
+    }
+    function channelValue(c) { return c && own(c, "current_value") ? c.current_value : c && c.value; }
+    function nonzero(v) { var i; if (array(v)) { for (i = 0; i < v.length; i += 1) { if (Number(v[i]) > 0) { return true; } } return false; } return typeof v === "number" && v > 0; }
+    function emission(ix, material) {
+        var merged = {}, seen = {}, chain = [], cur = material, p, r, i;
+        while (cur) {
+            chain.push(cur); p = parseURI(str(cur, "url") || str(cur, "source"));
+            if (p.kind !== "local" || get(seen, p.fragment)) { break; }
+            seen[key(p.fragment)] = true; r = get(ix.byId, p.fragment); cur = r && r.group === "material_library" ? r.value : null;
+        }
+        for (i = chain.length - 1; i >= 0; i -= 1) { channels(chain[i], merged); }
+        var color = get(merged, "Emission Color"), luminance = get(merged, "Luminance"), enabled = get(merged, "Emission Active") || get(merged, "Emission Enabled"),
+            opacity = get(merged, "Cutout Opacity"), strength = get(merged, "Emission Strength") || get(merged, "Light Intensity"), value;
+        if (enabled && (channelValue(enabled) === false || channelValue(enabled) === 0)) { return { status: "disabled", reason: "Saved emission switch is off." }; }
+        if (color) {
+            value = channelValue(color);
+            if (!nonzero(value)) { return { status: "disabled", reason: "Saved emission color is black." }; }
+            if (luminance && !nonzero(channelValue(luminance)) || strength && !nonzero(channelValue(strength))) { return { status: "disabled", reason: "Saved emission power is zero." }; }
+            if (opacity && channelValue(opacity) === 0) { return { status: "disabled", reason: "Saved cutout opacity is zero." }; }
+            if (luminance || strength || enabled) { return { status: "enabled", reason: "Nonzero saved emission color and active emission power.", shaderEvaluated: false }; }
+            return { status: "unknown", reason: "Emission color exists; power/activation is inherited from an unread shader." };
+        }
+        if (enabled && channelValue(enabled) === true && strength && nonzero(channelValue(strength))) { return { status: "enabled", reason: "Saved explicit emission activation and power.", shaderEvaluated: false }; }
+        return { status: "unknown", reason: "No recognized complete saved emission rule." };
+    }
+    function canonicalSource(ix, n) {
+        var uri = str(n, "url") || str(n, "source"), seen = {}, p, r;
+        while (uri) {
+            p = parseURI(uri); if (p.kind === "external") { return p.file + "#" + encodeURIComponent(p.fragment); }
+            if (p.kind !== "local" || get(seen, p.fragment)) { return ""; }
+            seen[key(p.fragment)] = true; r = get(ix.byId, p.fragment); if (!r) { return ""; }
+            uri = str(r.value, "source");
+        }
+        return "";
+    }
+    function catalog(doc, options) {
+        options = options || {}; var ix = index(doc,options), rows = [], byId = {}, i, j, n, d, t, row, a;
+        for (i = 0; i < ix.nodes.length; i += 1) {
+            n = ix.nodes[i].value; d = definition(ix, n); t = effectiveType(ix, n);
+            row = { id: n.id, rowIndex: i, label: str(n, "label") || str(d, "label") || str(n, "name") || n.id,
+                internalName: str(n, "name") || str(d, "name") || n.id, type: t.type, typeEvidence: t.evidence,
+                parent: str(n, "parent") || str(n, "parent_in_place"), parentMode: n.parent ? "parent" : n.parent_in_place ? "parent_in_place" : "none",
+                parentId: simpleLocal(str(n, "parent") || str(n, "parent_in_place")), conformTarget: str(n, "conform_target"),
+                conformTargetId: simpleLocal(str(n, "conform_target")), url: str(n, "url"), sourceUrl: canonicalSource(ix, n),
+                geometryIds: [], children: [], materials: [], emissive: false, emissionUnknown: false, characterId: "", figureId: "", wearable: false };
+            a = n.geometries || []; for (j = 0; j < a.length; j += 1) { row.geometryIds.push(a[j].id); }
+            row.renderSettingsNode = hasExtra(n, /^studio\/node\/(environment|tone_mapper)$/) || hasExtra(d, /^studio\/node\/(environment|tone_mapper)$/);
+            row.category = row.renderSettingsNode ? "render" : t.type === "light" ? "light" : t.type === "camera" ? "camera" : t.type === "bone" ? "bone" : t.type === "figure" ? "character" : "object";
+            row.followerMetadata = /^Follower(?:\/|$)/.test(str(d && d.presentation, "type"));
+            rows.push(row); byId[key(row.id)] = row;
+        }
+        for (i = 0; i < rows.length; i += 1) {
+            row = rows[i]; var parent = get(byId, row.parentId), fit = get(byId, row.conformTargetId), at = parent, seen = {};
+            if (parent) { parent.children.push(row.id); }
+            while (at && !get(seen, at.id)) { seen[key(at.id)] = true; if (at.type === "figure" && !row.figureId) { row.figureId = at.id; } if (at.type === "figure" && !at.conformTargetId && !at.followerMetadata) { row.characterId = at.id; break; } at = get(byId, at.parentId); }
+            if (fit) { row.characterId = fit.id; }
+            row.wearable = !!fit || row.type !== "bone" && !!row.characterId && row.category !== "camera" && row.category !== "light";
+            if (row.wearable || row.followerMetadata) { row.category = "wearable"; }
+            row.recognizedCharacter = row.category === "character" && (!array(options.characterNames) || options.characterNames.indexOf(row.internalName) >= 0);
+        }
+        a = recordsFor(doc, "scene.materials");
+        for (i = 0; i < a.length; i += 1) {
+            var geo = simpleLocal(str(a[i], "geometry")), record = get(ix.byId, geo), status;
+            if (!record || !record.owner) { continue; }
+            row = get(byId, record.owner.id); if (!row) { continue; } status = emission(ix, a[i]);
+            row.materials.push({ id: a[i].id, groups: clone(a[i].groups || []), emission: status });
+            if (status.status === "enabled") { row.emissive = true; } else if (status.status === "unknown") { row.emissionUnknown = true; }
+        }
+        var tabs = { cameras: [], lights: [], characters: [], objects: [], render: [] }, render = [];
+        for (i = 0; i < rows.length; i += 1) {
+            row = rows[i]; if (row.category === "camera") { tabs.cameras.push(row.id); }
+            if (row.category === "light" || row.emissive) { tabs.lights.push(row.id); }
+            if (row.recognizedCharacter) { tabs.characters.push(row.id); }
+            if (row.category !== "bone" && row.category !== "render") { tabs.objects.push(row.id); }
+            if (row.renderSettingsNode) { tabs.render.push(row.id); }
+        }
+        a = recordsFor(doc, "scene.extra"); for (i = 0; i < a.length; i += 1) { if (/^studio_render_settings$/.test(str(a[i], "type"))) { render.push(clone(a[i])); } }
+        return { rows: rows, tabs: tabs, render: render, errors: ix.errors.slice(0), source: "saved-DUF", fullData: options.fullData === true };
+    }
+    function walkReferences(value, fn, path, depth, cancel) {
+        var stack=[];
+        function enter(v,at,fileMode){if(!v||typeof v!=='object')return;var keys=[],i,k;for(i=0;i<stack.length;i++)if(stack[i].value===v)fail('OBJECT_CYCLE','Cyclic reference record at '+at);if(array(v)){for(i=0;i<v.length;i++)keys.push(i);}else for(k in v)if(own(v,k))keys.push(k);stack.push({value:v,path:at,keys:keys,next:0,isArray:array(v),fileMode:fileMode||0});}
+        enter(value,path);while(stack.length){if(cancel)cancel();var frame=stack[stack.length-1];if(frame.next===frame.keys.length){stack.pop();continue;}var k=frame.keys[frame.next++],v=frame.value[k],at=frame.path+(frame.isArray?'['+k+']':'.'+k);
+            if(frame.isArray){if(frame.fileMode===2&&Number(k)===1&&typeof v==='string'&&v)fn(v,at,'typed-file-value');else if(v&&typeof v==='object')enter(v,at,frame.fileMode===1?2:0);}
+            else if(isPuppeteerNodeName(stack,k)){}
+            else if(typeof v==='string'&&v&&(own(uriFields,k)||frame.value.type==='file'&&(k==='value'||k==='current_value')))fn(v,at,frame.value.type==='file'?'typed-file-value':k);
+            else if(typeof v==='string'&&/^([^#]*:)?#[^#]+(?:\?.*)?$/.test(v)&&!/^#[a-fA-F0-9]{3,8}$/.test(v)&&!/^(id|name|label|description|group|type)$/.test(k))fn(v,at,'unknown-reference-field');
+            else if(v&&typeof v==='object')enter(v,at,frame.value.type==='file'&&k==='keys'?1:0);
+        }
+    }
+    function snapshotAnimations(ix, included, rows, errors, options, transformsOnly) {
+        var extras = recordsFor(ix.document, "scene.extra"), savedTime = null, i, j, settings, current, snapshots = [], omitted = {},
+            records = ix.records, entries = [], transformIds = [], states = {}, baked = {}, definitionFiles = [];
+        for (i = 0; i < extras.length; i += 1) {
+            if (str(extras[i], "type") !== "studio_scene_settings") { continue; }
+            settings = extras[i].animation_settings || extras[i];
+            if (typeof settings.current_time === "number" && isFinite(settings.current_time)) {
+                if (savedTime !== null && savedTime !== settings.current_time) { addUnique(errors, "Conflicting saved current_time settings."); }
+                savedTime = settings.current_time;
+            }
+        }
+        function inside(nodeId, rootId) {
+            var seen = {}, row = get(rows, nodeId);
+            while (row && !get(seen, row.id)) { if (row.id === rootId) { return true; } seen[key(row.id)] = true; row = get(rows, row.parentId); }
+            return false;
+        }
+        function nodeOwner(rec) {
+            if (rec.group === "scene.nodes") { return rec.id; }
+            if (rec.owner) { return rec.owner.id; }
+            var parent = simpleLocal(str(rec.value, "parent") || str(rec.value, "geometry")), owner = get(ix.byId, parent);
+            return owner && owner.owner ? owner.owner.id : owner && owner.group === "scene.nodes" ? owner.id : "";
+        }
+        function addressed(ref) {
+            var ids = pathIds(ref), candidates = [], r, n, expected = ref.file + "#" + encodeURIComponent(ref.fragment);
+            if (ref.kind === "local") { r = get(ix.byId, ref.fragment); return r && included(r) ? r : null; }
+            if (ref.kind !== "external" || !ids.length) { return null; }
+            for (n = 0; n < records.length; n += 1) {
+                r = records[n]; if (r.group.indexOf("scene.") !== 0 || !included(r)) { continue; }
+                if (canonicalSource(ix, r.value) === expected && inside(nodeOwner(r), ids[ids.length - 1])) { candidates.push(r); }
+            }
+            return candidates.length === 1 ? candidates[0] : null;
+        }
+        function explicitCurrent(rec, query) {
+            var segments = query.substring(1).split("/"), value = rec.value, n, a, matches, k;
+            if (segments[0] === "scale" && segments[1] === "general") { segments.splice(0, 2, "general_scale"); }
+            for (n = 0; n < segments.length; n += 1) {
+                var segment = decode(segments[n]);
+                if (segment === "value" && n === segments.length - 1) { break; }
+                if (array(value)) {
+                    matches = []; for (k = 0; k < value.length; k += 1) { if (value[k] && value[k].id === segment) { matches.push(value[k]); } }
+                    if (matches.length !== 1) { return { found: false }; } value = matches[0];
+                } else if (obj(value) && own(value, segment)) { value = value[segment]; }
+                else if (obj(value) && value.channel && value.channel.id === segment) { value = value.channel; }
+                else { return { found: false }; }
+            }
+            if (array(value)) {
+                a = []; for (n = 0; n < value.length; n += 1) { if (!obj(value[n]) || !own(value[n], "current_value")) { return { found: false }; } a.push(value[n].current_value); }
+                return { found: true, value: a };
+            }
+            return obj(value) && own(value, "current_value") ? { found: true, value: value.current_value } : { found: false };
+        }
+        function equal(a, b) {
+            var k; if (array(a) && array(b)) { if (a.length !== b.length) { return false; } for (k = 0; k < a.length; k += 1) { if (!equal(a[k], b[k])) { return false; } } return true; }
+            return typeof a === "number" && typeof b === "number" && isFinite(a) && isFinite(b) && a === b || typeof a === "boolean" && a === b;
+        }
+        function transformProperty(query) {
+            var parts = query.substring(1).split("/"), k;
+            for (k = 0; k < parts.length; k += 1) { parts[k] = decode(parts[k]); }
+            if (parts[parts.length - 1] === "value") { parts.pop(); }
+            if (parts.length === 2 && parts[0] === "scale" && parts[1] === "general") { return { name: "general_scale", axis: -1 }; }
+            if (parts.length === 1 && parts[0] === "general_scale") { return { name: "general_scale", axis: -1 }; }
+            if (!/^(rotation|translation|scale)$/.test(parts[0]) || parts.length > 2) { return null; }
+            if (parts.length === 1) { return { name: parts[0], axis: -1 }; }
+            var axis = ["x", "y", "z"].indexOf(parts[1]); return axis >= 0 ? { name: parts[0], axis: axis } : null;
+        }
+        for (i = 0; i < records.length; i += 1) {
+            var animation = records[i]; if (animation.group !== "scene.animations" || !included(animation)) { continue; }
+            var ref = parseURI(str(animation.value, "url")), rec = addressed(ref), property = rec && rec.group === "scene.nodes" && ref.query ? transformProperty(ref.query) : null;
+            if (transformsOnly && !property) { continue; }
+            entries.push({ animation: animation, ref: ref, record: rec, property: property });
+            if (property && savedTime !== null) { addUnique(transformIds, rec.id); }
+        }
+        if (transformIds.length) {
+            var sourceTransforms = transformSource(ix.document, transformIds, options);
+            definitionFiles = sourceTransforms.definitionFiles;
+            for (i = 0; i < sourceTransforms.errors.length; i += 1) { addUnique(errors, "Animated transform source: " + sourceTransforms.errors[i]); }
+            for (i = 0; i < sourceTransforms.nodes.length; i += 1) { states[key(sourceTransforms.nodes[i].id)] = sourceTransforms.nodes[i].state; }
+        }
+        for (i = 0; i < entries.length; i += 1) {
+            var entry = entries[i]; animation = entry.animation; ref = entry.ref; rec = entry.record; property = entry.property;
+            var proof = rec && ref.query ? explicitCurrent(rec, ref.query) : { found: false }, proofKind = "explicit-current-value-matches-saved-frame-key", matched = false, matches = 0, state;
+            if (savedTime === null) { addUnique(errors, "Animated selection has no unambiguous saved current_time; saved-pose snapshot is blocked."); continue; }
+            if (property) {
+                state = get(states, rec.id);
+                if (!state) { addUnique(errors, "No verified source transform state for animated channel " + ref.raw + "; snapshot is blocked."); continue; }
+                var resolvedValue = property.axis >= 0 ? state[property.name][property.axis] : state[property.name];
+                proofKind = proof.found && equal(proof.value, resolvedValue) ? "explicit-current-value-matches-saved-frame-key" : "verified-definition-and-instance-value-matches-saved-frame-key";
+                proof = { found: true, value: resolvedValue };
+            }
+            if (!proof.found) { addUnique(errors, "No explicit saved current_value for non-transform animated channel " + ref.raw + "; snapshot is blocked."); continue; }
+            for (j = 0; animation.value.keys && j < animation.value.keys.length; j += 1) {
+                var pair = animation.value.keys[j];
+                if (array(pair) && typeof pair[0] === "number" && Math.abs(pair[0] - savedTime) <= 0.0000001) { matches += 1; matched = equal(pair[1], proof.value); }
+            }
+            if (matches !== 1 || !matched) { addUnique(errors, "Animated channel " + ref.raw + " has no single matching key/current_value at saved time " + savedTime + "; interpolation is not guessed."); continue; }
+            omitted[key(animation.locator)] = true; snapshots.push({ url: ref.raw, targetLocator: rec.locator, value: clone(proof.value), proof: proofKind });
+            if (property) { baked[key(rec.id)] = clone(state); }
+        }
+        return { policy: "saved-current-pose", savedTime: savedTime, channels: snapshots, omitted: omitted,
+            nodeTransforms: baked, definitionFiles: definitionFiles, animationKeysWritten: false };
+    }
+    function placementRelations(rowMap, nodeIds) {
+        var out = [], i, row, at, seen, following, inPlace;
+        for (i = 0; i < nodeIds.length; i += 1) {
+            row = get(rowMap, nodeIds[i]); if (!row) { continue; }
+            at = row; seen = {}; following = []; inPlace = [];
+            while (at && !get(seen, at.id)) {
+                seen[key(at.id)] = true;
+                if (at.conformTargetId) { following.push(at.id); }
+                if (at.parentMode === "parent_in_place") { inPlace.push(at.id); }
+                at = get(rowMap, at.parentId);
+            }
+            out.push({ id: row.id, sourceNodeId: row.id, parentId: row.parentId, parentMode: row.parentMode,
+                conformTargetId: row.conformTargetId, sourceUrl: row.sourceUrl, definitionUri: row.url,
+                followingRootIds: following, parentInPlaceAncestorIds: inPlace });
+        }
+        return { rule: "preserve-saved-parent-and-follow-relationships", relationshipCoverageOnly: true, nodes: out };
+    }
+    function plan(doc, selectedIds, options) {
+        options = options || {};
+        if (options.fullData !== true) { fail("INCOMPLETE_DATA", "Import planning requires complete records, not Inspector metadata or values-stripped JSON."); }
+        var ix = index(doc,options), cat = catalog(doc, options), rowMap = {}, include = {}, reasons = {}, queue = [], queueHead = 0, errors = ix.errors.slice(0), warnings = [],
+            external = {}, externals = [], requested = {}, groups = {}, followers = {}, selectedExpanded = {}, i, j, changed = true, rounds = 0;
+        for (i = 0; i < cat.rows.length; i += 1) {
+            var indexedRow = cat.rows[i]; rowMap[key(indexedRow.id)] = indexedRow;
+            if (indexedRow.conformTargetId) {
+                if (!get(followers, indexedRow.conformTargetId)) { followers[key(indexedRow.conformTargetId)] = []; }
+                followers[key(indexedRow.conformTargetId)].push(indexedRow.id);
+            }
+        }
+        function error(s) { addUnique(errors, s); }
+        function add(r, why) {
+            if (!r) { return false; }
+            if (r.owner) { return add(r.owner, why); }
+            if (!own(include, key(r.locator))) { include[key(r.locator)] = true; queue.push(r); reasons[key(r.locator)] = [why]; return true; }
+            addUnique(reasons[key(r.locator)], why); return false;
+        }
+        function included(r) { return !!r && (r.owner ? included(r.owner) : own(include, key(r.locator))); }
+        function qualifiedOwner(rec) {
+            if(!rec)return "";if(rec.group==="scene.nodes")return rec.id;if(rec.owner)return rec.owner.id;
+            var link=simpleLocal(str(rec.value,"parent")||str(rec.value,"geometry")),owner=get(ix.byId,link);
+            return owner&&owner.owner?owner.owner.id:owner&&owner.group==="scene.nodes"?owner.id:"";
+        }
+        function withinQualified(id,ancestor){var row=get(rowMap,id),seen={};while(row&&!get(seen,row.id)){check(options);if(row.id===ancestor)return true;seen[key(row.id)]=true;row=get(rowMap,row.parentId);}return false;}
+        function qualifiedFile(file,base){if(!base||/^\//.test(file)||/^[A-Za-z]:/.test(file)||/^[A-Za-z][A-Za-z0-9+.-]*:/.test(file))return file;var parts=(base.substring(0,base.lastIndexOf("/")+1)+file).split("/"),out=[],i;for(i=0;i<parts.length;i++){if(parts[i]===".")continue;if(parts[i]===".."&&out.length&&out[out.length-1]!==".."){out.pop();continue;}out.push(parts[i]);}return out.join("/");}
+        function reachesQualified(rec,ref){var link=str(rec.value,"url")||str(rec.value,"source"),seen={},base="",document=doc;while(link){check(options);var q=parseURI(link),def=null,identity,loaded,g,n,list,matches=0;if(q.file)q.file=qualifiedFile(q.file,base);identity=q.kind+":"+q.file+"#"+q.fragment;if(get(seen,identity))return false;seen[key(identity)]=true;if(q.query||q.nodePath)return false;if(q.fragment===ref.fragment&&((q.kind===ref.kind&&q.file===ref.file)||(q.kind==="local"&&document!==doc&&ref.kind==="external"&&base===ref.file)))return true;
+            if(q.kind==="local"){if(document===doc)def=get(ix.byId,q.fragment);else{for(g=0;g<libraries.length;g++){list=recordsFor(document,libraries[g]);for(n=0;n<list.length;n++)if(str(list[n],"id")===q.fragment){matches++;def={value:list[n]};}}if(matches!==1)return false;}}
+            else if(q.kind==="external"&&typeof options.resolveAssetDocument==="function"){loaded=options.resolveAssetDocument(q.file);check(options);if(!loaded||loaded.verified!==true||!loaded.document)return false;document=loaded.document;base=loaded.uri||q.file;for(g=0;g<libraries.length;g++){list=recordsFor(document,libraries[g]);for(n=0;n<list.length;n++)if(str(list[n],"id")===q.fragment){matches++;def={value:list[n]};}}if(matches!==1)return false;}
+            else return false;link=def?str(def.value,"source"):"";}return false;}
+        var qualifiedTargets={};
+        function qualifiedTarget(ref,ids){var identity=key(JSON.stringify([ref.kind,ref.file,ref.fragment,ref.nodePath]));check(options);if(own(qualifiedTargets,identity))return qualifiedTargets[identity];var result=resolveQualifiedTarget(ref,ids);qualifiedTargets[identity]=result;return result;}
+        function resolveQualifiedTarget(ref,ids){
+            if(!ids.length)return true;var target=ref.kind==="local"?get(ix.byId,ref.fragment):null,owner=ids[ids.length-1],n,rec;
+            if(target&&target.group.indexOf("scene.")===0)return withinQualified(qualifiedOwner(target),owner);
+            if(target&&target.group==="modifier_library"&&str(target.value,"parent")){var attachment=parseURI(str(target.value,"parent")),attached=attachment.kind==="local"?get(ix.byId,attachment.fragment):null,attachmentMatches=0;if(!attachment.query&&!attachment.nodePath){if(attached&&attached.group.indexOf("scene.")===0&&withinQualified(qualifiedOwner(attached),owner))return true;for(n=0;n<ix.records.length;n++){check(options);rec=ix.records[n];if(rec.group.indexOf("scene.")===0&&withinQualified(qualifiedOwner(rec),owner)&&reachesQualified(rec,attachment))attachmentMatches++;}if(attachmentMatches===1)return true;if(attachmentMatches>1)return false;}}
+            for(n=0;n<ix.records.length;n++){check(options);rec=ix.records[n];if(rec.group.indexOf("scene.")===0&&withinQualified(qualifiedOwner(rec),owner)&&reachesQualified(rec,ref))return true;}return false;
+        }
+        function dependency(uri, from, field) {
+            var p, ids, k, r;
+            try { p = parseURI(uri); } catch (e) { error(from + ": " + e.message); return; }
+            if (p.kind === "empty") { return; }
+            if (p.kind === "unsafe" || field === "unknown-reference-field") { error(from + ": Unsupported reference " + uri); return; }
+            ids = pathIds(p);
+            for (k = 1; k < ids.length; k += 1) {
+                var qualifiedRow=get(rowMap,ids[k]),qualifiedSeen={},qualifiedMatch=false;
+                while(qualifiedRow&&!get(qualifiedSeen,qualifiedRow.id)){check(options);qualifiedSeen[key(qualifiedRow.id)]=true;if(qualifiedRow.parentId===ids[k-1]){qualifiedMatch=true;break;}qualifiedRow=get(rowMap,qualifiedRow.parentId);}
+                if(ids[k]===ids[k-1]||!qualifiedMatch)error(from+": Unrelated qualified reference owner path: "+uri);
+            }
+            if(ids.length&&!(ids.length===1&&get(ix.byId,ids[0])&&get(ix.byId,ids[0]).group==="node_library"&&/^modifier_library\[\d+\]\.formulas\[/.test(from))&&!qualifiedTarget(p,ids))error(from+": Qualified reference target is not bound to its owner: "+uri);
+            for (k = 0; k < ids.length; k += 1) {
+                r = get(ix.byId, ids[k]);
+                if (r && r.group === "node_library" && /^modifier_library\[\d+\]\.formulas\[/.test(from) && ids.length === 1) {
+                    // Saved library formulas can address a node definition. Require a unique
+                    // included instance of that exact definition; never guess by label/name.
+                    var matches = 0, ni;
+                    for (ni = 0; ni < ix.nodes.length; ni += 1) { if (included(ix.nodes[ni]) && simpleLocal(str(ix.nodes[ni].value, "url")) === r.id) { matches += 1; } }
+                    if (matches !== 1) { error(from + ": Definition node path requires one included instance: " + ids[k]); }
+                    else { add(r, "Verified library formula definition from " + from); }
+                } else if (!r || r.group !== "scene.nodes") { error(from + ": Missing instance in node path " + ids[k]); }
+                else { add(r, "Referenced instance from " + from); }
+            }
+            if (p.kind === "local") {
+                r = get(ix.byId, p.fragment); if (!r) { error(from + ": Missing local dependency #" + p.fragment); }
+                else { add(r, "Referenced by " + from); }
+            } else if (p.file) {
+                if (!own(external, key(p.file))) { var dep = { file: p.file, uris: [], referencedBy: [] }; external[key(p.file)] = dep; externals.push(dep); }
+                addUnique(external[key(p.file)].uris, uri); addUnique(external[key(p.file)].referencedBy, from);
+            }
+        }
+        function addDescendants(id, why, bonesOnly, depth) {
+            var stack=[{row:get(rowMap,id),next:0}];while(stack.length){check(options);var frame=stack[stack.length-1];if(!frame.row||frame.next===frame.row.children.length){stack.pop();continue;}var child=get(rowMap,frame.row.children[frame.next++]);
+                if(!bonesOnly||child.type==='bone'||child.type==='unknown'&&!child.geometryIds.length&&(frame.row.type==='figure'||frame.row.type==='bone')){if(add(get(ix.byId,child.id),why))stack.push({row:child,next:0});}
+            }
+        }
+        function addSelectedTree(id, why, depth) {
+            var stack=[],expanding={};
+            function enter(current,reason){if(get(expanding,current)){error('Selected hierarchy cycle at '+current);return;}if(get(selectedExpanded,current))return;selectedExpanded[key(current)]=true;var row=get(rowMap,current);if(!row)return;expanding[key(current)]=true;stack.push({id:current,row:row,why:reason,children:0,followers:get(followers,current)||[],next:0});}
+            enter(id,why);while(stack.length){check(options);var frame=stack[stack.length-1],child;
+                if(frame.children<frame.row.children.length){child=frame.row.children[frame.children++];add(get(ix.byId,child),frame.why);enter(child,frame.why);}
+                else if(frame.next<frame.followers.length){child=frame.followers[frame.next++];add(get(ix.byId,child),'Saved follower of selected subtree '+frame.id);enter(child,'Child of saved follower '+child);}
+                else{expanding[key(frame.id)]=false;stack.pop();}
+            }
+        }
+        if (!array(selectedIds) || !selectedIds.length && !options.renderOnly && !options.recordLocators) { fail("SELECTION", "Choose at least one saved object."); }
+        if (options.recordLocators) {
+            for (i = 0; i < options.recordLocators.length; i += 1) { var seed = get(ix.byLocator, options.recordLocators[i]); if (!seed) { error("Missing seed record " + options.recordLocators[i]); } else { add(seed, "Selected material binding"); } }
+        }
+        for (i = 0; i < selectedIds.length; i += 1) {
+            var root = get(ix.byId, selectedIds[i]);
+            if (!root || root.group !== "scene.nodes") { error("Selected scene instance is missing or ambiguous: " + selectedIds[i]); continue; }
+            requested[key(root.id)] = true; add(root, "Selected object");
+            if (options.includeDescendants !== false) { addSelectedTree(root.id, "Child of selected object " + root.id, 0); }
+        }
+        if (options.includeRender || options.renderOnly) {
+            for (i = 0; i < cat.tabs.render.length; i += 1) { add(get(ix.byId, cat.tabs.render[i]), "Saved render settings node"); }
+            for (i = 0; i < ix.records.length; i += 1) {check(options); if (ix.records[i].group === "scene.extra" && str(ix.records[i].value, "type") === "studio_render_settings") { add(ix.records[i], "Saved render settings"); } }
+        }
+        while (changed || queueHead < queue.length) {
+            if (++rounds > ix.records.length + 4) { fail("CLOSURE", "Dependency closure failed to converge."); }
+            changed = false;
+            while (queueHead < queue.length) {
+                check(options);var current = queue[queueHead], value = current.value, row = get(rowMap, current.id);
+                queue[queueHead++] = null;
+                if (current.group === "scene.nodes") {
+                    if (!str(value, "url")) { error(current.locator + ": Missing node definition URL."); }
+                    if (value.parent && value.parent_in_place) { error(current.locator + ": Both parent and parent_in_place are present."); }
+                    if (row) { addDescendants(row.id, "Required saved bone scaffold for " + row.id, true); }
+                    if (value.parent || value.parent_in_place) {
+                        var pr = simpleLocal(value.parent || value.parent_in_place), par = get(ix.byId, pr);
+                        if (!par || par.group !== "scene.nodes") { error(current.locator + ": Parent is not an explicit saved instance; attachment to existing scene objects is forbidden."); }
+                        else { add(par, "Ancestor required to preserve saved transform of " + current.id); }
+                    }
+                    if (value.conform_target) {
+                        var fit = get(ix.byId, simpleLocal(value.conform_target));
+                        if (!fit || fit.group !== "scene.nodes") { error(current.locator + ": Fit target is not an explicit saved instance."); }
+                        else { add(fit, "Saved fit/conform target for " + current.id); }
+                    }
+                }
+                if (current.group === "scene.modifiers" && (!str(value, "url") || !str(value, "parent"))) { error(current.locator + ": Modifier URL and parent are required."); }
+                if (current.group === "scene.nodes") { for (i = 0; value.geometries && i < value.geometries.length; i += 1) { if (!str(value.geometries[i], "url")) { error(current.locator + ": Geometry definition URL is required."); } } }
+                walkReferences(value, function (uri, at, member) {
+                    if (current.group === "scene.materials" && at === current.locator + ".geometry" && options.materialTargetUris && get(options.materialTargetUris, simpleLocal(uri))) { return; }
+                    dependency(uri, at, member);
+                }, current.locator, 0, function(){check(options);});
+                if (current.group === "node_library") {
+                    for (i = 0; i < ix.records.length; i += 1) {check(options);
+                        var defChild = ix.records[i];
+                        if (defChild.group === "node_library" && simpleLocal(str(defChild.value, "parent")) === current.id && (effectiveType(ix,{url:"#"+defChild.id}).type === "bone" || effectiveType(ix,{url:"#"+defChild.id}).type === "unknown" && /^(figure|bone)$/.test(effectiveType(ix,{url:"#"+current.id}).type))) { add(defChild, "Node definition descendant instantiated by " + current.id); }
+                    }
+                }
+            }
+            for (i = 0; i < ix.records.length; i += 1) {check(options);
+                var candidate = ix.records[i], field = candidate.group === "scene.materials" ? "geometry" : candidate.group === "scene.modifiers" || candidate.group === "scene.uvs" ? "parent" : candidate.group === "scene.animations" ? "url" : "";
+                if (!field || included(candidate)) { continue; }
+                var raw = str(candidate.value, field), p = parseURI(raw), bound = false, ids = pathIds(p), target;
+                if (p.kind === "local") { target = get(ix.byId, p.fragment); bound = included(target); }
+                if(candidate.group==="scene.animations"&&ids.length){var relevant=bound;for(j=0;j<ids.length;j++)if(included(get(ix.byId,ids[j])))relevant=true;if(!relevant)continue;var finalOwner=get(ix.byId,ids[ids.length-1]);if(finalOwner&&finalOwner.group==="scene.nodes"&&qualifiedTarget(p,ids))bound=included(finalOwner);else for(j=0;j<ids.length;j++)if(included(get(ix.byId,ids[j])))bound=true;}
+                else for (j = 0; j < ids.length; j += 1) { if (included(get(ix.byId, ids[j]))) { bound = true; } }
+                if (bound && add(candidate, "Saved " + candidate.group.substring(6) + " binding for included object")) { changed = true; }
+            }
+        }
+        var animationSnapshot = {omitted:{},nodeTransforms:{},definitionFiles:[],channels:[]};
+        // Candidate-only opt-in. Keep complete key tuples and original node channels.
+        // The existing proof restricts this pilot to resolved channels at a known saved time.
+        if(options.preserveAnimation===true){animationSnapshot.omitted={};animationSnapshot.nodeTransforms={};animationSnapshot.policy="preserve-selected-animation";animationSnapshot.animationKeysWritten=true;}
+
+        for (i = 0; i < animationSnapshot.definitionFiles.length; i += 1) {
+            var definitionFile = animationSnapshot.definitionFiles[i];
+            if (!own(external, key(definitionFile))) { var proofDependency = { file: definitionFile, uris: [definitionFile], referencedBy: ["saved-pose transform proof"] }; external[key(definitionFile)] = proofDependency; externals.push(proofDependency); }
+            else { addUnique(external[key(definitionFile)].referencedBy, "saved-pose transform proof"); }
+        }
+        var nodeIds = [], details = [], locators = [], counts = {}, visited = {}, active = {};
+        function visitNode(id, depth) {
+            var stack=[];
+            function enter(current){if(get(active,current)){error('Parenting cycle involving '+current);return;}if(get(visited,current))return;active[key(current)]=true;var row=get(rowMap,current);stack.push({id:current,row:row,next:0});}
+            enter(id);while(stack.length){check(options);var frame=stack[stack.length-1],parent=frame.row&&(frame.next===0?frame.row.parentId:frame.row.conformTargetId);
+                if(frame.next<2){frame.next++;if(parent&&included(get(ix.byId,parent)))enter(parent);}
+                else{active[key(frame.id)]=false;visited[key(frame.id)]=true;var r=get(ix.byId,frame.id);if(r&&included(r))nodeIds.push(frame.id);stack.pop();}
+            }
+        }
+        for (i = 0; i < ix.nodes.length; i += 1) { if (included(ix.nodes[i])) { visitNode(ix.nodes[i].id); } }
+        var libraryNodeIds = [], defVisited = {}, defActive = {};
+        function visitDefinition(rec, depth) {
+            var stack=[];
+            function enter(current){if(get(defActive,current.id)){error('Node definition dependency cycle involving '+current.id);return;}if(get(defVisited,current.id))return;defActive[key(current.id)]=true;stack.push({rec:current,refs:[str(current.value,'parent'),str(current.value,'source')],next:0});}
+            enter(rec);while(stack.length){check(options);var frame=stack[stack.length-1];if(frame.next<frame.refs.length){var parent=get(ix.byId,simpleLocal(frame.refs[frame.next++]));if(parent&&parent.group==='node_library'&&included(parent))enter(parent);}else{defActive[key(frame.rec.id)]=false;defVisited[key(frame.rec.id)]=true;libraryNodeIds.push(frame.rec.id);stack.pop();}}
+        }
+        for (i = 0; i < ix.records.length; i += 1) {check(options); if (ix.records[i].group === "node_library" && included(ix.records[i])) { visitDefinition(ix.records[i], 0); } }
+        for (i = 0; i < ix.records.length; i += 1) {check(options);
+            var r = ix.records[i]; if (!included(r) || r.owner || get(animationSnapshot.omitted, r.locator)) { continue; }
+            locators.push(r.locator); counts[r.group] = (counts[r.group] || 0) + 1;
+            if (r.group === "scene.nodes") { var cr = get(rowMap, r.id); details.push({ id: r.id, label: cr.label, internalName: cr.internalName,
+                selected: !!get(requested, r.id), reasons: reasons[key(r.locator)].slice(0) }); }
+        }
+        var extras = recordsFor(doc, "scene.extra");
+        for (i = 0; i < extras.length; i += 1) { if (!own(include, key("scene.extra[" + i + "]"))) { addUnique(warnings, "Excluded scene-wide extra: " + (str(extras[i], "type") || "unknown")); } }
+        return { version: 1, ready: errors.length === 0, selectedIds: selectedIds.slice(0), nodeIds: nodeIds, libraryNodeIds: libraryNodeIds, locators: locators,
+            includedNodes: details, counts: counts, errors: errors, warnings: warnings, dependencies: externals,
+            sourceAssetId: str(doc.asset_info, "id"), includeDescendants: options.includeDescendants !== false,
+            transformStrategy: "preserve-complete-ancestor-chain", fullData: true, includeRender: !!(options.includeRender || options.renderOnly),
+            materialTargetUris: options.materialTargetUris ? clone(options.materialTargetUris) : null, animationSnapshot: animationSnapshot,
+            placement: placementRelations(rowMap, nodeIds) };
+    }
+
+    function extract(doc, selectedPlan, options) {
+        options = options || {};check(options); var p = selectedPlan, ix = index(doc,options), map = {}, occupied = {}, i, j, r, included = {}, externalMap = {}, dependencyResults = [];
+        if (!p || !p.ready || !p.fullData) { fail("PLAN_BLOCKED", "Resolve all dependency errors before extracting."); }
+        if (p.sourceAssetId !== str(doc.asset_info, "id")) { fail("STALE_PLAN", "The extraction plan belongs to a different saved source."); }
+        if (!/^[A-Za-z][A-Za-z0-9_-]{2,80}$/.test(options.namespace || "")) { fail("NAMESPACE", "Provide a unique ASCII import namespace."); }
+        var existing = options.existingIds || [];
+        for (i = 0; i < existing.length; i += 1) { occupied[key(existing[i])] = true; }
+        for (i = 0; i < ix.records.length; i += 1) { if (ix.records[i].id) { occupied[key(ix.records[i].id)] = true; } }
+        for (i = 0; i < p.locators.length; i += 1) {
+            r = get(ix.byLocator, p.locators[i]); if (!r) { fail("STALE_PLAN", "Missing planned record " + p.locators[i]); }
+            included[key(r.locator)] = true;
+        }
+        function includedRecord(rec) { return rec && (rec.owner ? includedRecord(rec.owner) : own(included, key(rec.locator))); }
+        var counter = 0;
+        for (i = 0; i < ix.records.length; i += 1) {
+            r = ix.records[i]; if (!r.id || !includedRecord(r)) { continue; }
+            var newId; do { newId = options.namespace + "_" + (++counter); } while (get(occupied, newId));
+            map[key(r.id)] = newId; occupied[key(newId)] = true;
+        }
+        var batch = null, requests = {};
+        if (options.readRecords) {
+            for (i = 0; i < p.locators.length; i += 1) { r = get(ix.byLocator, p.locators[i]); if (!requests[r.group]) { requests[r.group] = []; } requests[r.group].push(r.index); }
+            batch = options.readRecords(requests);
+        }
+        function recordValue(rec) {
+            var k, items;
+            if (batch) {
+                items = batch[rec.group] || [];
+                for (k = 0; k < items.length; k += 1) { if (items[k].index === rec.index) { return items[k].record; } }
+                fail("RECORD_READ", "Full payload record missing: " + rec.locator);
+            }
+            return options.readRecord ? options.readRecord(rec.group, rec.index) : rec.value;
+        }
+        for (i = 0; i < p.dependencies.length; i += 1) {
+            check(options);var dep = p.dependencies[i], result = options.resolveExternal ? options.resolveExternal(dep.file, clone(dep)) : null;
+            if (result === true) { result = { exists: true, uri: dep.file }; }
+            if (!result || result.exists !== true) { fail("MISSING_EXTERNAL", "Missing or unchecked external dependency: " + dep.file); }
+            if (dep.file.charAt(0) !== "/" && (!result.uri || result.uri === dep.file)) { fail("RELATIVE_DEPENDENCY", "Relative dependency must be rebased for the temporary DUF: " + dep.file); }
+            externalMap[key(dep.file)] = result.uri || dep.file; dependencyResults.push({ source: dep.file, uri: result.uri || dep.file, checked: true });
+        }
+        function rewriteURI(raw) {
+            var ref = parseURI(raw), ids, parts, k, v, path;
+            if (ref.kind === "empty") { return raw; }
+            if (ref.kind === "unsafe") { fail("REFERENCE", "Unsafe URI reached extraction: " + raw); }
+            if (ref.kind === "file") { return get(externalMap, ref.file) || raw; }
+            parts = ref.nodePath.split("/");
+            for (k = 0; k < parts.length; k += 1) { if (parts[k]) { v = get(map, decode(parts[k])); if (!v) { fail("REFERENCE", "Unmapped scene path in " + raw); } parts[k] = encodeURIComponent(v); } }
+            path = parts.join("/");
+            if (ref.kind === "local") { v = get(map, ref.fragment); if (!v) { fail("REFERENCE", "Unmapped local fragment in " + raw); } }
+            else { v = ref.fragment; }
+            return ref.scheme + (path ? path + ":" : "") + (ref.file ? get(externalMap, ref.file) || ref.file : "") + "#" + encodeURIComponent(v) + ref.query;
+        }
+        function rewrite(value, atRoot, materialBinding) {
+            if(!value||typeof value!=='object')return value;
+            var stack=[];
+            function enter(v,root,binding,geometries){for(var i=0;i<stack.length;i++)if(stack[i].value===v)fail('OBJECT_CYCLE','Cyclic extraction record.');var keys=[],k;if(geometries){for(i=0;i<v.length;i++)keys.push(i);}else for(k in v)if(own(v,k))keys.push(k);var frame={value:v,out:array(v)?[]:{},keys:keys,next:0,root:root,binding:binding,geometries:geometries};stack.push(frame);return frame.out;}
+            var result=enter(value,atRoot,materialBinding,false);while(stack.length){check(options);var frame=stack[stack.length-1];if(frame.next===frame.keys.length){stack.pop();continue;}var k=frame.keys[frame.next++],v=frame.value[k];if(k==='__proto__')fail('UNSAFE_KEY','Unsupported JSON member __proto__.');
+                if(frame.geometries)frame.out[k]=v&&typeof v==='object'?enter(v,true,false,false):v;
+                else if(frame.root&&k==='id')frame.out[k]=get(map,v)||v;
+                else if(frame.binding&&k==='geometry'&&p.materialTargetUris&&get(p.materialTargetUris,simpleLocal(v)))frame.out[k]=get(p.materialTargetUris,simpleLocal(v));
+                else if(isPuppeteerNodeName(stack,k))frame.out[k]=v;
+                else if(typeof v==='string'&&v&&own(uriFields,k))frame.out[k]=rewriteURI(v);
+                else if(k==='geometries'&&array(v))frame.out[k]=enter(v,false,false,true);
+                else frame.out[k]=v&&typeof v==='object'?enter(v,false,false,false):v;
+            }return result;
+        }
+        function bakeNode(value, state) {
+            if (!state) { return value; }
+            var out = {}, k, f, axis, j, channel, existing, fields = ["rotation", "translation", "scale"], axes = ["x", "y", "z"];
+            // Shallow-copy the record; only new transform arrays are changed.
+            // Other payload is still copied once by rewrite, including Low RAM rereads.
+            for (k in value) { if (own(value, k)) { out[k] = value[k]; } }
+            for (f = 0; f < fields.length; f += 1) {
+                existing = value[fields[f]] || []; out[fields[f]] = [];
+                for (axis = 0; axis < 3; axis += 1) {
+                    channel = null;
+                    for (j = 0; j < existing.length; j += 1) { if (obj(existing[j]) && existing[j].id === axes[axis]) { channel = clone(existing[j]); break; } }
+                    if (!channel) { channel = { id: axes[axis], type: "float" }; }
+                    channel.current_value = state[fields[f]][axis]; out[fields[f]].push(channel);
+                }
+            }
+            out.general_scale = obj(value.general_scale) ? clone(value.general_scale) : { id: "general", type: "float" };
+            out.general_scale.current_value = state.general_scale;
+            if (typeof state.rotation_order === "string") { out.rotation_order = state.rotation_order; }
+            return out;
+        }
+        var output = { file_version: doc.file_version || "0.6.0.0", asset_info: { id: "/SaveGuard/" + options.namespace + ".duf", type: options.assetType || "scene_subset", revision: "1.0" } }, outputScene = {};
+        function append(group, value) {
+            var target = group.indexOf("scene.") === 0 ? outputScene : output, name = group.indexOf("scene.") === 0 ? group.substring(6) : group;
+            if (!target[name]) { target[name] = []; } target[name].push(value);
+        }
+        for (i = 0; i < ix.records.length; i += 1) {
+            r = ix.records[i]; if (!includedRecord(r) || r.owner || r.group === "scene.nodes" || r.group === "node_library") { continue; }
+            append(r.group, rewrite(recordValue(r), true, r.group === "scene.materials"));
+        }
+        for (i = 0; i < p.libraryNodeIds.length; i += 1) { r = get(ix.byId, p.libraryNodeIds[i]); append("node_library", rewrite(recordValue(r), true)); }
+        for (i = 0; i < p.nodeIds.length; i += 1) {
+            r = get(ix.byId, p.nodeIds[i]); append("scene.nodes", rewrite(bakeNode(recordValue(r), p.animationSnapshot && get(p.animationSnapshot.nodeTransforms, r.id)), true));
+        }
+        // Only explicit render import changes the saved current camera.
+        if (p.includeRender && simpleLocal(str(doc.scene, "current_camera")) && get(map, simpleLocal(doc.scene.current_camera))) { outputScene.current_camera = rewriteURI(doc.scene.current_camera); }
+        output.scene = outputScene;
+        var placement = p.placement ? clone(p.placement) : null;
+        function remapPlacementId(id) { if (!id) { return ""; } var remapped = get(map, id); if (!remapped) { fail("PLACEMENT_CLOSURE", "Placement relationship is outside the import closure: " + id); } return remapped; }
+        if (placement) {
+            for (i = 0; i < placement.nodes.length; i += 1) {
+                var placementNode = placement.nodes[i]; placementNode.id = remapPlacementId(placementNode.id);
+                placementNode.parentId = remapPlacementId(placementNode.parentId); placementNode.conformTargetId = remapPlacementId(placementNode.conformTargetId);
+                placementNode.definitionUri = rewriteURI(placementNode.definitionUri);
+                for (j = 0; j < placementNode.followingRootIds.length; j += 1) { placementNode.followingRootIds[j] = remapPlacementId(placementNode.followingRootIds[j]); }
+                for (j = 0; j < placementNode.parentInPlaceAncestorIds.length; j += 1) { placementNode.parentInPlaceAncestorIds[j] = remapPlacementId(placementNode.parentInPlaceAncestorIds[j]); }
+            }
+        }
+        return { document: output, idMap: map, dependencies: dependencyResults, summary: clone(p), placement: placement, mapId: function (id) { return get(map, id); } };
+    }
+
+    // Resolve source asset state, never target scene values. The injected loader
+    // must read and validate the actual DSF read-only and return verified data.
+    function transformSource(doc, nodeIds, options) {
+        options = options || {}; var ix = index(doc), catalogResult = catalog(doc, { fullData: true }), cache = {}, resolved = {}, errors = [], dependencies = [], out = [], i;
+        if (!array(nodeIds)) { fail("TRANSFORM_SELECTION", "Transform source IDs must be an array."); }
+        function zeroVector() { return [{ id: "x", current_value: 0 }, { id: "y", current_value: 0 }, { id: "z", current_value: 0 }]; }
+        function restVector(base, incoming) {
+            if (!array(incoming)) { fail("POSE_DATA", "Malformed saved rest vector."); }
+            var axes = ["x", "y", "z"], result = [{ id: "x" }, { id: "y" }, { id: "z" }], a, j, axis, channel, value, k, seen = {};
+            for (a = 0; base && a < base.length; a += 1) { axis = obj(base[a]) ? axes.indexOf(base[a].id) : a; if (axis >= 0 && axis < 3) { result[axis] = obj(base[a]) ? clone(base[a]) : { id: axes[axis], current_value: base[a] }; } }
+            for (j = 0; j < incoming.length; j += 1) {
+                channel = incoming[j]; axis = obj(channel) ? axes.indexOf(channel.id) : j;
+                if (axis < 0 || axis > 2 || get(seen, axis)) { fail("POSE_DATA", "Missing or duplicate saved rest axis."); } seen[key(axis)] = true;
+                if (obj(channel)) {
+                    value = own(channel, "current_value") || own(channel, "value") ? channelValue(channel) : channelValue(result[axis]);
+                    for (k in channel) { if (own(channel, k)) { result[axis][k] = clone(channel[k]); } }
+                } else { value = channel; }
+                if (value !== undefined) { if (typeof value !== "number" || !isFinite(value)) { fail("POSE_DATA", "Invalid saved rest axis value."); } result[axis].current_value = value; }
+            }
+            return result;
+        }
+        function overlay(base, node) {
+            var value = clone(base), fields = ["rotation", "translation", "scale"], f, j, channel, axis, number;
+            for (f = 0; f < fields.length; f += 1) {
+                if (!own(node, fields[f])) { continue; }
+                if (!array(node[fields[f]])) { fail("POSE_DATA", "Malformed saved " + fields[f] + " channel array."); }
+                var seenAxes = {};
+                for (j = 0; j < node[fields[f]].length; j += 1) {
+                    channel = node[fields[f]][j]; axis = obj(channel) ? ["x", "y", "z"].indexOf(channel.id) : j;
+                    number = obj(channel) ? channelValue(channel) : channel;
+                    if (axis < 0 || axis > 2 || get(seenAxes, axis)) { fail("POSE_DATA", "Missing, duplicate or invalid saved transform axis."); }
+                    seenAxes[key(axis)] = true;
+                    if (obj(channel) && !own(channel, "current_value") && !own(channel, "value")) { continue; }
+                    if (typeof number !== "number" || !isFinite(number)) { fail("POSE_DATA", "Invalid saved transform value."); }
+                    value[fields[f]][axis] = number;
+                }
+            }
+            if (own(node, "general_scale") && (!obj(node.general_scale) || own(node.general_scale, "current_value") || own(node.general_scale, "value"))) { number = obj(node.general_scale) ? channelValue(node.general_scale) : node.general_scale; if (typeof number !== "number" || !isFinite(number)) { fail("POSE_DATA", "Invalid general scale."); } value.general_scale = number; }
+            var rest = ["center_point", "end_point", "orientation"], k;
+            for (k = 0; k < rest.length; k += 1) { if (own(node, rest[k])) { value[rest[k]] = restVector(value[rest[k]], node[rest[k]]); } }
+            if (own(node, "rotation_order")) { value.rotation_order = node.rotation_order; }
+            if (own(node, "inherits_scale")) { if (typeof node.inherits_scale !== "boolean") { fail("POSE_DATA", "Invalid inherits_scale flag."); } value.inherits_scale = node.inherits_scale; value.inheritsScaleExplicit = true; }
+            return value;
+        }
+        function absolute(file, baseFile) {
+            if (!file || file.charAt(0) === "/") { return file; }
+            if (!baseFile || baseFile.charAt(0) !== "/") { fail("DEFINITION_PATH", "Cannot resolve relative source definition " + file); }
+            var path = baseFile.substring(0, baseFile.lastIndexOf("/") + 1) + file, parts = path.split("/"), result = [], k;
+            for (k = 0; k < parts.length; k += 1) { if (parts[k] === "..") { if (!result.length) { fail("DEFINITION_PATH", "Definition path escapes its content root."); } result.pop(); } else if (parts[k] && parts[k] !== ".") { result.push(parts[k]); } }
+            return "/" + result.join("/");
+        }
+        function scopeFor(file) {
+            var hit = get(cache, file), loaded, asset, wrapper, k;
+            if (hit) { return hit; }
+            addUnique(dependencies, file);
+            if (typeof options.resolveAssetDocument !== "function") { fail("MISSING_DEFINITION", "Source definition must be read to resolve sparse pose: " + file); }
+            loaded = options.resolveAssetDocument(file);
+            if (!loaded || loaded.verified !== true || !obj(loaded.document)) { fail("MISSING_DEFINITION", "Missing or unverified source definition: " + file); }
+            asset = loaded.document; wrapper = {};
+            for (k in asset) { if (own(asset, k)) { wrapper[k] = asset[k]; } } wrapper.scene = wrapper.scene || {};
+            hit = index(wrapper); if (hit.errors.length) { fail("DEFINITION_DATA", hit.errors.join("; ")); }
+            hit.sourceIdentity=typeof loaded.path==='string'&&loaded.path?loaded.path:file;hit.sourceBase=typeof loaded.uri==='string'&&loaded.uri?loaded.uri:file;cache[key(file)] = hit; return hit;
+        }
+        function definitionState(uri, scope, baseFile, seen, depth) {
+            var chain=[],ref,definitionScope=scope,file=baseFile,id,r,base,frame;
+            while(true){
+                ref=parseURI(uri);
+                if(ref.kind==='external'){file=absolute(ref.file,file);definitionScope=scopeFor(file);file=definitionScope.sourceBase;}
+                else if(ref.kind!=='local'||ref.nodePath||ref.query){fail('DEFINITION_URI','Unsupported source definition URI: '+uri);}
+                id=JSON.stringify([definitionScope===ix?['scene']:['asset',definitionScope.sourceIdentity],ref.fragment]);if(get(seen,id))fail('DEFINITION_CYCLE','Source definition inheritance cycle at '+id);seen[key(id)]=true;
+                if(get(resolved,id)){base=clone(get(resolved,id));break;}
+                r=get(definitionScope.byId,ref.fragment);if(!r||r.group!=='node_library')fail('MISSING_DEFINITION','Missing node definition '+id);
+                chain.push({id:id,value:r.value});
+                if(str(r.value,'source')){uri=r.value.source;continue;}
+                base={rotation:[0,0,0],translation:[0,0,0],scale:[1,1,1],general_scale:1,rotation_order:'XYZ',center_point:zeroVector(),end_point:zeroVector(),orientation:null,nodeType:'node',inheritsScaleExplicit:false};break;
+            }
+            while(chain.length){frame=chain.pop();base=overlay(base,frame.value);if(str(frame.value,'type'))base.nodeType=frame.value.type;resolved[key(frame.id)]=clone(base);}
+            return base;
+        }
+        for (i = 0; i < catalogResult.rows.length; i += 1) {
+            var row = catalogResult.rows[i]; if (nodeIds.indexOf(row.id) < 0) { continue; }
+            var record = get(ix.byId, row.id);
+            try { var state = definitionState(str(record.value, "url"), ix, str(doc.asset_info, "id"), {}, 0); state = overlay(state, record.value);
+                out.push({ id: row.id, internalName: row.internalName, sourceUrl: row.sourceUrl, parentId: row.parentId, type: state.nodeType, state: state }); }
+            catch (e) { errors.push(row.internalName + ": " + e.message); }
+        }
+        for (i = 0; i < nodeIds.length; i += 1) { var requested = get(ix.byId, nodeIds[i]); if (!requested || requested.group !== "scene.nodes") { errors.push("Missing or ambiguous source instance: " + nodeIds[i]); } }
+        var resolvedRows = {}, catalogRows = {};
+        for (i = 0; i < out.length; i += 1) { resolvedRows[key(out[i].id)] = out[i]; }
+        for (i = 0; i < catalogResult.rows.length; i += 1) { catalogRows[key(catalogResult.rows[i].id)] = catalogResult.rows[i]; }
+        for (i = 0; i < out.length; i += 1) {
+            var resolvedRow = out[i], savedRow = get(catalogRows, resolvedRow.id), parentRow = get(resolvedRows, resolvedRow.parentId) || get(catalogRows, resolvedRow.parentId);
+            resolvedRow.parentSourceUrl = parentRow ? parentRow.sourceUrl : ""; resolvedRow.parentInternalName = parentRow ? parentRow.internalName : "";
+            if (!resolvedRow.state.inheritsScaleExplicit) {
+                resolvedRow.state.inherits_scale = savedRow.parent && !parentRow || parentRow && parentRow.type === "unknown" ? null : !(resolvedRow.type === "bone" && parentRow && parentRow.type === "bone");
+            }
+        }
+        return { ready: errors.length === 0, nodes: out, errors: errors, definitionFiles: dependencies,
+            defaultsSource: "verified-saved-asset-definitions-plus-saved-instance-overrides" };
+    }
+    function poseSource(doc, sourceId, options) {
+        var cat = catalog(doc, { fullData: true }), ids = [], found = false, i;
+        for (i = 0; i < cat.rows.length; i += 1) {
+            var row = cat.rows[i];
+            if (row.id === sourceId) { found = row.type === "figure"; ids.push(row.id); }
+            else if (row.type === "bone" && row.figureId === sourceId) { ids.push(row.id); }
+        }
+        if (!found) { fail("SOURCE_FIGURE", "Choose a saved figure."); }
+        var result = transformSource(doc, ids, options); result.sourceFigureId = sourceId; return result;
+    }
+
+    function posePlan(doc, sourceId, target, options) {
+        options = options || {}; var ix = index(doc), cat = catalog(doc, { fullData: true }), source = get(ix.byId, sourceId), rows = {}, i, assignments = [], errors = [], targetBySource = {};
+        if (!source || source.group !== "scene.nodes" || effectiveType(ix, source.value).type !== "figure") { fail("SOURCE_FIGURE", "Choose a saved figure."); }
+        var sourceUrl = canonicalSource(ix, source.value);
+        if (!target || target.verified !== true || !sourceUrl || target.sourceUrl !== sourceUrl) { fail("INCOMPATIBLE_FIGURE", "Target must be the explicitly selected, verified figure with the same source asset URL."); }
+        for (i = 0; i < cat.rows.length; i += 1) { rows[key(cat.rows[i].id)] = cat.rows[i]; }
+        var sourcePose = poseSource(doc, sourceId, options), sourceStates = {}, appliedNodes = {};
+        for (i = 0; i < sourcePose.errors.length; i += 1) { errors.push(sourcePose.errors[i]); }
+        for (i = 0; i < sourcePose.nodes.length; i += 1) {
+            sourceStates[key(sourcePose.nodes[i].id)] = sourcePose.nodes[i].state;
+            if (sourcePose.nodes[i].id !== sourceId || options.includeRootTransforms === true) { appliedNodes[key(sourcePose.nodes[i].id)] = true; }
+        }
+        var animationSnapshot = snapshotAnimations(ix, function (r) {
+            return r.group === "scene.animations" || r.group === "scene.nodes" && own(appliedNodes, key(r.id));
+        }, rows, errors, options, true);
+        for (i = 0; target.nodes && i < target.nodes.length; i += 1) {
+            var tn = target.nodes[i], match = tn.sourceUrl + "|" + tn.internalName;
+            if (get(targetBySource, match)) { fail("AMBIGUOUS_TARGET", "Duplicate target bone identity: " + tn.internalName); } targetBySource[key(match)] = tn;
+        }
+        for (i = 0; i < cat.rows.length; i += 1) {
+            var row = cat.rows[i]; if (row.id !== sourceId && (row.type !== "bone" || row.figureId !== sourceId)) { continue; }
+            if (row.id === sourceId && options.includeRootTransforms !== true) { continue; }
+            var sceneEditorCompat_native = row.id === sourceId ? { key: target.key, rotationOrder: target.rotationOrder } : get(targetBySource, row.sourceUrl + "|" + row.internalName), value = get(sourceStates, row.id);
+            if (!value) { continue; }
+            if (!sceneEditorCompat_native || !sceneEditorCompat_native.key) { errors.push("No unique compatible target for saved bone " + row.internalName); continue; }
+            var parentRow = get(rows, row.parentId), parentNative = parentRow && parentRow.id === sourceId ? { key: target.key } : parentRow && get(targetBySource, parentRow.sourceUrl + "|" + parentRow.internalName),
+                rotationOrder = str(value, "rotation_order");
+            if (row.id !== sourceId && (!parentNative || sceneEditorCompat_native.parentKey !== parentNative.key)) { errors.push("Target bone hierarchy differs or is unchecked for " + row.internalName); continue; }
+            if (rotationOrder && sceneEditorCompat_native.rotationOrder !== rotationOrder) { errors.push("Target rotation order differs or is unchecked for " + row.internalName); continue; }
+            if (target.rigVerified !== true) { errors.push("Rest rig compatibility has not been verified for " + row.internalName); continue; }
+            var fields = ["rotation", "translation", "scale", "general_scale"], j, k, saved, v;
+            for (j = 0; j < fields.length; j += 1) {
+                saved = value[fields[j]]; if (saved === undefined) { continue; }
+                if (array(saved)) {
+                    for (k = 0; k < saved.length; k += 1) {
+                        v = obj(saved[k]) ? channelValue(saved[k]) : saved[k];
+                        if (typeof v !== "number" || !isFinite(v)) { errors.push("Invalid transform value on " + row.id); continue; }
+                        assignments.push({ targetKey: sceneEditorCompat_native.key, sourceNodeId: row.id, property: fields[j], axis: obj(saved[k]) ? saved[k].id : ["x", "y", "z"][k], value: v });
+                    }
+                } else { v = obj(saved) ? channelValue(saved) : saved; if (typeof v === "number" && isFinite(v)) { assignments.push({ targetKey: sceneEditorCompat_native.key, sourceNodeId: row.id, property: fields[j], axis: "", value: v }); } }
+            }
+        }
+        return { ready: !errors.length, errors: errors, assignments: assignments, sourceFigureId: sourceId, targetKey: target.key,
+            rootTransformsIncluded: options.includeRootTransforms === true, scope: "saved-transform-channels-with-source-defaults", animationKeysApplied: false,
+            definitionFiles: sourcePose.definitionFiles, defaultsSource: sourcePose.defaultsSource, animationSnapshot: animationSnapshot };
+    }
+    function figureDescriptor(doc, sourceId) {
+        var ix = index(doc), source = get(ix.byId, sourceId), cat = catalog(doc, { fullData: true }), rows = {}, out = [], i;
+        if (!source || source.group !== "scene.nodes" || effectiveType(ix, source.value).type !== "figure") { fail("SOURCE_FIGURE", "Choose a saved figure."); }
+        for (i = 0; i < cat.rows.length; i += 1) { rows[key(cat.rows[i].id)] = cat.rows[i]; }
+        for (i = 0; i < cat.rows.length; i += 1) {
+            var row = cat.rows[i]; if (row.id !== sourceId && (row.type !== "bone" || row.figureId !== sourceId)) { continue; }
+            var value = get(ix.byId, row.id).value, d = definition(ix, value), parent = get(rows, row.parentId);
+            out.push({ id: row.id, internalName: row.internalName, sourceUrl: row.sourceUrl, parentId: row.parentId,
+                parentSourceUrl: parent ? parent.sourceUrl : "", parentInternalName: parent ? parent.internalName : "",
+                rotationOrder: str(value, "rotation_order") || str(d, "rotation_order"),
+                centerPoint: clone(value.center_point || d && d.center_point || null), endPoint: clone(value.end_point || d && d.end_point || null),
+                orientation: clone(value.orientation || d && d.orientation || null),
+                inheritsScale: own(value, "inherits_scale") ? value.inherits_scale : d && own(d, "inherits_scale") ? d.inherits_scale : null });
+        }
+        return { sourceFigureId: sourceId, sourceUrl: canonicalSource(ix, source.value), nodes: out, restRigRequiresAssetResolution: true };
+    }
+    function renderPreset(doc, options) {
+        options = options || {}; var p = plan(doc, [], { fullData: true, renderOnly: true }), o = {}, k;
+        if (!p.locators.length) { fail("NO_RENDER", "No saved render settings are present."); }
+        for (k in options) { if (own(options, k)) { o[k] = options[k]; } } o.assetType = "preset_render_settings";
+        return extract(doc, p, o);
+    }
+    function materialPlan(doc, sourceId, target) {
+        var ix = index(doc), source = get(ix.byId, sourceId), sourceUrl, bindings = [], seeds = [], targets = {}, errors = [], i, j, k, n, geometry, uri, parsed, candidates, match;
+        if (!source || source.group !== "scene.nodes" || effectiveType(ix, source.value).type !== "figure") { fail("SOURCE_FIGURE", "Choose a saved figure for materials."); }
+        sourceUrl = canonicalSource(ix, source.value);
+        if (!target || target.verified !== true || !target.key || !target.id || !sourceUrl || target.sourceUrl !== sourceUrl) { fail("INCOMPATIBLE_FIGURE", "Material target must be the explicitly selected, verified figure with the same source asset URL."); }
+        for (i = 0; source.value.geometries && i < source.value.geometries.length; i += 1) {
+            geometry = source.value.geometries[i]; uri = canonicalSource(ix, geometry); candidates = [];
+            for (j = 0; target.geometries && j < target.geometries.length; j += 1) { if (uri && target.geometries[j].sourceUrl === uri) { candidates.push(target.geometries[j]); } }
+            if (candidates.length !== 1) { errors.push("No unique compatible target geometry for " + geometry.id); continue; }
+            match = candidates[0]; parsed = parseURI(match.uri);
+            if (!match.key || parsed.kind === "unsafe" || !parsed.nodePath || pathIds(parsed)[0] !== target.id) { errors.push("Target geometry URI must address the verified selected instance: " + geometry.id); continue; }
+            targets[key(geometry.id)] = match.uri;
+            for (j = 0; j < ix.records.length; j += 1) {
+                n = ix.records[j]; if (n.group !== "scene.materials" || simpleLocal(str(n.value, "geometry")) !== geometry.id) { continue; }
+                for (k = 0; n.value.groups && k < n.value.groups.length; k += 1) { if (!array(match.groups) || match.groups.indexOf(n.value.groups[k]) < 0) { errors.push("Missing target material group " + n.value.groups[k] + " on " + geometry.id); } }
+                seeds.push(n.locator); bindings.push({ sourceMaterialId: n.id, sourceGeometryId: geometry.id, targetGeometryKey: match.key, targetUri: match.uri, groups: clone(n.value.groups || []) });
+            }
+        }
+        if (!seeds.length) { errors.push("No saved material bindings on the selected figure."); }
+        var p = plan(doc, [], { fullData: true, recordLocators: seeds, materialTargetUris: targets });
+        for (i = 0; i < errors.length; i += 1) { addUnique(p.errors, errors[i]); }
+        if (p.nodeIds.length) { p.errors.push("Materials depend on scene nodes; an isolated material preset cannot preserve those links safely."); }
+        p.ready = p.errors.length === 0; p.materialBindings = bindings; p.targetKey = target.key; p.targetId = target.id; p.operation = "materials";
+        return p;
+    }
+    function materialPreset(doc, sourceId, target, options) {
+        var p = materialPlan(doc, sourceId, target), o = {}, k; options = options || {};
+        for (k in options) { if (own(options, k)) { o[k] = options[k]; } } o.assetType = "preset_material";
+        return extract(doc, p, o);
+    }
+    function fromProvider(provider) {
+        var doc = clone(provider.readEnvelope()), groups = libraries.slice(0), available = typeof provider.groups === "function" ? provider.groups() : null, i;
+        doc.scene = doc.scene || {};
+        for (i = 0; i < sceneGroups.length; i += 1) { groups.push("scene." + sceneGroups[i]); }
+        for (i = 0; i < groups.length; i += 1) {
+            var g = groups[i], values = !available || available.indexOf(g) >= 0 ? provider.listRecords(g) : [];
+            if (g.indexOf("scene.") === 0) { doc.scene[g.substring(6)] = values || []; } else { doc[g] = values || []; }
+        }
+        return doc;
+    }
+    function nodeDefinitionProjection(doc){if(!obj(doc)||doc.scene||!array(doc.node_library))return null;var wrapper={},k;for(k in doc)if(own(doc,k))wrapper[k]=doc[k];wrapper.scene={};var checked=index(wrapper);if(checked.errors.length)return null;var fields=["id","source","type","rotation","translation","scale","general_scale","center_point","end_point","orientation","rotation_order","inherits_scale"],nodes=[],i,j,n;for(i=0;i<doc.node_library.length;i++){n={};for(j=0;j<fields.length;j++)if(own(doc.node_library[i],fields[j]))n[fields[j]]=doc.node_library[i][fields[j]];nodes.push(n);}return {node_library:nodes,scene:{}};}
+    return { isPuppeteerNodeName:isPuppeteerNodeName, nodeDefinitionProjection:nodeDefinitionProjection, version: "0.1-draft", catalog: catalog, plan: plan, extract: extract, parseURI: parseURI, posePlan: posePlan, poseSource: poseSource, transformSource: transformSource, figureDescriptor: figureDescriptor, materialPlan: materialPlan, materialPreset: materialPreset,
+        renderPreset: renderPreset, fromProvider: fromProvider, emission: function (doc, material) { return emission(index(doc), material); } };
+}());

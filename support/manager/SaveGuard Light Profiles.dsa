@@ -1,0 +1,8 @@
+// Dispatch after resolving the exact selected definition chain; native properties remain authored.
+var SaveGuardLightProfiles=(function(){
+ function prepare(doc,id,ns,options){var info=SaveGuardLightPlan.describe(doc,id,options),plan,engine;
+  if(info.photometric===true){plan=(info.node.parent?SaveGuardPhotometricParentPlan:SaveGuardPhotometricFamilyPlan).extract(doc,id,ns,false,options);engine=plan.profile==='native-photometric-closure-v2'?SaveGuardLightNew:info.node.parent?SaveGuardPhotometricParentNew:SaveGuardPhotometricFamilyNew;return {plan:plan,engine:engine,profile:plan.profile};}
+  plan=SaveGuardLightPlan.extract(doc,id,ns,false,options);return {plan:plan,engine:SaveGuardLightNew,profile:'ordinary-static-light-v1'};
+ }
+ return {prepare:prepare};
+}());

@@ -1,0 +1,177 @@
+// Read-only static-prop preview. Preserves complete payload; does not certify shader appearance.
+var SaveGuardStaticPropAudit = (function () {
+    function own(o,k) { return !!o && Object.prototype.hasOwnProperty.call(o,k); }
+    function list(v) { return Object.prototype.toString.call(v) === "[object Array]"; }
+    function copy(v) { return JSON.parse(JSON.stringify(v)); }
+    function need(v,s) { if (!v) { throw Error("Static prop preview: " + s); } }
+    function number(v) { if (v !== null && v !== undefined && typeof v.valueOf === "function") { v=v.valueOf(); } need(typeof v === "number" && isFinite(v),"non-finite number"); return v; }
+    function fields(o,allowed) { for (var k in o) { if (own(o,k)) { need(allowed.indexOf(k)>=0,"unsupported field " + k); } } }
+    function values(v,what) { var a=list(v)?v:v&&v.values;need(list(a)&&a.length>0&&(list(v)||v.count===a.length),"invalid " + what);return a; }
+    function call(o,k,args) { need(o&&typeof o[k]==="function","missing read API " + k);return o[k].apply(o,args||[]); }
+    function pathKey(v) { v=String(v||"").replace(/\\/g,"/");return /^[A-Za-z]:\//.test(v)?v.toLowerCase():v; }
+    function create(options) {
+        var resolver=options.assetResolver, profile=copy(options.profile), plans={}, prepared=null, observations=[];
+        var definitionCache=[],definitionHashes=0,definitionHits=0,definitionHashMillis=0,definitionCompareMillis=0,assessmentLogs=0;
+        var snapshotOwner=options.exactDefinitionCache===true?SaveGuardCacheSnapshot:null,snapshotFunction=snapshotOwner&&snapshotOwner.capture;
+        var fingerprintOwner=SaveGuardFullDUF,fingerprintFunction=fingerprintOwner.structuralFingerprint;
+        function reviewedDefinition(value,signature){
+            need(SaveGuardFullDUF===fingerprintOwner&&fingerprintOwner.structuralFingerprint===fingerprintFunction,"definition fingerprint API changed");
+            var encoded=null,started=new Date().getTime(),i;
+            if(snapshotOwner){
+                need(SaveGuardCacheSnapshot===snapshotOwner&&snapshotOwner.capture===snapshotFunction&&typeof snapshotFunction==="function","definition snapshot API changed");
+                encoded=snapshotFunction.call(snapshotOwner,value);definitionCompareMillis+=new Date().getTime()-started;
+                for(i=0;i<definitionCache.length;i+=1){if(definitionCache[i].uri===signature.uri){need(definitionCache[i].digest===signature.definitionDigest&&definitionCache[i].encoded===encoded,"shader definition changed since reviewed evidence");definitionHits++;return;}}
+            }
+            started=new Date().getTime();var digest=fingerprintFunction.call(fingerprintOwner,value).digest;definitionHashMillis+=new Date().getTime()-started;definitionHashes++;
+            need(digest===signature.definitionDigest,"shader definition changed since reviewed evidence");
+            if(snapshotOwner){definitionCache.push({uri:signature.uri,digest:digest,encoded:encoded});}
+        }
+        function record(doc,group,uri) {
+            var p=SaveGuardSelective.parseURI(uri), source=doc, a, found=null;
+            need((p.kind==="local"||p.kind==="external")&&p.fragment&&!p.nodePath&&!p.query,"exact asset reference required");
+            if(p.kind==="external") { need(p.file.charAt(0)==="/","absolute content URI required");var loaded=resolver.resolveAssetDocument(p.file);need(loaded&&loaded.verified&&loaded.document,"missing asset definition");source=loaded.document; }
+            a=source[group]||[];need(list(a),"asset library");
+            for(var i=0;i<a.length;i+=1){if(a[i].id===p.fragment){need(!found,"ambiguous definition");found=a[i];if(loaded&&loaded.planningOnly===true){need(typeof loaded.readRecord==="function"&&typeof loaded.verify==="function"&&loaded.verify()===true,"complete retained asset reader required");found=loaded.readRecord(group,i);need(found&&found.id===p.fragment&&loaded.verify()===true,"full asset record changed");}}}
+            need(found&&!found.source,"missing or inherited payload definition");return {record:found,document:source,file:p.file,fragment:p.fragment};
+        }
+        function channels(record,kind) {
+            var extras=record.extra||[],seen={},i,j,e,ch,v;
+            need(list(extras),"extension array");
+            var allowed=kind==="geometry"?{SubDIALevel:1,SubDRenderLevel:0,SubDAlgorithmControl:0,SubDEdgeInterpolateLevel:2,SubDNormalSmoothing:0}:
+                {"Disable Transform":false,"Ignore Local Transform":false,"Visible":true,"Visible in Viewport":true,"Selectable":true,"Renderable":true,"Cast Shadows":true,"Render Priority":3,"Visible in Simulation":true};
+            for(i=0;i<extras.length;i+=1){e=extras[i];need(e&&!own(seen,"$"+e.type),"duplicate extension");seen["$"+e.type]=true;
+                if(kind==="node"&&e.type==="studio/node/group_node"){fields(e,["type"]);continue;}
+                need(e.type===(kind==="node"?"studio_node_channels":"studio_geometry_channels"),"unreviewed extension "+e.type);fields(e,["type","version","channels"]);
+                var cs=e.channels||[];need(list(cs),"channel array");var ids={};
+                for(j=0;j<cs.length;j+=1){fields(cs[j],["channel","group"]);ch=cs[j].channel;need(ch&&typeof ch.id==="string"&&!own(ids,"$"+ch.id),"channel identity");ids["$"+ch.id]=true;
+                    fields(ch,["id","type","name","label","visible","value","current_value","min","max","step_size","clamped","needs_node","node","enum_values","display_as_percent"]);v=own(ch,"current_value")?ch.current_value:ch.value;
+                    if(kind==="node"&&ch.id==="Point At"){need(ch.node===null||ch.node===undefined,"point-at target unsupported");continue;}
+                    need(own(allowed,ch.id)&&v===allowed[ch.id],"unsupported "+kind+" control "+ch.id);
+                }
+            }
+        }
+        function mesh(doc,ref) {
+            fields(ref,["id","url","name","label","type","extra"]);channels(ref,"geometry");
+            var g=record(doc,"geometry_library",ref.url).record;
+            fields(g,["id","name","label","type","vertices","polygon_groups","polygon_material_groups","polylist","default_uv_set","extra"]);need(g.type==="polygon_mesh","polygon mesh required");channels(g,"geometry");
+            var vs=values(g.vertices,"vertices"),fs=values(g.polylist,"facets"),groups=values(g.polygon_groups,"polygon groups"),mats=values(g.polygon_material_groups,"material groups"),i,j;
+            for(i=0;i<groups.length;i+=1){need(typeof groups[i]==="string"&&groups[i]&&groups.indexOf(groups[i])===i,"face group name");}
+            for(i=0;i<mats.length;i+=1){need(typeof mats[i]==="string"&&mats[i]&&mats.indexOf(mats[i])===i,"material group name");}
+            for(i=0;i<vs.length;i+=1){need(list(vs[i])&&vs[i].length===3,"vertex width");for(j=0;j<3;j+=1){number(vs[i][j]);}}
+            for(i=0;i<fs.length;i+=1){var f=fs[i],seen={};need(list(f)&&(f.length===5||f.length===6),"only triangle/quad topology");
+                for(j=0;j<f.length;j+=1){need(number(f[j])===Math.floor(f[j])&&f[j]>=0,"facet index");}need(f[0]<groups.length&&f[1]<mats.length,"facet group index");
+                for(j=2;j<f.length;j+=1){need(f[j]<vs.length&&!own(seen,"$"+f[j]),"invalid/repeated corner");seen["$"+f[j]]=true;}
+            }
+            return {geometry:copy(g),ref:copy(ref),vertices:vs.length,facets:fs.length,materials:[]};
+        }
+        function uv(doc,uri,g) {
+            var u=record(doc,"uv_set_library",uri).record;fields(u,["id","name","label","vertex_count","uvs","polygon_vertex_indices"]);
+            var coordinates=values(u.uvs,"UV values"),indices=u.polygon_vertex_indices||[],map={},i,j;
+            need(u.vertex_count===g.vertices.count&&coordinates.length>=u.vertex_count,"UV target count");
+            for(i=0;i<coordinates.length;i+=1){need(list(coordinates[i])&&coordinates[i].length===2,"UV width");number(coordinates[i][0]);number(coordinates[i][1]);}
+            if(!list(indices)){indices=values(indices,"UV overrides");}
+            for(i=0;i<indices.length;i+=1){var row=indices[i],key;need(list(row)&&row.length===3,"UV override tuple");for(j=0;j<3;j+=1){need(number(row[j])===Math.floor(row[j])&&row[j]>=0,"UV override index");}
+                need(row[0]<g.polylist.count&&g.polylist.values[row[0]].slice(2).indexOf(row[1])>=0&&row[2]<coordinates.length,"UV override addressing");key="$"+row[0]+"/"+row[1];need(!own(map,key),"duplicate UV override");map[key]=row[2];}
+            return {coordinates:copy(coordinates),overrides:map};
+        }
+        // Local Uber definitions are admitted only by exact source and observed native evidence.
+        // This never flattens or edits the staged payload. IDs alone are omitted from
+        // comparison because Selective namespaces them; every shader value is retained.
+        function localMaterial(doc,m,g) {
+            var pin=profile.localUberEvidence;
+            need(pin&&pin.nativeAccepted===true&&typeof pin.evidenceId==="string"&&pin.evidenceId,"local Uber material requires verified profile evidence");
+            var definition=record(doc,"material_library",m.url).record, d=copy(definition), instance=copy(m);
+            delete d.id;delete instance.id;delete instance.url;delete instance.geometry;
+            need(JSON.stringify(d)===JSON.stringify(pin.definition)&&JSON.stringify(instance)===JSON.stringify(pin.instance),"local Uber definition/instance differs from pinned evidence");
+            fields(definition,["id","diffuse","extra"]);
+            var result={className:pin.className,propertyCount:pin.propertyCount,localUber:true,scalarObservations:copy(pin.scalarObservations),textures:{},uv:uv(doc,m.uv_set||g.default_uv_set,g)},ids={};
+            function validate(ch) {
+                need(ch&&typeof ch.id==="string"&&!own(ids,"$"+ch.id),"duplicate local material channel");ids["$"+ch.id]=true;
+                need(!ch.image_file&&(ch.image===undefined||ch.image===null||ch.image===""),"local preview requires untextured material");
+                var v=own(ch,"current_value")?ch.current_value:ch.value,t=ch.type;
+                if(t==="float"||t==="int"||t==="enum"){number(v);if(t!=="float"){need(Math.floor(v)===v,"integer material channel required");}}
+                else if(t==="bool"){need(typeof v==="boolean","boolean material channel required");}
+                else if(t==="color"||t==="float_color"){need(list(v)&&v.length===3,"material color required");for(var j=0;j<3;j+=1){number(v[j]);}}
+                else {need((t==="string"||t==="file")&&typeof v==="string"&&(t!=="file"||v===""),"unsupported local material channel");}
+                if(ch.id==="Emission Color"){need(v[0]===0&&v[1]===0&&v[2]===0,"emissive local material excluded");}
+                if(ch.id==="Bump Strength"||ch.id==="Displacement Strength"){need(v===0,"displacement/bump excluded");}
+            }
+            need(list(definition.extra)&&definition.extra.length===2,"local material extension set");
+            need(definition.extra[0].type==="studio/material/uber_iray"&&definition.extra[0].version==="1.1.0.0","local Uber version");
+            var ext=definition.extra[1];need(ext.type==="studio_material_channels"&&list(ext.channels),"local material channels");
+            validate(definition.diffuse.channel);for(var i=0;i<ext.channels.length;i+=1){validate(ext.channels[i].channel);}
+            ids={};validate(m.diffuse.channel);
+            return result;
+        }
+        function material(doc,m,g) {
+            fields(m,["id","url","geometry","groups","diffuse","uv_set","extra"]);var parsed=SaveGuardSelective.parseURI(m.url),signature=null,i,j;
+            if(parsed.kind==="local"){return localMaterial(doc,m,g);}
+            for(i=0;i<profile.shaderSignatures.length;i+=1){if(profile.shaderSignatures[i].uri===m.url){signature=profile.shaderSignatures[i];}}
+            need(signature,"shader definition not covered by this preview");var definition=record(doc,"material_library",m.url);
+            reviewedDefinition(definition.record,signature);
+            var result={className:"DzBrickMaterial",propertyCount:signature.propertyCount,textures:{},uv:uv(doc,m.uv_set||g.default_uv_set,g)},seen={};
+            function channel(ch,diffuse) {
+                need(ch&&typeof ch.id==="string"&&!own(seen,"$"+ch.id),"material channel identity");seen["$"+ch.id]=true;
+                fields(ch,["id","type","name","label","visible","value","current_value","image","image_file","min","max","step_size","clamped","display_as_percent"]);need(ch.image===undefined||ch.image===null||ch.image==="","layered/image-library texture references unsupported");
+                var expected=diffuse?"float_color":signature.channelTypes["$"+ch.id],v=own(ch,"current_value")?ch.current_value:ch.value;
+                need(expected&&ch.type===expected,"material channel type not covered: "+ch.id);if(diffuse){need(ch.id==="diffuse"&&ch.name==="Diffuse Color","diffuse identity");}
+                if(typeof v==="number"){number(v);}else if(list(v)){need(v.length===3,"color width");for(var n=0;n<3;n+=1){number(v[n]);}}else{need(typeof v==="string","unsupported material value");}
+                if(ch.id==="Emission Color"){need(list(v)&&v.length===3&&v[0]===0&&v[1]===0&&v[2]===0&&!ch.image_file,"emissive props need separate coverage");}
+                if(ch.id==="Displacement Strength"||ch.id==="Bump Strength"){need(v===0&&!ch.image_file,"displacement/bump unsupported");}
+                if(ch.image_file){need(diffuse||ch.id==="Normal Map","texture channel not observed in this preview");need(typeof ch.image_file==="string","direct texture path required");var found=resolver.resolveExternal(ch.image_file,{uris:[ch.image_file]});need(found&&found.exists===true&&found.path,"texture path not verified");result.textures["$"+(diffuse?"Diffuse Color":"Normal Map")]=pathKey(found.path);}
+            }
+            need(m.diffuse&&m.diffuse.channel,"saved diffuse payload required");fields(m.diffuse,["channel","group"]);channel(m.diffuse.channel,true);
+            need(list(m.extra)&&m.extra.length===2,"exact material extension set required");var types={};
+            for(i=0;i<m.extra.length;i+=1){var e=m.extra[i];need(!own(types,"$"+e.type),"duplicate material extension");types["$"+e.type]=true;
+                if(e.type==="studio/material/daz_brick"){fields(e,["type"]);}else{need(e.type==="studio_material_channels"&&list(e.channels),"unreviewed material extension");fields(e,["type","channels"]);for(j=0;j<e.channels.length;j+=1){fields(e.channels[j],["channel","group"]);channel(e.channels[j].channel,false);}}}
+            need(types["$studio/material/daz_brick"]&&types["$studio_material_channels"],"material extension set");return result;
+        }
+        function assess(entry,expected) {
+            var doc=entry.built.document,scene=doc.scene,next={},one=null,used={},i,j,d,refs;
+            need(entry.kind==="merge"&&expected&&list(expected.nodes)&&expected.nodes.length>0,"static node/ancestor closure");
+            fields(doc,["file_version","asset_info","node_library","geometry_library","uv_set_library","material_library","scene"]);fields(scene,["nodes","materials"]);
+            var library=doc.material_library||[],localUsed={};need(list(library),"local material library");
+            for(i=0;i<library.length;i+=1){need(library[i]&&typeof library[i].id==="string"&&library[i].id&&!own(localUsed,"$"+library[i].id),"duplicate/invalid local material id");localUsed["$"+library[i].id]=false;}
+            for(i=0;i<expected.nodes.length;i+=1){d=expected.nodes[i];need(d.type==="node","figures, bones, lights and cameras excluded");
+                var chain=d.definitionChain||[];for(j=0;j<chain.length;j+=1){var n=chain[j];fields(n,["id","url","name","label","type","parent","rotation_order","inherits_scale","center_point","end_point","orientation","rotation","translation","scale","general_scale","geometries","extra","preview","presentation"]);need(n.inherits_scale!==false,"non-inherited scale unsupported");channels(n,"node");if(n!==d.record){need(!n.geometries||n.geometries.length===0,"definition-attached geometry unsupported");}}
+                refs=d.record.geometries||[];need(list(refs)&&refs.length<=1,"one shape per node");next["$"+d.id]=null;
+                if(refs.length){need(!one,"select one static prop; multi-mesh closures excluded");one=mesh(doc,refs[0]);next["$"+d.id]=one;one.id=d.id;}
+            }
+            need(one,"a polygon prop is required");var mats=scene.materials||[],names=one.geometry.polygon_material_groups.values;need(list(mats)&&mats.length===names.length,"complete per-surface materials required");
+            for(i=0;i<names.length;i+=1){var found=null;for(j=0;j<mats.length;j+=1){var m=mats[j],gp=SaveGuardSelective.parseURI(m.geometry||"");need(gp.kind==="local"&&gp.fragment===one.ref.id&&!gp.nodePath&&!gp.query&&list(m.groups)&&m.groups.length===1,"exact material geometry/group binding required");if(m.groups[0]===names[i]){need(!found,"duplicate material assignment");found=m;}}
+                need(found,"missing material group");var plan=material(doc,found,one.geometry),mp=SaveGuardSelective.parseURI(found.url);if(mp.kind==="local"){localUsed["$"+mp.fragment]=true;}plan.name=names[i];one.materials.push(plan);used["$"+found.id]=true;}
+            for(var lid in localUsed){if(own(localUsed,lid)){need(localUsed[lid]===true,"unused local material definition");}}
+            for(i=0;i<mats.length;i+=1){need(used["$"+mats[i].id],"unused material record");}
+            prepared=entry;plans=copy(next);if(assessmentLogs++<16&&typeof print==="function"){try{print("SaveGuard definition cache: "+JSON.stringify({enabled:!!snapshotOwner,hashes:definitionHashes,hits:definitionHits,hashMillis:definitionHashMillis,compareMillis:definitionCompareMillis}));}catch(ignoredCacheLog){}}return true;
+        }
+        function verify(node,expected,entry) {
+            var out={stagedId:expected.id,ok:false,shaderEquivalenceVerified:false},i,j;
+            try{need(prepared===entry&&own(plans,"$"+expected.id),"unprepared imported node");var plan=plans["$"+expected.id],obj=call(node,"getObject");
+                if(!plan){need(!obj,"unexpected geometry on ancestor");}else{
+                    need(obj&&number(call(obj,"getNumShapes"))===1&&number(call(obj,"getNumModifiers"))===0,"shape/modifier count");var shape=call(obj,"getShape",[0]),geometry=call(shape,"getGeometry"),g=plan.geometry;
+                    need(number(call(geometry,"getNumVertices"))===g.vertices.count&&number(call(geometry,"getNumFacets"))===g.polylist.count,"mesh counts differ");
+                    for(i=0;i<g.vertices.count;i+=1){var v=call(geometry,"getVertex",[i]),xyz=[number(v.x),number(v.y),number(v.z)];for(j=0;j<3;j+=1){need(Math.abs(xyz[j]-g.vertices.values[i][j])<=0.0001,"mesh vertex differs");}}
+                    for(i=0;i<g.polylist.count;i+=1){var f=call(geometry,"getFacet",[i]),row=g.polylist.values[i];need(call(f,row.length===5?"isTri":"isQuad")===true&&number(f.faceGroupIndex)===row[0]&&number(f.materialIndex)===row[1],"facet group/type differs");for(j=2;j<row.length;j+=1){need(number(f["vertIdx"+(j-1)])===row[j],"facet corner differs");}}
+                    out.vertices=g.vertices.count;out.facets=g.polylist.count;out.fullMeshCompared=true;out.materials=[];need(number(call(shape,"getNumMaterials"))===plan.materials.length,"material count differs");
+                    for(i=0;i<plan.materials.length;i+=1){var want=plan.materials[i],mat=call(shape,"getMaterial",[i]),active=call(mat,"getActiveUVSet",[shape]),props=number(call(mat,"getNumProperties"));
+                        var actualClass=String(call(mat,"className"));
+                        need(String(call(mat,"getName"))===want.name,"material name differs");
+                        need(actualClass===want.className&&props===want.propertyCount,"material class/property count differs");
+                        need(active&&number(call(active,"getNumDimensions"))===2&&number(call(active,"getTargetVertexCount"))===g.vertices.count&&number(call(active,"getNumValues"))===want.uv.coordinates.length,"UV counts differ");
+                        for(j=0;j<want.uv.coordinates.length;j+=1){v=call(active,"getPnt2Vec",[j]);need(Math.abs(number(v.x)-want.uv.coordinates[j][0])<=0.0001&&Math.abs(number(v.y)-want.uv.coordinates[j][1])<=0.0001,"UV value differs");}
+                        for(var p=0;p<g.polylist.count;p+=1){row=g.polylist.values[p];for(j=2;j<row.length;j+=1){var k="$"+p+"/"+row[j],idx=own(want.uv.overrides,k)?want.uv.overrides[k]:row[j];need(number(call(active,"getMapIndex",[row[j],p]))===idx,"UV corner differs");}}
+                        var actual={},detail={name:want.name,className:actualClass,propertyCount:props,fullUVCompared:true,textures:[],localUberEvidenceCompared:want.localUber===true};
+                        if(want.localUber){detail.scalarObservations=[];}
+                        for(j=0;j<props;j+=1){var prop=call(mat,"getProperty",[j]);
+                            if(want.localUber&&prop&&typeof prop.getValue==="function"){var observed=prop.getValue();if(typeof observed==="number"||typeof observed==="boolean"||typeof observed==="string"){detail.scalarObservations.push({name:String(call(prop,"getName")),value:observed});}}
+                            if(prop&&typeof prop.getMapValue==="function"){var map=prop.getMapValue();if(map){var name=String(call(prop,"getName"));need(!own(actual,"$"+name),"ambiguous texture property");actual["$"+name]=pathKey(call(map,"getFilename"));detail.textures.push({name:name,path:actual["$"+name]});}}}
+                        if(want.localUber){var byName={},got=detail.scalarObservations;need(got.length===want.scalarObservations.length,"material scalar coverage differs");for(j=0;j<got.length;j+=1){need(!own(byName,"$"+got[j].name),"duplicate native material property");byName["$"+got[j].name]=got[j].value;}for(j=0;j<want.scalarObservations.length;j+=1){var w=want.scalarObservations[j],v=byName["$"+w.name];need(own(byName,"$"+w.name),"missing native material property "+w.name);if(typeof w.value==="number"){need(typeof v==="number"&&isFinite(v)&&(Math.floor(w.value)===w.value?v===w.value:Math.abs(v-w.value)<=Math.max(0.000001,Math.abs(w.value)*0.000001)),"material scalar differs: "+w.name);}else{need(v===w.value,"material scalar differs: "+w.name);}}}
+                        for(k in want.textures){if(own(want.textures,k)){need(actual[k]===want.textures[k],"texture binding differs");}}for(k in actual){if(own(actual,k)){need(want.textures[k]===actual[k],"unexpected texture binding");}}out.materials.push(detail);
+                    }
+                }out.ok=true;
+            }catch(e){out.error=String(e.message||e);}if(observations.length<32){observations.push(out);}return out.ok;
+        }
+        return {assess:assess,verify:verify,lastReport:function(){return observations.length?copy(observations[observations.length-1]):null;},observations:function(){return copy(observations);}};
+    }
+    return {create:create};
+}());

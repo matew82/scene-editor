@@ -1,0 +1,343 @@
+// Pure bounded policy; no I/O, scene traversal or native calls.
+var SaveGuardSaveHealth=(function(){
+ function integer(v){return typeof v==="number"&&isFinite(v)&&Math.floor(v)===v&&v>0&&v<=2147483647;}
+ function problems(view,render,prefs){var reasons=[],unknown=false;view=view||{};render=render||{};prefs=prefs||{};if(view.warning===true||view.isSceneCamera===false)reasons.push("Saved without a scene-camera view");if(prefs.checkRenderSize===true){if(!integer(render.imageWidth)||!integer(render.imageHeight))unknown=true;else if(render.imageWidth!==prefs.myRenderWidth||render.imageHeight!==prefs.myRenderHeight)reasons.push("Render size "+render.imageWidth+" x "+render.imageHeight+" differs from My Render Size "+prefs.myRenderWidth+" x "+prefs.myRenderHeight);}return {warning:reasons.length>0,reasons:reasons,unknownRenderSize:unknown};}
+ function notificationProblems(view,render,prefs){prefs=prefs||{};return problems(prefs.warnOnSave===true?view:{},render,prefs);}
+ function initial(now,dirty){return {lastSave:null,dirtySince:dirty?now:null,origin:dirty?"monitor started; earlier save time unknown":"new or clean scene",lastOperation:null};}
+ function saved(s,operation,now){if(s.lastOperation===operation)return false;s.previous={lastSave:s.lastSave,dirtySince:s.dirtySince,origin:s.origin,lastOperation:s.lastOperation};s.lastOperation=operation;s.lastSave=now;s.dirtySince=null;s.origin="last confirmed successful scene save";return true;}
+ function rejected(s,operation){if(s.lastOperation!==operation||!s.previous)return;var p=s.previous;s.lastSave=p.lastSave;s.dirtySince=p.dirtySince;s.origin=p.origin;s.lastOperation=p.lastOperation;s.previous=null;} function reset(s,now){s.previous=null;s.lastSave=null;s.dirtySince=null;s.lastOperation=null;s.origin="opened or new clean scene";}
+ function status(s,dirty,now,p){if(!dirty){s.dirtySince=null;return {key:"green",text:"Clean / saved",minutes:0,origin:s.origin};}if(s.dirtySince===null)s.dirtySince=now;var elapsed=Math.max(0,now-(s.lastSave===null?s.dirtySince:s.lastSave)),minutes=Math.floor(elapsed/60000),key=elapsed>=p.saveOverdueMinutes*60000?"red":elapsed>=p.saveDueMinutes*60000?"yellow":"recent";return {key:key,text:key==="red"?"Save overdue":key==="yellow"?"Save due":"Modified recently",minutes:minutes,origin:s.lastSave===null?"first observed dirty state; earlier save time unknown":s.origin};}
+ return {integer:integer,problems:problems,notificationProblems:notificationProblems,initial:initial,saved:saved,rejected:rejected,reset:reset,status:status};
+}());
+
+// Draft UI model. Pure ES5: no scene access, image decoding, or DUF parsing.
+var SaveGuardManagerModel = (function () {
+    function own(object, key) { return Object.prototype.hasOwnProperty.call(object, key); }
+    function text(value) { return value === null || typeof value === "undefined" ? "" : String(value); }
+    function trim(value) { return text(value).replace(/^\s+|\s+$/g, ""); }
+    function path(value) {
+        var p = text(value).replace(/\\/g, "/");
+        return p === "/" || /^[A-Za-z]:\/$/.test(p) ? p : p.replace(/\/$/, "");
+    }
+    function absolute(value) { return /^(?:[A-Za-z]:\/|\/)/.test(path(value)); }
+    // The host may supply a canonical identity. Do not lowercase POSIX paths.
+    function pathKey(value) {
+        var p = path(value);
+        return /^(?:[A-Za-z]:\/|\/\/)/.test(p) ? p.toLowerCase() : p;
+    }
+    function leaf(value) { var p = path(value); return p.substring(p.lastIndexOf("/") + 1); }
+    function folder(value) { var p = path(value); return p.substring(0, p.lastIndexOf("/")); }
+    function array(value) { return Object.prototype.toString.call(value) === "[object Array]" ? value : []; }
+    function finite(value) { return typeof value === "number" && isFinite(value) && value > 0 ? value : 0; }
+    function safeFile(base, relative) {
+        var rel = path(relative), parts = rel.split("/"), i;
+        if (!rel || absolute(rel) || /[:\x00-\x1f]/.test(rel)) { return ""; }
+        for (i = 0; i < parts.length; i += 1) { if (parts[i] === ".." || parts[i] === "." || parts[i] === "") { return ""; } }
+        return path(base) + "/" + rel;
+    }
+    function camera(value) {
+        value = value || {};
+        var state = value.isSceneCamera === true ? "scene-camera" : value.isSceneCamera === false ? "non-scene-view" : "unknown";
+        return { state: state, warning: state === "non-scene-view", name: text(value.name || value.internalName),
+            label: text(value.label || value.displayName || value.name || value.internalName),
+            id: text(value.id || value.nodeId), kind: text(value.kind || value.className),
+            isSceneCamera: state === "unknown" ? null : state === "scene-camera" };
+    }
+    function image(base, raw, role, label) {
+        raw = raw || {};
+        var saved = raw.copy || raw, file = text(saved.file), status = text(raw.status || saved.status);
+        var usable = status === "captured" || status === "copied" || status === "copied-existing-before-attempt" || status === "saved" || status === "complete";
+        return { role: role, label: label || role, path: usable ? safeFile(base, file) : "", file: file,
+            status: status || "unavailable", error: text(raw.error || raw.reason), name: text(raw.name || raw.internalName),
+            cameraId: text(raw.cameraId || raw.id), dimensions: raw.dimensions || null };
+    }
+    function mergeCapture(manifest, sidecar, base, manifestPath) {
+        var snapshot = manifest.capture || {}, payload = sidecar && (sidecar.capture || sidecar), values = [sidecar, payload],
+            expectedSession = text(snapshot.session || manifest.session),
+            expectedOperation = text(snapshot.operationId || manifest.operationId || manifest.operation),
+            source = path(manifest.sourcePath || manifest.source || (manifest.scene || {}).source), i, j, key, value,
+            foundSession = false, foundOperation = false, merged = {}, capture = {};
+        function reject(reason) { throw Error("Capture result identity rejected: " + reason); }
+        function hasValue(object, name) { return object && own(object, name) && object[name] !== null && typeof object[name] !== "undefined"; }
+        if (!sidecar || !payload || typeof payload !== "object" || Object.prototype.toString.call(payload) === "[object Array]") { reject("capture payload is not an object"); }
+        if (!expectedSession || !expectedOperation) { reject("complete manifest has no session/operation identity"); }
+        if (manifest.session && text(manifest.session) !== expectedSession) { reject("complete session conflicts with snapshot"); }
+        if ((manifest.operationId || manifest.operation) && text(manifest.operationId || manifest.operation) !== expectedOperation) { reject("complete operation conflicts with snapshot"); }
+        // Relocated immutable copy: only rebase the copy folder, never source identity or image filenames.
+        var previousBase=path(sidecar.versionFolder||sidecar.folder||""),relocated=false;
+        if(previousBase&&pathKey(previousBase)!==pathKey(base)&&absolute(previousBase)&&leaf(previousBase)===leaf(base)&&leaf(base).indexOf(expectedOperation+"-post-save-")===0&&/^[0-9]+$/.test(leaf(base).substring((expectedOperation+"-post-save-").length)))relocated=true;
+        var pathChecks = { sourcePath: source, source: source, versionFolder: path(base), folder: path(base),
+            manifestPath: path(manifestPath), sourceManifestPath: path(manifestPath) };
+        for (i = 0; i < values.length; i += 1) {
+            value = values[i];
+            if (hasValue(value, "session")) {
+                foundSession = true; if (text(value.session) !== expectedSession) { reject("session does not match saved copy"); }
+            }
+            if (hasValue(value, "operationId")) {
+                foundOperation = true; if (text(value.operationId) !== expectedOperation) { reject("operationId does not match saved copy"); }
+            }
+            if (hasValue(value, "operation") && text(value.operation) !== expectedOperation) { reject("operation does not match saved copy"); }
+            for (key in pathChecks) { if (own(pathChecks, key) && hasValue(value, key)) {
+                var alternate=relocated&&(key==="versionFolder"||key==="folder")?previousBase:relocated&&(key==="manifestPath"||key==="sourceManifestPath")?previousBase+"/complete.json":"";
+                if (!absolute(value[key]) || pathKey(value[key]) !== pathKey(pathChecks[key])&&(!alternate||pathKey(value[key])!==pathKey(alternate))) { reject(key + " does not match saved copy"); }
+            } }
+            if (hasValue(value, "sceneGeneration") && hasValue(snapshot, "sceneGeneration") && value.sceneGeneration !== snapshot.sceneGeneration) { reject("scene generation does not match saved copy"); }
+            if (value.scene && manifest.scene) {
+                if (hasValue(value.scene, "file") && text(value.scene.file) !== text(manifest.scene.file)) { reject("scene file does not match saved copy"); }
+                if (hasValue(value.scene, "bytes") && hasValue(manifest.scene, "bytes") && Number(value.scene.bytes) !== Number(manifest.scene.bytes)) { reject("scene bytes do not match saved copy"); }
+            }
+            var versionKeys = ["versionId", "sourceVersionId"];
+            for (j = 0; j < versionKeys.length; j += 1) {
+                key = versionKeys[j];
+                if (hasValue(value, key)) {
+                    var expected = hasValue(manifest, key) ? manifest[key] : snapshot[key];
+                    if (typeof expected === "undefined" || text(value[key]) !== text(expected)) { reject(key + " is unverified or differs"); }
+                }
+            }
+        }
+        if (!foundSession || !foundOperation) { reject("capture result requires session and operationId"); }
+        // Merge into fresh objects: immutable cached complete.json must not acquire later shot data.
+        for (key in manifest) { if (own(manifest, key)) { merged[key] = manifest[key]; } }
+        for (key in snapshot) { if (own(snapshot, key)) { capture[key] = snapshot[key]; } }
+        var savedFields = { activeView: true, visibleCameras: true, cameraInventory: true, render: true,
+            session: true, operationId: true, sceneGeneration: true, frame: true, timeline: true, observedAtEpochMs: true };
+        for (key in payload) { if (own(payload, key) && !own(savedFields, key) && key !== "__proto__") { capture[key] = payload[key]; } }
+        // Saved view/camera metadata remains the complete snapshot's authority.
+        merged.capture = capture;
+        return merged;
+    }
+    // Display decoding is deliberately separate from raw saved identity/reference handling.
+    function displayText(value){var s=text(value);return s.replace(/(?:%[0-9a-f]{2})+/gi,function(run){try{return decodeURIComponent(run);}catch(e){return run;}}).replace(/[\x00-\x1f\x7f]/g," ");}
+    function localReference(value){if(typeof value!=="string"||value.charAt(0)!=="#"||/[?]/.test(value))return null;try{return decodeURIComponent(value.substring(1));}catch(e){return null;}}
+    // Adapted from WM's draft registry workflow; storage and classification remain SaveGuard-owned.
+    function figureNames(names){if(Object.prototype.toString.call(names)!=='[object Array]')throw Error('Figure internal names must be an array.');var out=[],seen={};for(var i=0;i<names.length;i++){var n=names[i];if(typeof n!=='string'||!n||/[\x00-\x1f]/.test(n))throw Error('Invalid figure internal name.');if(!own(seen,'$'+n)){seen['$'+n]=true;out.push(n);}}return out;}
+    function addFigureName(names,name){var out=figureNames(names),n=trim(name);if(out.indexOf(n)<0)out.push(n);return figureNames(out);}
+    function resetFigureNames(names,defaults){var out=figureNames(names),base=figureNames(defaults);for(var i=0;i<base.length;i++)if(out.indexOf(base[i])<0)out.push(base[i]);return figureNames(out);}
+    function figureFamily(name){var match=/^Genesis([238])(_1)?(Female|Male)$/.exec(name);if(match)return 'Genesis '+match[1]+(match[2]?'.1':'')+' '+match[3];if(name==='Genesis9')return 'Genesis 9';if(name==='DAZHorse2')return 'DAZ Horse 2';return name;}
+    function selectedFigureName(node){if(!node||typeof node.inherits!=='function')throw Error('Select an independent figure or one of its bones.');if(node.inherits('DzBone'))node=node.getSkeleton();if(!node||!node.inherits('DzSkeleton')||node.inherits('DzBone')||node.inherits('DzGroupNode')||typeof node.getFollowTarget!=='function'||node.getFollowTarget())throw Error('Select an independent figure, not a fitted wearable.');var parent=node.getNodeParent(),seen=[],count=0;while(parent){if(seen.indexOf(parent)>=0)throw Error('Figure parent chain is invalid.');seen.push(parent);if(parent.inherits('DzBone')||parent.inherits('DzSkeleton'))throw Error('An attached figure cannot be added as an independent figure.');parent=parent.getNodeParent();}var name=String(node.getName());figureNames([name]);return name;}
+    function typeValue(row,names){if(row.type==="figure"&&names&&names.indexOf(row.name)>=0)return displayText(figureFamily(row.name));if(row.value!==undefined)return displayText(row.value);if(row.displayType)return displayText(row.displayType);var types={camera:"Camera",light:"Light",figure:"Figure",node:"Scene node",bone:"Bone"};return types[row.type]||"Scene node (type not recorded)";}
+    function hierarchy(rows){var ids={},parents=[],state=[],issues=[],i,key,p;for(i=0;i<rows.length;i+=1){key="$"+rows[i].sourceId;ids[key]=own(ids,key)?-1:i;}for(i=0;i<rows.length;i+=1){p=localReference(rows[i].parent);key="$"+p;parents[i]=p!==null&&own(ids,key)&&ids[key]>=0&&ids[key]!==i?ids[key]:-1;if(rows[i].parent&&parents[i]<0)issues.push(i);}
+        // Iterative cycle breaking: each node is visited at most twice, no recursive UI walk.
+        for(i=0;i<rows.length;i+=1){if(state[i])continue;var at=i,trail=[];while(at>=0&&!state[at]){state[at]=1;trail.push(at);at=parents[at];}if(at>=0&&state[at]===1){parents[at]=-1;issues.push(at);}for(var j=0;j<trail.length;j+=1)state[trail[j]]=2;}return {parents:parents,issues:issues};}
+    function periodRange(index,now,custom){if(index===0)return {from:null,until:null};if(typeof now!=="number"||!isFinite(now))throw Error("Current time is unavailable.");if(index===5){if(!custom)throw Error("Choose a custom period.");return {from:custom.from,until:custom.until};}var from;if(index===1)from=now-3600000;else if(index===2)from=now-86400000;else if(index===3)from=now-7*86400000;else if(index===4){var d=new Date(now),day=d.getDate();d.setDate(1);d.setMonth(d.getMonth()-1);var last=new Date(d.getFullYear(),d.getMonth()+1,0).getDate();d.setDate(Math.min(day,last));from=d.getTime();}else throw Error("Unknown date period.");return {from:from,until:now+1};}
+    function customPeriod(from,to){function parse(value,end){var s=trim(value),match=/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(s);if(!match)throw Error("Use YYYY-MM-DD or YYYY-MM-DD HH:mm:ss.");var y=+match[1],mo=+match[2]-1,day=+match[3],h=+(match[4]||0),mi=+(match[5]||0),sec=+(match[6]||0),d=new Date(y,mo,day,h,mi,sec,0);if(y<1000||d.getFullYear()!==y||d.getMonth()!==mo||d.getDate()!==day||d.getHours()!==h||d.getMinutes()!==mi||d.getSeconds()!==sec)throw Error("Invalid or nonexistent local date/time.");if(end){if(!match[4])d.setDate(d.getDate()+1);else d.setTime(d.getTime()+(match[6]===undefined?60000:1000));}return d.getTime();}var a=parse(from,false),b=parse(to,true);if(a>=b)throw Error("Start must be on or before End.");return {from:a,until:b};}
+    function normalize(record) {
+        var m = record.manifest || {}, base = path(record.folder || folder(record.manifestPath)),
+            manifestPath = path(record.manifestPath || base + "/" + text(record.manifestName || "complete.json")),
+            name = leaf(manifestPath), scene = m.scene || {}, source = path(m.sourcePath || m.source || scene.source),
+            metadata = m.metadata || {}, capture = m.capture || {}, view = capture.activeView || m.activeView || metadata.activeView || (m.viewport && m.viewport.activeView),
+            shots = [], outcomes = [], companions = array(m.companions), i, img, thumbnail = "", tip = "";
+        if (!absolute(source)) { return { error: "Missing absolute source identity", manifestPath: manifestPath }; }
+        if (!absolute(base)) { return { error: "Missing absolute version folder", manifestPath: manifestPath }; }
+        var status = record.invalidated ? "invalid" : record.failed ? "failed" :
+            name === "complete.json" && m.status === "complete" ? "complete" :
+            name === "pre-save.json" && m.role === "disk-before-asset-save-attempt" ? "pre-save" : "incomplete";
+        for (i = 0; i < companions.length; i += 1) {
+            var companion = companions[i] || {};
+            img = image(base, companion, /\.tip\.png$/i.test(text((companion.copy || {}).file)) ? "tip" : "thumbnail");
+            if (img.path && img.role === "tip" && !tip) { tip = img.path; }
+            if (img.path && img.role === "thumbnail" && !thumbnail) { thumbnail = img.path; }
+            shots.push(img);
+        }
+        if (m.thumbnail) { img = image(base, m.thumbnail, "thumbnail"); if (img.path) { thumbnail = img.path; } shots.push(img); }
+        if (m.tip) { img = image(base, m.tip, "tip"); if (img.path) { tip = img.path; } shots.push(img); }
+        if (m.viewport) { img = image(base, m.viewport, "active-viewport", "Active viewport"); shots.push(img); outcomes.push(img); }
+        var visible = array(capture.visibleCameras || m.visibleCameras || metadata.visibleCameras).filter(function (v) { return v && typeof v === "object"; }),
+            cameraShots = array(capture.shots || m.shots || m.cameraShots || metadata.cameraShots), cameraNames = {}, entry, role,
+            legacyCameraContainer = !capture.shots && !m.shots && !!(m.cameraShots || metadata.cameraShots);
+        for (i = 0; i < visible.length; i += 1) { if (visible[i]) { cameraNames["$" + visible[i].id] = text(visible[i].label || visible[i].name); } }
+        for (i = 0; i < cameraShots.length; i += 1) {
+            entry = cameraShots[i] || {};
+            role = text(entry.role);
+            if (role === "active-view" || role === "active-viewport") { role = "active-viewport"; }
+            else if (role === "visible-scene-camera" || role === "visible-camera" || role === "camera" || (!role && legacyCameraContainer)) { role = "visible-camera"; }
+            else { role = role || "unknown"; }
+            img = image(base, entry, role, role === "active-viewport" ? "Active viewport" :
+                text(entry.label || entry.name || cameraNames["$" + entry.cameraId]) || (role === "visible-camera" ? "Visible camera" : "Capture item (" + role + ")"));
+            shots.push(img); outcomes.push(img);
+        }
+        if(m.imported&&m.imported.preview&&typeof SaveGuardImportPolicy!=="undefined"&&SaveGuardImportPolicy.valid(m)){var importedImage=image(base,m.imported.preview,"imported-preview","Imported existing preview");shots.push(importedImage);outcomes.push(importedImage);}
+        var imported=typeof SaveGuardImportPolicy!=="undefined"&&SaveGuardImportPolicy.valid(m),captured = imported?finite(m.imported.savedAtEpochMs):finite(m.completedAtEpochMs) || finite(m.observedAtEpochMs) || finite(m.savedAtEpochMs);
+        return { id: pathKey(record.manifestIdentity || manifestPath), manifestPath: manifestPath, folder: base,
+            sourcePath: source, sceneId: imported?SaveGuardImportPolicy.group(m):pathKey(record.sourceIdentity || source), name: text(m.sceneLabel || m.label) || leaf(source).replace(/\.duf$/i, ""),
+            status: status, role: imported?"Imported copy":status === "pre-save" ? "Before save attempt" : "Saved copy", operation: text(m.operation),
+            savedAt: captured, retentionAt:captured||imported&&m.imported.importedAtEpochMs||null, retentionBasis:captured?"saved":imported?"imported":"unknown", timeSource: imported?m.imported.dateEvidence:captured ? "manifest" : "unavailable", catalogModifiedAt: finite(record.modifiedAtEpochMs),
+            scenePath: safeFile(base, scene.file), bytes: Number(scene.bytes) || 0,
+            inspectable: (status === "complete" || status === "pre-save") && !!safeFile(base, scene.file) && record.sceneFileExists !== false,
+            sceneFileExists: record.sceneFileExists !== false,
+            thumbnailPath: thumbnail || tip, tipPath: tip, activeView: camera(view),
+            visibleCameras: visible, visibleCamerasRecorded: Object.prototype.toString.call(capture.visibleCameras)==="[object Array]" || Object.prototype.toString.call(m.visibleCameras)==="[object Array]" || Object.prototype.toString.call(metadata.visibleCameras)==="[object Array]", cameraShots: cameraShots, screenshots: shots, captureOutcomes: outcomes,
+            captureStatus: text(capture.status) || (m.capture ? "unknown" : "not recorded"),
+            captureResultState: text(record.captureResultState) || (m.capture ? "not published" : "not recorded"),
+            savedSceneInfo: m.derivedMetadata&&m.derivedMetadata.savedSceneInfo||null, importedAt: imported?m.imported.importedAtEpochMs:null,
+            timelineInfo: capture.timeline || (m.derivedMetadata&&m.derivedMetadata.timeline) || null, savedFrame: typeof capture.frame==="number"&&isFinite(capture.frame)?capture.frame:null,
+            renderInfo: capture.render || m.renderInfo || m.renderSettings || metadata.renderInfo || metadata.renderSettings || (m.derivedMetadata&&m.derivedMetadata.renderInfo) || null,
+            warnings: array(m.warnings).concat(array(capture.errors)).concat(array(record.presentationWarnings)).
+                concat(capture.error ? [text(capture.error)] : []).concat(capture.reason ? [text(capture.reason)] : []),
+            legacy: !m.schemaVersion && !capture.activeView && !m.activeView && !metadata.activeView,
+            manifest: m };
+    }
+    function participantRows(version) {
+        var m = version.manifest || {}, p = m.participants, labels = [], seen = {}, allowed = {}, i, row;
+        if (!p||p.status!=="recorded") { var derived=m.derivedMetadata;return typeof SaveGuardDerivedMetadata!=="undefined"&&SaveGuardDerivedMetadata.valid(derived,m)?derived.participants.rows:null; }
+        if (version.status !== "complete" || p.schema !== 1 || p.status !== "recorded" ||
+                !m.session || !m.operation || p.session !== m.session || p.operationId !== m.operation ||
+                pathKey(p.sourcePath) !== pathKey(version.sourcePath) || p.phase !== "assetSaveStarted" ||
+                Object.prototype.toString.call(p.rows) !== "[object Array]" ||
+                Object.prototype.toString.call(p.recognizedCharacterNames) !== "[object Array]") { return null; }
+        for (i = 0; i < p.recognizedCharacterNames.length; i += 1) { allowed["$" + p.recognizedCharacterNames[i]] = true; }
+        for (i = 0; i < p.rows.length; i += 1) {
+            row = p.rows[i];
+            if (!row || typeof row.id !== "string" || !row.id || typeof row.name !== "string" ||
+                    !allowed["$" + row.name] || typeof row.label !== "string" ||
+                    seen["$" + row.id]) { return null; }
+            seen["$" + row.id] = true; labels.push(row.label || row.name);
+        }
+        return p.rows;
+    }
+
+    function recordedParticipants(version){var rows=participantRows(version);if(rows===null)return null;var labels=[];for(var i=0;i<rows.length;i++)labels.push(rows[i].label||rows[i].name);return labels.length?labels.join(', '):'None recognized';}
+    function participantQuery(query){return trim(query).charAt(0)==='@';}
+    function indexParticipants(versions){var out=[],seen={},i,j,k,row,rows,values;for(i=0;i<versions.length;i++){if(versions[i].sceneFileExists!==true||!versions[i].inspectable)continue;rows=participantRows(versions[i]);if(!rows)continue;for(j=0;j<rows.length;j++){row=rows[j];values=[row.label||row.name,row.name];for(k=0;k<values.length;k++){var value=values[k].toLowerCase();if(value&&!seen['$'+value]){seen['$'+value]=true;out.push(value);}}}}return out;}
+    function sceneInformation(version,inspection,names) {
+        if(!version)return [];var absent="Not recorded",r={},months=["January","February","March","April","May","June","July","August","September","October","November","December"],date=absent;
+        var captured=version.renderInfo||{},fallback=inspection&&inspection.versionId===version.id&&inspection.renderInfo||{};var fields=['imageWidth','imageHeight','currentFrameOnly','renderQuality','minSamples','maxSamples','convergedRatioPercent'];for(var fi=0;fi<fields.length;fi++){var fk=fields[fi];r[fk]=captured[fk]!==undefined&&captured[fk]!==null?captured[fk]:fallback[fk];}
+        function pad(n){return n<10?"0"+n:String(n);}function scalar(v){return typeof v==="number"&&isFinite(v)||typeof v==="string"&&v?v:absent;}
+        if(version.savedAt){var d=new Date(version.savedAt);if(!isNaN(d.getTime()))date=months[d.getMonth()]+" "+pad(d.getDate())+", "+d.getFullYear()+" "+pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds());}
+        var savedInfo=version.savedSceneInfo||(inspection&&inspection.versionId===version.id&&inspection.savedSceneInfo)||{},view=version.activeView||{},participants="Not recorded",savedParticipants=recordedParticipants(version),figures=inspection&&inspection.tabs&&inspection.tabs.characters,allowed={},labels=[],seen={};for(var i=0;i<(names||[]).length;i+=1)allowed["$"+names[i]]=true;
+        if(savedParticipants!==null){participants=savedParticipants;}else if(version.status==="complete"&&figures){for(i=0;i<figures.length;i+=1){var f=figures[i];if(f.type==="figure"&&allowed["$"+f.name]&&!seen["$"+f.sourceId]){seen["$"+f.sourceId]=true;labels.push(f.label||f.name);}}participants=labels.length?labels.join(", "):"None recognized";}
+        var width=scalar(r.imageWidth),height=scalar(r.imageHeight),quality=scalar(r.renderQuality),min=scalar(r.minSamples),max=scalar(r.maxSamples),ratio=scalar(typeof r.convergedRatioPercent==="number"?Math.round(r.convergedRatioPercent*10000)/10000:r.convergedRatioPercent),renderType=r.currentFrameOnly===true?"Still Image":r.currentFrameOnly===false?"Animation (format not recorded)":absent;
+        return [{label:"Scene",value:leaf(version.sourcePath||version.scenePath||version.name).replace(/\.duf$/i,"")},{label:version.savedAt?"Date":savedInfo.modified?"DUF modified":"Date",value:version.savedAt?date:savedInfo.modified||absent},{label:view.label||view.name?"Active view":"Saved camera",value:view.label||view.name||savedInfo.camera&&(savedInfo.camera.label||savedInfo.camera.name)||absent},{label:version.visibleCamerasRecorded?"Visible Cameras":"Saved visible cameras",value:version.visibleCamerasRecorded?version.visibleCameras.length:savedInfo.cameras&&savedInfo.cameras.every(function(c){return typeof c.visible==="boolean";})?savedInfo.cameras.filter(function(c){return c.visible;}).length:absent},{label:"Render Size",value:width!==absent&&height!==absent?width+" x "+height:absent},{label:"Render Type",value:renderType},{label:"Render Quality",value:quality===absent&&min===absent&&max===absent&&ratio===absent?absent:quality+" | "+min+" - "+max+" | "+ratio+(ratio===absent?"":"%")},{label:"Participants",value:participants}].concat(typeof SaveGuardTimeline!=="undefined"?SaveGuardTimeline.information(version,inspection):[]);
+    }
+    function compareVersions(a, b) {
+        return b.savedAt - a.savedAt || b.catalogModifiedAt - a.catalogModifiedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    }
+    function buildCatalog(records) {
+        var sceneMap = {}, versionMap = {}, scenes = [], warnings = [], i, v, key, group, total = 0;
+        for (i = 0; i < records.length; i += 1) {
+            // PRE history is excluded from this presentation; no record or file is removed.
+            var record = records[i] || {}, original = record.manifest || {};
+            if (leaf(record.manifestPath || record.manifestName).toLowerCase() === "pre-save.json" || original.role === "disk-before-asset-save-attempt") { continue; }
+            try { v = normalize(records[i]); } catch (e) { warnings.push(text(records[i] && records[i].manifestPath) + ": Invalid manifest fields: " + String(e)); continue; }
+            if (v.error) { warnings.push(v.manifestPath + ": " + v.error); continue; }
+            if (own(versionMap, "$" + v.id)) { warnings.push("Duplicate manifest discovery skipped: " + v.manifestPath); continue; }
+            versionMap["$" + v.id] = true; total += 1;
+            key = "$" + v.sceneId;
+            if (!own(sceneMap, key)) { sceneMap[key] = { id: v.sceneId, sourcePath: v.sourcePath, name: v.name, versions: [] }; scenes.push(sceneMap[key]); }
+            sceneMap[key].versions.push(v);
+        }
+        for (i = 0; i < scenes.length; i += 1) {
+            group = scenes[i]; group.versions.sort(compareVersions); group.newest = group.versions[0];
+            // Prefer newest valid saved copy for the scene icon; retain all other entries in history.
+            for (var j = 0; j < group.versions.length; j += 1) { if (group.versions[j].status === "complete") { group.newest = group.versions[j]; break; } }
+            group.name = group.newest.name; group.searchText = group.name.toLowerCase(); group.participantSearch = indexParticipants(group.versions);
+        }
+        scenes.sort(function (a, b) { return compareVersions(a.newest, b.newest) || (a.id < b.id ? -1 : 1); });
+        return { scenes: scenes, warnings: warnings, versionCount: total };
+    }
+    function localDate(value) {
+        var s = trim(value), m, d;
+        if (!s) { return null; }
+        m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s);
+        if (!m || Number(m[1]) < 1) { throw Error("Use dates in YYYY-MM-DD format."); }
+        d = new Date(0); d.setFullYear(Number(m[1]), Number(m[2]) - 1, Number(m[3])); d.setHours(0, 0, 0, 0);
+        if (d.getFullYear() !== Number(m[1]) || d.getMonth() !== Number(m[2]) - 1 || d.getDate() !== Number(m[3])) { throw Error("Enter a valid calendar date."); }
+        return d;
+    }
+    function dateRange(from, to) {
+        var a = localDate(from), b = localDate(to), end = null;
+        if (a && b && a.getTime() > b.getTime()) { throw Error("From must be on or before To."); }
+        // Calendar increment preserves inclusive local dates across daylight-saving transitions.
+        if (b) { end = new Date(b.getTime()); end.setDate(end.getDate() + 1); }
+        return { from: a ? a.getTime() : null, until: end ? end.getTime() : null };
+    }
+    function filterScenes(catalog, query, dates) {
+        var words = trim(query).toLowerCase().split(/\s+/), participant=participantQuery(query), needle=trim(trim(query).substring(1)).toLowerCase(), result = [], i, j, hit, saved, name;
+        dates = dates || { from: null, until: null };
+        for (i = 0; i < catalog.scenes.length; i += 1) {
+            hit = true; name = displayText(catalog.scenes[i].name).toLowerCase(); saved = finite((catalog.scenes[i].newest || {}).savedAt);
+            if ((dates.from !== null || dates.until !== null) && !saved) { hit = false; }
+            if (dates.from !== null && saved < dates.from || dates.until !== null && saved >= dates.until) { hit = false; }
+            if(participant){var values=catalog.scenes[i].participantSearch||[],matched=false;for(j=0;j<values.length;j++)if(values[j].indexOf(needle)>=0){matched=true;break;}if(!matched)hit=false;}else for (j = 0; j < words.length; j += 1) { if (name.indexOf(words[j]) < 0) { hit = false; break; } }
+            if (hit) { result.push(catalog.scenes[i]); }
+        }
+        return result;
+    }
+    function settings(value, defaults) {
+        value = value || {}; defaults = defaults || {};
+        return { restoreDestination:value.restoreDestination||defaults.restoreDestination||"specified", restoreDirectory: path(typeof value.restoreDirectory === "string" ? value.restoreDirectory : defaults.restoreDirectory),
+            backupDirectory: path(typeof value.backupDirectory === "string" ? value.backupDirectory : defaults.backupDirectory),
+            importLastDirectory: typeof value.importLastDirectory === "string" ? value.importLastDirectory : "",
+            protectedDirectory: path(typeof value.protectedDirectory === "string" ? value.protectedDirectory : typeof defaults.protectedDirectory === "string" ? defaults.protectedDirectory : ""),
+            scenesPerPage:value.scenesPerPage===undefined?40:value.scenesPerPage,startupExternalPath:value.startupExternalPath||"",saveReminderMode:value.saveReminderMode||"off",showToolbarButton:value.showToolbarButton!==false,checkRenderSize:value.checkRenderSize===true,warnOnSave:value.warnOnSave===true,myRenderWidth:value.myRenderWidth===undefined?1920:value.myRenderWidth,myRenderHeight:value.myRenderHeight===undefined?1080:value.myRenderHeight,saveDueMinutes:value.saveDueMinutes===undefined?10:value.saveDueMinutes,saveOverdueMinutes:value.saveOverdueMinutes===undefined?30:value.saveOverdueMinutes,
+            allVisibleCameraJpgs: value.allVisibleCameraJpgs === true, onlyCurrentViewWhenIray: value.onlyCurrentViewWhenIray === true, inspectionCache:value.inspectionCache!==false, loadCacheMode:["off","protected","all"].indexOf(value.loadCacheMode)>=0?value.loadCacheMode:"protected",
+            inspectEmissives:true, lowRamMode: value.lowRamMode === true, deepValidation: value.deepValidation === true,
+            recognizedCharacterNames: array(value.recognizedCharacterNames || defaults.recognizedCharacterNames).slice(0) };
+    }
+    function parseNames(value) {
+        var list = text(value).split(/[\r\n,]+/), seen = {}, result = [], i, item;
+        for (i = 0; i < list.length; i += 1) {
+            item = trim(list[i]);
+            if (item && !own(seen, "$" + item)) { seen["$" + item] = true; result.push(item); }
+        }
+        return result;
+    }
+    function clampScenePage(page,count,size){return Math.max(0,Math.min(page,Math.max(0,Math.ceil(count/size)-1)));}
+    function validateSettings(value) {
+        var errors = [];if(value.loadCacheMode!==undefined&&["off","protected","all"].indexOf(value.loadCacheMode)<0)errors.push("Choose a valid Load Cache mode");var names = array(value.recognizedCharacterNames), i;if(value.scenesPerPage!==undefined&&(typeof value.scenesPerPage!=="number"||!isFinite(value.scenesPerPage)||Math.floor(value.scenesPerPage)!==value.scenesPerPage||value.scenesPerPage<1||value.scenesPerPage>10000))errors.push("Scenes per page must be a whole number from 1 to 10000.");
+        if (value.restoreDirectory && !absolute(value.restoreDirectory)) { errors.push("Restore directory must be an absolute path or blank."); }
+        if (!absolute(value.backupDirectory)) { errors.push("Backup directory must be an absolute path."); }
+        if (value.protectedDirectory && !absolute(value.protectedDirectory)) { errors.push("Protected directory must be an absolute path or blank."); }
+        for (i = 0; i < names.length; i += 1) { if (!names[i] || /[\x00-\x1f]/.test(names[i])) { errors.push("Character names must be nonempty internal names, one per line."); break; } }
+        return errors;
+    }
+    function timeLabel(version) { return version.savedAt ? new Date(version.savedAt).toLocaleString() : "Save time unavailable"; }
+    function compactTimeLabel(version) {
+        if (!version.savedAt) { return "Save time unavailable"; }
+        var d = new Date(version.savedAt); function pad(n) { return n < 10 ? "0" + n : String(n); }
+        return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds());
+    }
+    function versionTimeLabel(version){
+        if(version.savedAt&&isFinite(Number(version.savedAt))&&!isNaN(new Date(version.savedAt).getTime()))return (version.timeSource==='filename-local-inferred'?'SG1 filename date\n':'')+compactTimeLabel(version).replace(' ','\n');
+        var modified=version.savedSceneInfo&&version.savedSceneInfo.modified;
+        if(typeof modified==='string'&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(modified)&&!isNaN(new Date(modified).getTime()))return 'DUF modified (UTC)\n'+modified.substring(0,10)+'\n'+modified.substring(11,19);
+        if(typeof version.importedAt==='number'&&isFinite(version.importedAt)&&version.importedAt>0&&!isNaN(new Date(version.importedAt).getTime()))return 'Imported\n'+compactTimeLabel({savedAt:version.importedAt}).replace(' ','\n');
+        return 'Save time unavailable';
+    }
+    function screenshotJpgs(version) {
+        var source = array(version && version.screenshots), result = [], seen = {}, i, row, key;
+        var primary = null;
+        function usable(item) {
+            return item && item.path && (item.role === "active-viewport" || item.role === "visible-camera") && /\.jpe?g$/i.test(text(item.path));
+        }
+        // The preserved initial framebuffer comes first, not the first camera in
+        // scene enumeration order. Reuse its named camera row only for the SAME file.
+        for (i = 0; i < source.length; i += 1) {
+            row = source[i];
+            if (usable(row) && row.role === "active-viewport") { primary = row; break; }
+        }
+        if (primary) {
+            key = "$" + pathKey(primary.path);
+            for (i = 0; i < source.length; i += 1) {
+                row = source[i];
+                if (usable(row) && row.role === "visible-camera" && "$" + pathKey(row.path) === key) { primary = row; break; }
+            }
+            seen[key] = true; result.push(primary);
+        }
+        for (i = 0; i < source.length; i += 1) {
+            row = source[i];
+            if (!usable(row)) { continue; }
+            key = "$" + pathKey(row.path);
+            if (!own(seen, key)) { seen[key] = true; result.push(row); }
+        }
+        return result;
+    }
+    function viewLabel(view) {
+        if (!view || view.state === "unknown") { return "Saved active view: unknown (not recorded)"; }
+        return (view.isSceneCamera ? "Scene camera: " : "Non-scene view: ") + (view.label || view.name || view.kind || "unnamed");
+    }
+    return { participantQuery:participantQuery,participantRows:participantRows,indexParticipants:indexParticipants,figureNames:figureNames,addFigureName:addFigureName,resetFigureNames:resetFigureNames,figureFamily:figureFamily,selectedFigureName:selectedFigureName,displayText:displayText,localReference:localReference,typeValue:typeValue,hierarchy:hierarchy,periodRange:periodRange,customPeriod:customPeriod,sceneInformation:sceneInformation, normalize: normalize, mergeCapture: mergeCapture, buildCatalog: buildCatalog, filterScenes: filterScenes,
+        clampScenePage:clampScenePage,settings: settings, parseNames: parseNames, validateSettings: validateSettings, timeLabel: timeLabel,
+        versionTimeLabel:versionTimeLabel,compactTimeLabel: compactTimeLabel, dateRange: dateRange, screenshotJpgs: screenshotJpgs,
+        viewLabel: viewLabel, path: path, pathKey: pathKey, safeFile: safeFile, absolute: absolute };
+}());

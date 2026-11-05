@@ -1,0 +1,72 @@
+// Streaming SHA-256 of original bytes; adapted from installed structural hash compression core.
+var SaveGuardShapePresetIO=(function(){
+ function need(v,m){if(!v)throw Error("Shape preset I/O: "+m);}
+ function sha(){
+        var constants = [1116352408,1899447441,3049323471,3921009573,961987163,1508970993,2453635748,2870763221,
+            3624381080,310598401,607225278,1426881987,1925078388,2162078206,2614888103,3248222580,
+            3835390401,4022224774,264347078,604807628,770255983,1249150122,1555081692,1996064986,
+            2554220882,2821834349,2952996808,3210313671,3336571891,3584528711,113926993,338241895,
+            666307205,773529912,1294757372,1396182291,1695183700,1986661051,2177026350,2456956037,
+            2730485921,2820302411,3259730800,3345764771,3516065817,3600352804,4094571909,275423344,
+            430227734,506948616,659060556,883997877,958139571,1322822218,1537002063,1747873779,
+            1955562222,2024104815,2227730452,2361852424,2428436474,2756734187,3204031479,3329325298];
+        var state = [1779033703,3144134277,1013904242,2773480762,1359893119,2600822924,528734635,1541459225], words = [], byteCount = 0, used = 0;
+        function rotate(v, n) { return v >>> n | v << 32 - n; }
+        function block() {
+            var i, x, y, a = state[0], bb = state[1], c = state[2], d = state[3], e = state[4], f = state[5], g = state[6], h = state[7], t1, t2;
+            for (i = 16; i < 64; i += 1) { x = words[i - 15]; y = words[i - 2]; words[i] = (words[i - 16] + (rotate(x,7)^rotate(x,18)^x>>>3) + words[i - 7] + (rotate(y,17)^rotate(y,19)^y>>>10)) | 0; }
+            for (i = 0; i < 64; i += 1) {
+                t1 = (h + (rotate(e,6)^rotate(e,11)^rotate(e,25)) + ((e&f)^(~e&g)) + constants[i] + words[i]) | 0;
+                t2 = ((rotate(a,2)^rotate(a,13)^rotate(a,22)) + ((a&bb)^(a&c)^(bb&c))) | 0;
+                h=g;g=f;f=e;e=(d+t1)|0;d=c;c=bb;bb=a;a=(t1+t2)|0;
+            }
+            state[0]=(state[0]+a)|0;state[1]=(state[1]+bb)|0;state[2]=(state[2]+c)|0;state[3]=(state[3]+d)|0;
+            state[4]=(state[4]+e)|0;state[5]=(state[5]+f)|0;state[6]=(state[6]+g)|0;state[7]=(state[7]+h)|0;words=[];used=0;
+        }
+        function sceneEditorCompat_byte(v) { var wi = used >>> 2; if ((used & 3) === 0) { words[wi] = 0; } words[wi] |= v << (24 - (used & 3) * 8); used += 1; byteCount += 1; if (used === 64) { block(); } }
+ function finish(){
+        var bits = byteCount * 8, high = Math.floor(bits / 4294967296), low = bits >>> 0, i, hex = "";
+        sceneEditorCompat_byte(128); while (used !== 56) { sceneEditorCompat_byte(0); }
+        for (i = 3; i >= 0; i -= 1) { sceneEditorCompat_byte(high >>> (i * 8) & 255); } for (i = 3; i >= 0; i -= 1) { sceneEditorCompat_byte(low >>> (i * 8) & 255); }
+        for (i = 0; i < 8; i += 1) { var part = (state[i] >>> 0).toString(16); hex += "00000000".substring(part.length) + part; }
+        return hex;
+    }
+    return {updateHex:function(hex){if(!/^(?:[0-9a-f]{2})*$/i.test(hex))throw Error("Invalid byte encoding");for(var i=0;i<hex.length;i+=2)sceneEditorCompat_byte(parseInt(hex.substr(i,2),16));},finish:finish};
+ }
+
+ function create(env){
+  function norm(p){return String(p).replace(/\\/g,"/");}
+  function info(p){return new env.DzFileInfo(p);}
+  function stat(p){var f=info(p);need(f.exists()&&f.isFile()&&!f.isSymLink(),"Missing or linked source: "+p);return String(f.canonicalFilePath())+"|"+Number(f.size())+"|"+Number(f.lastModified().getTime());}
+  function digest(p){var before=stat(p),f=new env.DzFile(p),h=sha();try{need(f.open(env.DzFile.ReadOnly),"Read failed");while(!f.eof()){var b=f.read(65536);need(Number(b.length)>0,"Short source read");h.updateHex(String(b.toHex().convertToString()));}need(f.error()===env.DzFile.NoError,"Read error");}finally{f.close();}need(stat(p)===before,"Source changed during hash");return h.finish();}
+  function source(files){return {verify:function(){for(var i=0;i<files.length;i++)if(digest(files[i].path)!==files[i].sha256)return false;return true;}};}
+  function staging(){
+   var root=norm(info(env.App.getTempPath()).canonicalFilePath()),issued=[];need(root&&info(root).isDir(),"No canonical temp root");
+   function entry(t){for(var i=0;i<issued.length;i++)if(issued[i].token===t)return issued[i];throw Error("Unknown temporary token");}
+   function owned(e){var d=info(e.dir);need(d.exists()&&d.isDir()&&!d.isSymLink()&&norm(d.canonicalFilePath())===e.dir&&norm(d.path())===root,"Temporary directory ownership changed: "+e.dir);}
+   function cleanup(e){if(e.removed)return true;owned(e);var f=info(e.token.path);if(f.exists()){need(f.isFile()&&!f.isSymLink()&&norm(f.canonicalFilePath())===e.token.path,"Temporary file ownership changed");need(new env.DzDir(e.dir).remove("payload.duf"),"Cannot remove owned DUF: "+e.token.path);}need(new env.DzDir(root).rmdir(e.name),"Cannot remove owned empty directory: "+e.dir);e.removed=true;return true;}
+   function verify(t,p){var e=entry(t);if(e.removed)return false;owned(e);var f=info(t.path);return f.exists()&&f.isFile()&&!f.isSymLink()&&norm(f.canonicalFilePath())===t.path&&SaveGuardStorage.readText(t.path,e.text.length)===e.text&&JSON.stringify(JSON.parse(e.text))===JSON.stringify(p);}
+   return {create:function(p){var d=norm(SaveGuardStorage.reserve(root,"saveguard-shape-validation")),e={dir:d,name:String(info(d).fileName()),token:{path:d+"/payload.duf"},text:SaveGuardStorage.ascii(p),removed:false};issued.push(e);try{owned(e);need(!info(e.token.path).exists(),"Destination exists");var f=new env.DzFile(e.token.path);try{need(f.open(env.DzFile.WriteOnly),"Temporary write open failed");need(f.writeUtf8(e.text)===e.text.length&&f.error()===env.DzFile.NoError,"Temporary short write");}finally{f.close();}need(verify(e.token,p),"Temporary readback failed");return e.token;}catch(error){try{cleanup(e);}catch(c){error.cleanupError=String(c);error.temporaryPath=e.token.path;}throw error;}},verify:verify,removeOwned:function(t){return cleanup(entry(t));}};
+  }
+
+  // Opt-in immutable serialized input. Legacy staging/verify(token,document) stays unchanged.
+  function snapshotStaging(){
+   var snapshots=[],issued=[];
+   function snapshot(t){for(var i=0;i<snapshots.length;i++)if(snapshots[i].token===t)return snapshots[i];throw Error("Unknown snapshot token");}
+   function entry(t){for(var i=0;i<issued.length;i++)if(issued[i].token===t)return issued[i];throw Error("Unknown temporary snapshot token");}
+   function owned(e){var d=info(e.dir);need(d.exists()&&d.isDir()&&!d.isSymLink()&&norm(d.canonicalFilePath())===e.dir&&norm(d.path())===e.root,"Temporary snapshot directory ownership changed");}
+   function identity(f){return String(f.size())+"|"+String(f.lastModified());}
+   function file(e,partial){var f=info(e.path);need(f.exists()&&f.isFile()&&!f.isSymLink()&&norm(f.canonicalFilePath())===e.path,"Temporary snapshot file ownership changed");var size=Number(f.size());need(isFinite(size)&&size>=0&&size<=e.text.length&&(partial||size===e.text.length),"Temporary snapshot size changed");if(e.identity!==null)need(identity(f)===e.identity,"Temporary snapshot identity changed");var contents=size===0?"":SaveGuardStorage.readText(e.path,e.text.length);need(contents.length===size&&contents===(partial?e.text.substring(0,contents.length):e.text),"Temporary snapshot contents changed");return true;}
+   function cleanup(e){if(e.cleanupDone){if(e.cleanupError)throw Error(e.cleanupError);return true;}e.cleanupDone=true;try{owned(e);if(info(e.path).exists()){need(e.attempted,"Temporary snapshot file was not created by this action");file(e,!e.complete);need(new env.DzDir(e.dir).remove("payload.duf"),"Cannot remove owned snapshot DUF");}need(new env.DzDir(e.root).rmdir(e.name),"Cannot remove owned empty snapshot directory");e.removed=true;return true;}catch(error){e.cleanupError=String(error);throw error;}}
+   function verify(t){var e=entry(t);need(t.path===e.path,"Temporary snapshot token path changed");if(e.removed)return false;owned(e);return file(e,false);}
+   return {
+    capture:function(document){var text=SaveGuardStorage.ascii(document),token={};snapshots.push({token:token,text:text});return token;},
+    discard:function(token){var s=snapshot(token);snapshots.splice(snapshots.indexOf(s),1);return true;},
+    create:function(token){var s=snapshot(token),root=norm(info(env.App.getTempPath()).canonicalFilePath());need(root&&info(root).isDir(),"No canonical temp root");var dir=norm(SaveGuardStorage.reserve(root,"saveguard-input-snapshot")),e={root:root,dir:dir,name:String(info(dir).fileName()),path:dir+"/payload.duf",text:s.text,token:{path:dir+"/payload.duf"},identity:null,attempted:false,complete:false,removed:false,cleanupDone:false,cleanupError:null};issued.push(e);try{owned(e);need(!info(e.path).exists(),"Snapshot destination exists");var f=new env.DzFile(e.path);try{e.attempted=true;need(f.open(env.DzFile.WriteOnly),"Snapshot write open failed");need(f.writeUtf8(e.text)===e.text.length&&f.error()===env.DzFile.NoError,"Snapshot short write");}finally{f.close();}e.complete=true;need(verify(e.token),"Snapshot readback failed");e.identity=identity(info(e.path));return e.token;}catch(error){try{cleanup(e);}catch(c){error.cleanupError=String(c);error.temporaryPath=e.path;}throw error;}},
+    verify:verify,removeOwned:function(token){return cleanup(entry(token));}
+   };
+  }
+  return {source:source,staging:staging,snapshotStaging:snapshotStaging,digest:digest};
+ }
+ return {create:create,sha:sha};
+}());

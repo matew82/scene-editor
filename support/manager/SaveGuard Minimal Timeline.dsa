@@ -1,0 +1,27 @@
+// Only saved imported key bounds and small timeline values; no scene/key traversal.
+var SaveGuardMinimalTimeline=(function(){
+ function sameRange(a,b){return Object.prototype.toString.call(a)==="[object Array]"&&Object.prototype.toString.call(b)==="[object Array]"&&a.length===2&&b.length===2&&a[0]===b[0]&&a[1]===b[1];}
+ function same(a,b){if(Object.prototype.toString.call(a)==="[object Array]"||Object.prototype.toString.call(b)==="[object Array]")return sameRange(a,b);return !!a&&!!b&&a.time===b.time&&a.step===b.step&&sameRange(a.animation,b.animation)&&sameRange(a.play,b.play);}
+ function plan(scene,channels){var before=SaveGuardAnimationGuard.timeline(scene),after={time:before.time,step:before.step,animation:[before.animation[0],before.animation[1]],play:[before.play[0],before.play[1]]},i,j,t,min=null,max=null;
+  if(channels&&channels.length&&(!isFinite(before.step)||before.step<=0))throw Error('Animation preservation: destination time step must be positive and finite');
+  for(i=0;i<(channels||[]).length;i++)for(j=0;j<channels[i].keys.length;j++){t=Math.round(channels[i].keys[j][0]*4800);if(!isFinite(t))throw Error('Invalid saved key time');min=min===null?t:Math.min(min,t);max=max===null?t:Math.max(max,t);}
+  if(min!==null){after.play=[Math.min(before.play[0],min),Math.max(before.play[1],max)];after.animation=[Math.min(before.animation[0],after.play[0],min),Math.max(before.animation[1],after.play[1],max)];}
+  return {before:before,after:after,changed:!same(before,after),keyTicks:min===null?null:[min,max]};
+ }
+ function available(env,p){if(!p.changed)return;if(typeof env.DzTimeRange!=='function'||typeof env.Scene.beginTimeEdit!=='function'||typeof env.Scene.finishTimeEdit!=='function'||typeof env.Scene.setAnimRange!=='function'||typeof env.Scene.setPlayRange!=='function')throw Error('Undoable timeline APIs unavailable');}
+ function set(env,target){var scene=env.Scene,current=SaveGuardAnimationGuard.timeline(scene);if(same(current,target))return;
+  if(current.time!==target.time||current.step!==target.step)throw Error('Unexpected current time/FPS change; no timing conversion');
+  if(env.UndoStack.canPushItems()!==true)throw Error('Timeline changes require the owned Undo hold');
+  var begun=false;try{scene.beginTimeEdit();begun=true;
+   // Widen animation first so play-range edits are never clamped to a narrow envelope.
+   var envelope=[Math.min(current.animation[0],target.animation[0],target.play[0]),Math.max(current.animation[1],target.animation[1],target.play[1])];
+   if(!same(current.animation,envelope))scene.setAnimRange(new env.DzTimeRange(envelope[0],envelope[1]));
+   if(!same(current.play,target.play))scene.setPlayRange(new env.DzTimeRange(target.play[0],target.play[1]));
+   if(!same(envelope,target.animation))scene.setAnimRange(new env.DzTimeRange(target.animation[0],target.animation[1]));
+  }finally{if(begun)scene.finishTimeEdit();}
+  if(env.UndoStack.canPushItems()!==true){var ownershipError=Error('Time edit lost owned Undo');ownershipError.undoOwnershipLost=true;throw ownershipError;}
+  if(!SaveGuardAnimationGuard.unchanged(scene,target))throw Error('Timeline readback differs');
+ }
+ return {plan:plan,available:available,set:set};
+}());
+

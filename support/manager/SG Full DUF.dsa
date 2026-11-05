@@ -1,0 +1,515 @@
+// DRAFT compatibility branch: full-fidelity selected DUF records, except explicitly
+// recorded DAZ 0.6.2.0 render-time duplicates represented last-only for inspection.
+// ES5, no scene APIs or writes. Render application requires external interpretation.
+// Dependencies: DUF Chunk Reader.dsa and DUF Gzip Stream.dsa (unchanged copies).
+var SaveGuardFullDUF = (function () {
+    // Defaults express only exactly representable counters; no product size/count/depth/time quota.
+    var limits = { maxPhysicalBytes: 9007199254740991, maxBytes: 9007199254740991,
+        maxMillis: null, maxDepth: 9007199254740991, maxTokens: 9007199254740991, maxKeys: 9007199254740991,
+        maxActiveKeyChars: 9007199254740991, maxString: 9007199254740991,
+        maxRetainedValues: 9007199254740991, maxRetainedChars: 9007199254740991, maxRecords: 9007199254740991 };
+    var OMIT = {}, has = Object.prototype.hasOwnProperty, arrayTag = Object.prototype.toString;
+    var renderTimePolicy = "daz-0.6.2.0-render-time-inspection-v1";
+    function own(o, k) { return has.call(o, k); }
+    function array(o) { return arrayTag.call(o) === "[object Array]"; }
+    function object(o) { return o && typeof o === "object" && !array(o); }
+    function fail(code, message) { var e = new Error(message); e.code = code; throw e; }
+    function copy(v) {
+        if (!v || typeof v !== "object") { return v; }
+        function frame(value,out) { var keys=[],k;for(k in value)if(own(value,k))keys.push(k);return {value:value,out:out,keys:keys,at:0}; }
+        var result=array(v)?[]:{},stack=[frame(v,result)],f,k,value,out,i;
+        while(stack.length){f=stack[stack.length-1];if(f.at===f.keys.length){stack.pop();continue;}k=f.keys[f.at++];value=f.value[k];
+            if(value&&typeof value==="object"){for(i=0;i<stack.length;i+=1)if(stack[i].value===value)fail("INTEGRITY_VALUE","Cycle in copied JSON data.");out=array(value)?[]:{};put(f.out,k,out);stack.push(frame(value,out));}
+            else put(f.out,k,value);
+        }
+        return result;
+    }
+    function closeSources(first, second) {
+        var errors = [];
+        if (first) { try { first.close(); } catch (e1) { errors.push(String(e1)); } }
+        if (second) { try { second.close(); } catch (e2) { errors.push(String(e2)); } }
+        if (errors.length) { fail("CLOSE", "Source handle closure failed after both closures were attempted: " + errors.join("; ")); }
+    }
+    function put(o, k, v) {
+        if (k === "__proto__") {
+            if (typeof Object.defineProperty !== "function") { fail("API", "This engine cannot safely retain a __proto__ JSON member."); }
+            Object.defineProperty(o, k, { value: v, enumerable: true, configurable: true, writable: true });
+        } else { o[k] = v; }
+    }
+    function settings(options) {
+        options = options || {}; var b = {}, k;
+        if (options.lowMemoryMode !== undefined && typeof options.lowMemoryMode !== "boolean") { fail("CONFIG", "Low RAM Mode must be true or false."); }
+        if (options.duplicatePolicy !== undefined && options.duplicatePolicy !== "reject" && options.duplicatePolicy !== renderTimePolicy) { fail("CONFIG", "Unknown duplicate member policy."); }
+        for (k in limits) { if (own(limits, k)) {
+            b[k] = options[k] === undefined ? limits[k] : options[k];
+            if (k === "maxMillis" && b[k] === null) { continue; }
+            if (typeof b[k] !== "number" || !isFinite(b[k]) || b[k] <= 0 || Math.floor(b[k]) !== b[k] || b[k] > 9007199254740991) { fail("CONFIG", "Invalid explicit reader budget: " + k); }
+        } }
+        return b;
+    }
+    function guardFor(options, b) {
+        var clock = options.clock || function () { return new Date().getTime(); }, began = clock();
+        return function () {
+            if (options.isCancelled && options.isCancelled()) { fail("CANCELLED", "DUF operation cancelled; no partial result is valid."); }
+            if (b.maxMillis !== null && clock() - began > b.maxMillis) { fail("LIMIT_TIME", "DUF operation exceeded the selected time limit."); }
+        };
+    }
+    function crcState() {
+        var table = [], n, j, c, crc = -1, size = 0;
+        for (n = 0; n < 256; n += 1) { c = n; for (j = 0; j < 8; j += 1) { c = (c >>> 1) ^ ((c & 1) ? 3988292384 : 0); } table[n] = c; }
+        return { add: function (text) { for (var i = 0; i < text.length; i += 1) { crc = (crc >>> 8) ^ table[(crc ^ text.charCodeAt(i)) & 255]; } size += text.length; },
+            result: function () { return { bytes: size, crc32: (crc ^ -1) >>> 0 }; } };
+    }
+    // Content integrity of JSON caches; never a source-authenticity assertion.
+    // SHA256 consumes unambiguous typed frames as UTF16BE without allocating a
+    // serialized tree. Reflection reads data descriptors without invoking getters.
+    function structuralIntegrity(root, options, validationOnly) {
+        options = options || {}; var b = settings(options), guard = guardFor(options, b), values = 0, units = 0, activeKeys = 0, ancestors = [];
+        if (typeof Object.getOwnPropertyNames !== "function" || typeof Object.getOwnPropertyDescriptor !== "function" || typeof Object.getPrototypeOf !== "function") { fail("INTEGRITY_API", "Safe structural integrity requires ES5 property reflection."); }
+        var objectPrototype = Object.getPrototypeOf({}), arrayPrototype = Object.getPrototypeOf([]);
+        function plainPrototype(value, isArray) {
+            var expected = isArray ? arrayPrototype : objectPrototype, actual = Object.getPrototypeOf(value), descriptor;
+            if (actual === expected) { return true; }
+            // Cross-realm JSON.parse in test/embedding hosts can supply another
+            // realm's intrinsic Object/Array prototype. Custom constructors reject.
+            if (!actual) { return false; } descriptor = Object.getOwnPropertyDescriptor(actual,"constructor");
+            if (!descriptor || !own(descriptor,"value") || typeof descriptor.value !== "function" ||
+                    Function.prototype.toString.call(descriptor.value) !== Function.prototype.toString.call(isArray ? Array : Object)) { return false; }
+            return JSON.stringify(Object.getOwnPropertyNames(actual)) === JSON.stringify(Object.getOwnPropertyNames(expected));
+        }
+        var constants = [1116352408,1899447441,3049323471,3921009573,961987163,1508970993,2453635748,2870763221,
+            3624381080,310598401,607225278,1426881987,1925078388,2162078206,2614888103,3248222580,
+            3835390401,4022224774,264347078,604807628,770255983,1249150122,1555081692,1996064986,
+            2554220882,2821834349,2952996808,3210313671,3336571891,3584528711,113926993,338241895,
+            666307205,773529912,1294757372,1396182291,1695183700,1986661051,2177026350,2456956037,
+            2730485921,2820302411,3259730800,3345764771,3516065817,3600352804,4094571909,275423344,
+            430227734,506948616,659060556,883997877,958139571,1322822218,1537002063,1747873779,
+            1955562222,2024104815,2227730452,2361852424,2428436474,2756734187,3204031479,3329325298];
+        var state = [1779033703,3144134277,1013904242,2773480762,1359893119,2600822924,528734635,1541459225], words = [], byteCount = 0, used = 0;
+        function rotate(v, n) { return v >>> n | v << 32 - n; }
+        function block() {
+            var i, x, y, a = state[0], bb = state[1], c = state[2], d = state[3], e = state[4], f = state[5], g = state[6], h = state[7], t1, t2;
+            for (i = 16; i < 64; i += 1) { x = words[i - 15]; y = words[i - 2]; words[i] = (words[i - 16] + (rotate(x,7)^rotate(x,18)^x>>>3) + words[i - 7] + (rotate(y,17)^rotate(y,19)^y>>>10)) | 0; }
+            for (i = 0; i < 64; i += 1) {
+                t1 = (h + (rotate(e,6)^rotate(e,11)^rotate(e,25)) + ((e&f)^(~e&g)) + constants[i] + words[i]) | 0;
+                t2 = ((rotate(a,2)^rotate(a,13)^rotate(a,22)) + ((a&bb)^(a&c)^(bb&c))) | 0;
+                h=g;g=f;f=e;e=(d+t1)|0;d=c;c=bb;bb=a;a=(t1+t2)|0;
+            }
+            state[0]=(state[0]+a)|0;state[1]=(state[1]+bb)|0;state[2]=(state[2]+c)|0;state[3]=(state[3]+d)|0;
+            state[4]=(state[4]+e)|0;state[5]=(state[5]+f)|0;state[6]=(state[6]+g)|0;state[7]=(state[7]+h)|0;words=[];used=0;
+        }
+        function sceneEditorCompat_byte(v) { var wi = used >>> 2; if ((used & 3) === 0) { words[wi] = 0; } words[wi] |= v << (24 - (used & 3) * 8); used += 1; byteCount += 1; if (used === 64) { block(); } }
+        function emit(text) {
+            units += text.length; if (units > b.maxBytes * 8) { fail("INTEGRITY_LIMIT", "Structural integrity framing exceeds the bounded budget."); }
+            if (validationOnly) { guard(); return; }
+            for (var i = 0; i < text.length; i += 1) { if ((i & 2047) === 0) { guard(); } var c = text.charCodeAt(i); sceneEditorCompat_byte(c >>> 8); sceneEditorCompat_byte(c & 255); }
+        }
+        function stringFrame(tag, text) { emit(tag + text.length + ":"); emit(text); }
+        // Explicit frames preserve descriptor/hash order without recursive call-stack limits.
+        function visit(rootValue) {
+            var stack = [{value:rootValue,depth:0,entered:false}];
+            while (stack.length) {
+                guard(); var frame=stack[stack.length-1],v=frame.value,type,names,i,key,descriptor,keyChars=0,isArray;
+                if (!frame.entered) {
+                    values += 1; if(values>b.maxTokens||frame.depth>b.maxDepth)fail("INTEGRITY_LIMIT","Explicit structural value/depth budget exceeded.");
+                    type=typeof v;
+                    if(v===null){emit("N;");stack.pop();continue;}
+                    if(type==="string"){stringFrame("S",v);stack.pop();continue;}
+                    if(type==="boolean"){emit(v?"T;":"F;");stack.pop();continue;}
+                    if(type==="number"){if(!isFinite(v))fail("INTEGRITY_VALUE","Non-finite number in an inspected cache.");stringFrame("D",v===0&&1/v<0?"-0":String(v));stack.pop();continue;}
+                    if(type==="undefined"&&options.allowUndefined===true){emit("U;");stack.pop();continue;}
+                    if(type!=="object")fail("INTEGRITY_VALUE","Non-JSON value in an inspected cache.");
+                    isArray=array(v);if(!plainPrototype(v,isArray))fail("INTEGRITY_VALUE","Unexpected object prototype in an inspected cache.");
+                    for(i=0;i<ancestors.length;i+=1)if(ancestors[i]===v)fail("INTEGRITY_VALUE","Cycle in an inspected cache.");
+                    if(isArray&&v.length>b.maxRetainedValues)fail("INTEGRITY_LIMIT","Explicit array budget exceeded.");
+                    names=Object.getOwnPropertyNames(v);if(names.length>(isArray?b.maxRetainedValues+1:b.maxKeys))fail("INTEGRITY_LIMIT","Explicit key budget exceeded.");
+                    for(i=0;i<names.length;i+=1)keyChars+=names[i].length;
+                    activeKeys+=keyChars;if(activeKeys>b.maxActiveKeyChars)fail("INTEGRITY_LIMIT","Explicit active-key budget exceeded.");
+                    frame.entered=true;frame.names=names;frame.at=0;frame.keyChars=keyChars;ancestors.push(v);emit(isArray?"A{":"O{");
+                }
+                if(frame.at===frame.names.length){emit("};");ancestors.pop();activeKeys-=frame.keyChars;stack.pop();continue;}
+                key=frame.names[frame.at++];descriptor=Object.getOwnPropertyDescriptor(v,key);
+                if(!descriptor||!own(descriptor,"value")||own(descriptor,"get")||own(descriptor,"set"))fail("INTEGRITY_VALUE","Accessor or disappearing property in an inspected cache.");
+                stringFrame("K",key);emit((descriptor.enumerable?"1":"0")+(descriptor.writable?"1":"0")+(descriptor.configurable?"1":"0")+":");
+                stack.push({value:descriptor.value,depth:frame.depth+1,entered:false});
+            }
+        }
+        guard(); visit(root); guard();
+        if (validationOnly) { return { algorithm: "sg-structural-validation-v1", values: values, units: units }; }
+        var bits = byteCount * 8, high = Math.floor(bits / 4294967296), low = bits >>> 0, i, hex = "";
+        sceneEditorCompat_byte(128); while (used !== 56) { sceneEditorCompat_byte(0); }
+        for (i = 3; i >= 0; i -= 1) { sceneEditorCompat_byte(high >>> (i * 8) & 255); } for (i = 3; i >= 0; i -= 1) { sceneEditorCompat_byte(low >>> (i * 8) & 255); }
+        for (i = 0; i < 8; i += 1) { var part = (state[i] >>> 0).toString(16); hex += "00000000".substring(part.length) + part; }
+        return { algorithm: "sg-structural-sha256-v1", digest: hex, values: values, units: units };
+    }
+    function structuralFingerprint(root, options) { return structuralIntegrity(root, options, false); }
+    function validateStructure(root, options) { return structuralIntegrity(root, options, true); }
+    // DAZ4 native gzip read returns UTF-8 bytes in a string. DAZ6 returns Unicode.
+    // Normalize before JSON.parse, preserving mixtures of raw UTF-8 and JSON escapes.
+    function nativeChunks(text, major, guard) {
+        if (typeof text !== "string" || (major !== 4 && major !== 6)) { fail("API", "Unsupported native text representation; no alternate parser was attempted."); }
+        var position = 0;
+        return function () {
+            guard(); if (position >= text.length) { return ""; }
+            var end = Math.min(position + (major === 4 ? 16384 : 4096), text.length), out = [], c, low;
+            if (major === 4) { var raw = text.substring(position, end); position = end; return raw; }
+            if (end < text.length && text.charCodeAt(end - 1) >= 55296 && text.charCodeAt(end - 1) <= 56319) { end -= 1; }
+            while (position < end) {
+                c = text.charCodeAt(position++);
+                if (c >= 55296 && c <= 56319) {
+                    low = text.charCodeAt(position++);
+                    if (!(low >= 56320 && low <= 57343)) { fail("UTF8", "Unpaired surrogate in native Unicode text."); }
+                    c = 65536 + (c - 55296) * 1024 + low - 56320;
+                } else if (c >= 56320 && c <= 57343) { fail("UTF8", "Unpaired surrogate in native Unicode text."); }
+                if (c < 128) { out.push(String.fromCharCode(c)); }
+                else if (c < 2048) { out.push(String.fromCharCode(192 | c >> 6, 128 | c & 63)); }
+                else if (c < 65536) { out.push(String.fromCharCode(224 | c >> 12, 128 | c >> 6 & 63, 128 | c & 63)); }
+                else { out.push(String.fromCharCode(240 | c >> 18, 128 | c >> 12 & 63, 128 | c >> 6 & 63, 128 | c & 63)); }
+            }
+            return out.join("");
+        };
+    }
+    function normalizeNative(text, major, guard, b) {
+        if (typeof text !== "string" || text.length > b.maxBytes) { fail("LIMIT_BYTES", "Native text exceeds the expanded budget or has invalid type."); }
+        var bytes = text.length, expression, match, pieces = [], from = 0, i, cp, n, min, c, out, count = 0;
+        if (major === 4) {
+            expression = /[^\x00-\x7f]+/g;
+            while ((match = expression.exec(text)) !== null) {
+                guard(); pieces.push(text.substring(from, match.index)); out = [];
+                for (i = 0; i < match[0].length;) {
+                    if ((i & 1023) === 0) { guard(); } cp = match[0].charCodeAt(i++);
+                    if (cp >= 194 && cp <= 223) { cp &= 31; n = 1; min = 128; }
+                    else if (cp >= 224 && cp <= 239) { cp &= 15; n = 2; min = 2048; }
+                    else if (cp >= 240 && cp <= 244) { cp &= 7; n = 3; min = 65536; }
+                    else { fail("UTF8", "Invalid native UTF-8 leading byte."); }
+                    while (n-- > 0) { c = match[0].charCodeAt(i++); if (!(c >= 128 && c <= 191)) { fail("UTF8", "Invalid native UTF-8 continuation."); } cp = cp * 64 + (c & 63); }
+                    if (cp < min || cp > 1114111 || cp >= 55296 && cp <= 57343) { fail("UTF8", "Invalid native UTF-8 code point."); }
+                    if (cp < 65536) { out.push(String.fromCharCode(cp)); } else { cp -= 65536; out.push(String.fromCharCode(55296 + (cp >> 10), 56320 + (cp & 1023))); }
+                    if (out.length >= 4096) { pieces.push(out.join("")); out = []; }
+                }
+                pieces.push(out.join("")); from = expression.lastIndex;
+            }
+            if (from) { pieces.push(text.substring(from)); text = pieces.join(""); }
+        } else if (major === 6) {
+            expression = /[\u0080-\uffff]+/g;
+            while ((match = expression.exec(text)) !== null) {
+                guard(); for (i = 0; i < match[0].length; i += 1) {
+                    if ((i & 1023) === 0) { guard(); } cp = match[0].charCodeAt(i);
+                    if (cp >= 55296 && cp <= 56319) { c = match[0].charCodeAt(++i); if (!(c >= 56320 && c <= 57343)) { fail("UTF8", "Unpaired native Unicode surrogate."); } bytes += 2; }
+                    else if (cp >= 56320 && cp <= 57343) { fail("UTF8", "Unpaired native Unicode surrogate."); }
+                    else { bytes += cp < 2048 ? 1 : 2; }
+                }
+            }
+        } else { fail("API", "Unsupported native text encoding."); }
+        if (bytes > b.maxBytes) { fail("LIMIT_BYTES", "Expanded UTF-8 size exceeds the selected budget."); }
+        return { text: text, bytes: bytes };
+    }
+    function textCursor(text, guard) {
+        var p = 0, threshold = 0, spaces = /[ \t\r\n]+/g, strings = /[^"\\\x00-\x1f]+/g,
+            numbers = /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/g;
+        function run(re) { re.lastIndex = p - 1; var m = re.exec(text); if (!m || m.index !== p - 1) { return ""; } p = re.lastIndex; return m[0]; }
+        return { next: function () { if (p >= threshold) { guard(); threshold = p + 1024; } return text.charAt(p++); },
+            count: function () { return p; }, whitespace: function () { run(spaces); }, stringRun: function () { return run(strings); },
+            number: function () { var s = run(numbers); if (!s) { fail("JSON", "Invalid numeric token."); } return s; } };
+    }
+    function parse(cursor, config, b, guard) {
+        var ch = cursor.next(), tokens = 0, activeKeys = 0, retainedValues = 0, retainedChars = 0, recordCount = 0;
+        var groups = {}, order = [], envelope, selection = config.selection || null;
+        var fileVersion = null, recordTypes = {}, duplicates = [], duplicatePolicy = config.duplicatePolicy || "reject";
+        function timeMember(path, k) {
+            return duplicatePolicy === renderTimePolicy && path.length === 4 && path[0] === "scene" && path[1] === "extra" &&
+                typeof path[2] === "number" && path[3] === "render_options" && (k === "startTime" || k === "endTime");
+        }
+        function discriminator(path, k) {
+            return path.length === 0 && k === "file_version" || path.length === 3 && path[0] === "scene" && path[1] === "extra" && typeof path[2] === "number" && k === "type";
+        }
+        function validateDuplicateEvidence() {
+            for (var i = 0; i < duplicates.length; i += 1) {
+                var d = duplicates[i];
+                if (fileVersion !== "0.6.2.0" || recordTypes["$" + d.path[2]] !== "studio_render_settings") { fail("DUPLICATE_KEY", "Render-time duplicate does not match the exact source version and record type policy."); }
+                d.recordType = "studio_render_settings";
+            }
+        }
+        function error(message) { fail("JSON", message + " near character/byte " + cursor.count()); }
+        function next() { ch = cursor.next(); }
+        function ws() { while (ch === " " || ch === "\t" || ch === "\r" || ch === "\n") { if (cursor.whitespace) { cursor.whitespace(); } next(); } }
+        function take(c) { if (ch !== c) { error("Expected " + c); } next(); }
+        function charge(v) {
+            retainedValues += 1; if (typeof v === "string") { retainedChars += v.length; }
+            if (retainedValues > b.maxRetainedValues || retainedChars > b.maxRetainedChars) { fail("LIMIT_RETAINED", "Retained catalog, envelope, or requested payload exceeds the selected memory policy."); }
+            return v;
+        }
+        function string(keep) {
+            take('"'); var parts = [], length = 0, c, h, i, value;
+            function add(s) { length += s.length; if (length > b.maxString) { fail("LIMIT_STRING", "JSON string exceeds the selected limit."); } if (keep) { parts.push(s); } }
+            while (ch !== '"') {
+                if (!ch || ch.charCodeAt(0) < 32) { error("Unterminated string or control character"); }
+                if (cursor.stringRun && ch !== "\\") { var run = cursor.stringRun(); if (run) { add(run); next(); continue; } }
+                c = ch; next();
+                if (c === "\\") {
+                    c = ch; next();
+                    if (c === "u") { h = ""; for (i = 0; i < 4; i += 1) { if (!ch || !/[0-9a-fA-F]/.test(ch)) { error("Invalid Unicode escape"); } h += ch; next(); } c = String.fromCharCode(parseInt(h, 16)); }
+                    else { value = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" }; if (!own(value, c)) { error("Invalid escape"); } c = value[c]; }
+                }
+                add(c);
+            }
+            next(); return keep ? parts.join("") : OMIT;
+        }
+        function groupName(path) {
+            if (path.length === 1 && /_library$/.test(path[0])) { return path[0]; }
+            if (path.length === 2 && path[0] === "scene") { return "scene." + path[1]; }
+            return "";
+        }
+        function group(path, name, depth) {
+            var out = [], seen = {}, i = 0, v, wanted;
+            if (own(groups, "$" + name)) { fail("DUPLICATE_GROUP", "Duplicate record group."); }
+            groups["$" + name] = out; order.push(name); take("["); ws();
+            while (ch !== "]") {
+                recordCount += 1; if (recordCount > b.maxRecords) { fail("LIMIT_RECORDS", "Too many DUF records."); }
+                wanted = !selection || own(selection, "$" + name) && own(selection["$" + name], "$" + i);
+                v = value(path.concat([i]), depth + 1, wanted, false);
+                if (wanted) {
+                    if (config.onRecord) { config.onRecord(name, i, v); }
+                    if (selection) { out.push({ index: i, record: v }); } else { out.push(v); }
+                    if (object(v) && own(v, "id") && typeof v.id === "string") {
+                        if (own(seen, "$" + v.id)) { fail("DUPLICATE_ID", "Duplicate id in " + name + ": " + v.id); } seen["$" + v.id] = true;
+                    }
+                }
+                i += 1; ws(); if (ch === "]") { break; } take(","); ws(); if (ch === "]") { error("Trailing record comma"); }
+            }
+            take("]"); return [];
+        }
+        function value(path, depth, keep, refsOnly, occurrence) {
+            var stack=[{path:path,depth:depth,keep:keep,refsOnly:refsOnly,occurrence:occurrence,state:0}],result;
+            function finish(v){result=v;stack.pop();}
+            while(stack.length){
+                guard();var f=stack[stack.length-1],k,v,n,literal,i,g,repeated,candidate,observed,entry,project,keepDiscriminator;
+                if(f.state===0){
+                    tokens+=1;if(tokens>b.maxTokens)fail("LIMIT_TOKENS","Explicit JSON value budget exceeded.");if(f.depth>b.maxDepth)fail("LIMIT_DEPTH","Explicit JSON depth budget exceeded.");ws();
+                    if(f.occurrence){f.occurrence.valueTokenOrdinal=tokens;f.occurrence.kind=ch==="-"||ch>="0"&&ch<="9"&&ch?"number":"other";}
+                    if(ch==='"'){v=string(f.keep);finish(f.keep?charge(v):OMIT);continue;}
+                    if(ch==="{"){f.out=f.keep?{}:OMIT;f.seen={};f.count=0;f.keyChars=0;f.state=1;take("{");ws();continue;}
+                    if(ch==="["){g=config.catalog?groupName(f.path):"";if(g){finish(group(f.path,g,f.depth));continue;}f.out=f.keep?[]:OMIT;f.index=0;f.state=3;take("[");ws();continue;}
+                    if(ch==="-"||ch>="0"&&ch<="9"&&ch){n=cursor.number();next();v=Number(n);if(!isFinite(v))fail("NUMBER_RANGE","Non-finite JSON number cannot be imported faithfully.");if(/^-?[0-9]+$/.test(n)&&Math.abs(v)>9007199254740991)fail("NUMBER_RANGE","Integer-valued JSON token exceeds exact binary64 integer range.");if(v===0&&/[1-9]/.test(n.split(/[eE]/)[0]))fail("NUMBER_RANGE","Nonzero JSON number underflows binary64 range.");if(f.occurrence){f.occurrence.raw=n;f.occurrence.value=v;}finish(f.keep&&!f.refsOnly?charge(v):OMIT);continue;}
+                    literal=ch==="t"?"true":ch==="f"?"false":ch==="n"?"null":"";if(!literal)error("Expected a JSON value");for(i=0;i<literal.length;i+=1)take(literal.charAt(i));finish(f.keep&&!f.refsOnly?charge(literal==="true"?true:literal==="false"?false:null):OMIT);continue;
+                }
+                if(f.state===1){
+                    if(ch==="}"){take("}");activeKeys-=f.keyChars;v=f.out;if(f.refsOnly&&f.keep){var any=false;for(k in v)if(own(v,k)){any=true;break;}if(!any)v=OMIT;}finish(f.keep&&v!==OMIT?charge(v):OMIT);continue;}
+                    if(ch!=='"')error("Object key must be a string");k=string(true);repeated=own(f.seen,"$"+k);candidate=config.deepValidation!==false&&timeMember(f.path,k);observed=null;entry=null;
+                    if(config.deepValidation!==false&&repeated&&!candidate)fail("DUPLICATE_KEY","Duplicate JSON member: "+k);
+                    if(candidate){entry=repeated?f.seen["$"+k]:{path:f.path.concat([k]),key:k,occurrences:[],representation:"last-occurrence",semantics:"unresolved"};if(entry.occurrences.length>=2)fail("DUPLICATE_KEY","More than two render-time member occurrences are unsupported.");observed={ordinal:entry.occurrences.length+1,memberOrdinal:f.count+1};f.seen["$"+k]=entry;}else f.seen["$"+k]=true;
+                    f.count+=1;f.keyChars+=k.length;activeKeys+=k.length;if(f.count>b.maxKeys||activeKeys>b.maxActiveKeyChars)fail("LIMIT_KEYS","Explicit JSON key budget exceeded.");ws();take(":");
+                    project=f.refsOnly||config.catalog&&!selection&&f.path.length>=2&&/_library$/.test(String(f.path[0]))&&k==="values";keepDiscriminator=discriminator(f.path,k);
+                    f.key=k;f.candidate=candidate;f.observed=observed;f.entry=entry;f.repeated=repeated;f.keepDiscriminator=keepDiscriminator;f.state=2;
+                    stack.push({path:f.path.concat([k]),depth:f.depth+1,keep:f.keep||keepDiscriminator,refsOnly:project,occurrence:observed,state:0});continue;
+                }
+                if(f.state===2){
+                    v=result;k=f.key;if(f.keepDiscriminator){if(!f.path.length)fileVersion=typeof v==="string"?v:null;else recordTypes["$"+f.path[2]]=typeof v==="string"?v:null;}
+                    if(f.candidate){f.entry.occurrences.push(f.observed);if(f.repeated){if(f.entry.occurrences[0].kind!=="number"||f.observed.kind!=="number")fail("DUPLICATE_KEY","Render-time duplicate policy supports numeric scalars only.");duplicates.push(f.entry);}}
+                    if(f.keep&&v!==OMIT){put(f.out,k,v);charge(k);}ws();if(ch!=="}"){take(",");ws();if(ch==="}")error("Trailing object comma");}f.state=1;continue;
+                }
+                if(f.state===3){
+                    if(ch==="]"){take("]");finish(f.refsOnly&&f.keep&&!f.out.length?OMIT:f.keep?charge(f.out):OMIT);continue;}
+                    f.state=4;stack.push({path:f.path.concat([f.index]),depth:f.depth+1,keep:f.keep,refsOnly:f.refsOnly,state:0});continue;
+                }
+                v=result;if(f.keep&&v!==OMIT)f.out.push(v);f.index+=1;ws();if(ch!=="]"){take(",");ws();if(ch==="]")error("Trailing array comma");}f.state=3;
+            }
+            return result;
+        }
+        if (ch === "\uFEFF") { next(); } ws(); if (ch !== "{") { error("DUF root must be an object"); }
+        envelope = value([], 0, config.build !== false, false); ws(); if (ch) { error("Trailing JSON data"); } guard();
+        validateDuplicateEvidence();
+        return { envelope: envelope, records: groups, groups: order,
+            serialization: { schema: 1, issuer: "SaveGuardFullDUF", policy: duplicatePolicy, fileVersion: fileVersion,
+                duplicates: duplicates, requiresDuplicateInterpretation: duplicates.length > 0, renderApplicationBlocked: duplicates.length > 0 },
+            stats: { tokens: tokens, retainedValues: retainedValues, retainedChars: retainedChars, records: recordCount, duplicateFields: duplicates.length } };
+    }
+    function nativeBytes(file, meta, guard, deep) {
+        var chunk = "", pos = 0, obtained = 0, fingerprint = crcState();
+        function pull() {
+            guard(); if (obtained === meta.physicalBytes) { return ""; }
+            var bytes = file.read(Math.min(32768, meta.physicalBytes - obtained)), length, hex = "", out = [], i, v;
+            if (!bytes || typeof bytes.byteAt !== "function") { fail("READ_CHUNK", "DzFile.read(maxSize) did not return a ByteArray."); }
+            length = typeof bytes.length === "number" ? bytes.length : bytes.size;
+            if (typeof length !== "number" || Math.floor(length) !== length || length <= 0 || length > 32768 || obtained + length > meta.physicalBytes) { fail("READ_CHUNK", "Invalid native bounded read size."); }
+            if (typeof file.error === "function" && file.error() !== DzFile.NoError) { fail("READ", "Native file read failed."); }
+            if (typeof bytes.toHex === "function") { var h = bytes.toHex(); if (h && typeof h.convertToString === "function") { hex = h.convertToString(); if (typeof hex !== "string" || hex.length !== length * 2 || !/^[0-9a-f]+$/.test(hex)) { fail("READ_CHUNK", "Invalid ASCII byte bridge."); } } }
+            for (i = 0; i < length; i += 1) {
+                v = hex ? parseInt(hex.substr(i * 2, 2), 16) : bytes.byteAt(i);
+                if (typeof v !== "number" || Math.floor(v) !== v || v < -128 || v > 255) { fail("READ_BYTE", "Invalid native byte."); }
+                out.push(String.fromCharCode(v < 0 ? v + 256 : v));
+            }
+            obtained += length; var s = out.join(""); if(deep!==false)fingerprint.add(s); return s;
+        }
+        return { readByte: function () { if (pos === chunk.length) { chunk = pull(); pos = 0; } return pos < chunk.length ? chunk.charCodeAt(pos++) : -1; },
+            readChunk: function () { if (pos === chunk.length) { chunk = pull(); pos = 0; } var s = chunk.substring(pos, pos + 16384); pos += s.length; return s; },
+            fingerprint: function () { return deep===false?{bytes:obtained,crc32:null}:fingerprint.result(); } };
+    }
+    function stat(path) { var info = new DzFileInfo(path); if (!info.exists() || !info.isFile() || !info.isReadable()) { fail("FILE_ACCESS", "Selected DUF is missing or unreadable."); } return { path: String(path), physicalBytes: Number(info.size()), modified: String(info.lastModified()) }; }
+    function same(a, b) { return a.physicalBytes === b.physicalBytes && a.modified === b.modified; }
+    function verifySource(file, options, b) {
+        var guard = guardFor(options, b), raw = null;
+        try {
+            guard(); if (!same(file, stat(file.path))) { fail("FILE_CHANGED", "DUF source metadata changed after parsing."); }
+            if(options.deepValidation===false)return true;
+            raw = new DzFile(file.path); if (!raw.open(DzFile.ReadOnly)) { fail("OPEN", "Cannot revalidate source DUF."); }
+            var bytes = nativeBytes(raw, file, guard); while (bytes.readChunk().length) {}
+            var actual = bytes.fingerprint();
+            if (actual.bytes !== file.fingerprint.bytes || actual.crc32 !== file.fingerprint.crc32 || !same(file, stat(file.path))) { fail("FILE_CHANGED", "DUF source content changed after parsing."); }
+            guard(); return true;
+        } finally { closeSources(raw, null); }
+    }
+    function sourcePass(path, options, b, config, expected) {
+        var guard = guardFor(options, b), raw = null, gz = null, meta = stat(path), parsed, bytes, gzip, fingerprint, stream, whole, r;
+        try {
+            config.deepValidation = options.deepValidation; config.duplicatePolicy = options.duplicatePolicy || "reject";
+            guard(); if (!(config.assetDocument ? /\.(duf|dsf)$/i : /\.duf$/i).test(path)) { fail("FILE_TYPE", config.assetDocument ? "Choose a .duf or .dsf asset document." : "Choose a .duf file."); }
+            if (!isFinite(meta.physicalBytes) || meta.physicalBytes <= 0 || Math.floor(meta.physicalBytes)!==meta.physicalBytes || meta.physicalBytes > b.maxPhysicalBytes) { fail("LIMIT_PHYSICAL", "DUF physical size exceeds the selected limit or is empty."); }
+            if (expected && !same(meta, expected)) { fail("FILE_CHANGED", "DUF source metadata changed after the catalog was read."); }
+            raw = new DzFile(path); if (!raw.open(DzFile.ReadOnly)) { fail("OPEN", "Cannot open source DUF read-only."); }
+            if(config.fast&&options.deepValidation===false){var probe=raw.read(2),probeLength=typeof probe.length==="number"?probe.length:probe.size;if(probeLength!==Math.min(2,meta.physicalBytes)||raw.error()!==DzFile.NoError)fail("READ","Source probe failed");gzip=String(probe.toHex().convertToString()).toLowerCase()==="1f8b";}
+            else {bytes = nativeBytes(raw, meta, guard, options.deepValidation); var first = bytes.readByte(), second = bytes.readByte(); gzip = first === 31 && second === 139;}
+            if (!raw.seek(0)) { fail("SEEK", "Cannot rewind DUF source."); } bytes = nativeBytes(raw, meta, guard, options.deepValidation);
+            meta.encoding = gzip ? "gzip / UTF-8 JSON" : "plain UTF-8 JSON";
+            if (config.fast && gzip) {
+                var major = typeof App !== "undefined" ? parseInt(String(App.versionString), 10) : 0;
+                if ((major !== 4 && major !== 6) || typeof DzGZFile === "undefined") { fail("API", "Fast gzip requires DAZ4 or DAZ6 native whole-read support. No alternate parser was attempted."); }
+                // Validate the bounded container and fingerprint before the unavoidable native allocation.
+                if (typeof SaveGuardDUFGzip === "undefined") { fail("API", "Strict gzip validation dependency is unavailable."); }
+                var expectedText = crcState(), part;
+                if(options.deepValidation!==false){stream = SaveGuardDUFGzip.create(bytes.readByte, b.maxBytes, guard, options.clock);
+                while ((part = stream.readChunk()).length) { expectedText.add(part); } fingerprint = bytes.fingerprint();}else{fingerprint={bytes:meta.physicalBytes,crc32:null};}
+                gz = new DzGZFile(path); if (typeof gz.read !== "function" || typeof gz.eof !== "function") { fail("API", "Native whole-read API unavailable. No alternate parser was attempted."); }
+                if (!gz.open(DzGZFile.ReadOnly)) { fail("OPEN", "Cannot open native gzip source."); }
+                guard(); try { whole = gz.read(); } catch (nativeError) { fail("READ_TEXT", "Native whole read failed: " + String(nativeError) + ". No alternate reader was attempted."); } guard();
+                if (typeof whole !== "string" || !gz.eof() || typeof gz.error === "function" && gz.error() !== DzFile.NoError) { fail("READ_TEXT", "Native gzip whole read failed. No alternate parser was attempted."); }
+                if (whole.length > b.maxBytes) { fail("LIMIT_BYTES", "Native whole text exceeds the selected expanded budget."); }
+                parsed = fastFromText(whole, major, b, guard, config.duplicatePolicy, options.deepValidation);
+                var actualText = parsed.fingerprint, validated = expectedText.result();
+                if (options.deepValidation!==false && (actualText.bytes !== validated.bytes || actualText.crc32 !== validated.crc32)) { fail("FILE_CHANGED", "Native decoded text differs from independently validated gzip content."); }
+                whole = null; meta.gzipIntegrity = "strict-header-deflate-crc32-isize-single-member";
+            } else if(config.fast&&!gzip&&options.deepValidation===false){
+                guard();var bulk=raw.read(meta.physicalBytes),bulkLength=typeof bulk.length==="number"?bulk.length:bulk.size;
+                if(bulkLength!==meta.physicalBytes||!raw.eof()||raw.error()!==DzFile.NoError)fail("READ","Incomplete plain DUF or native error");
+                if(typeof bulk.convertToStringFromUtf8!=="function")fail("API","Native UTF-8 conversion unavailable");
+                whole=bulk.convertToStringFromUtf8();bulk=null;guard();
+                if(typeof whole!=="string"||whole.length>b.maxBytes)fail("LIMIT_BYTES","Invalid or oversized plain text");
+                parsed=fastFromText(whole,6,b,guard,config.duplicatePolicy,false);whole=null;
+                fingerprint={bytes:meta.physicalBytes,crc32:null};meta.gzipIntegrity="not-applicable";
+            } else {
+                stream = gzip ? SaveGuardDUFGzip.create(bytes.readByte, b.maxBytes, guard, options.clock, options.deepValidation) : bytes;
+                if (config.fast) { parsed = fastFromChunks(stream.readChunk, options, b, guard); }
+                else {
+                    r = SaveGuardDUFChunkReader.create(stream.readChunk, b, options.clock || function () { return new Date().getTime(); }, options);
+                    parsed = parse(r, config, b, guard); parsed.bytesRead = r.count(); parsed.readerStats = r.stats();
+                }
+                fingerprint = bytes.fingerprint(); meta.gzipIntegrity = gzip ? "strict-header-deflate-crc32-isize-single-member" : "not-applicable";
+            }
+            if (fingerprint.bytes !== meta.physicalBytes) { fail("FILE_CHANGED", "Source read size differs from initial size."); }
+            if (!same(meta, stat(path))) { fail("FILE_CHANGED", "DUF source changed during read."); }
+            if (options.deepValidation!==false && expected && expected.fingerprint && fingerprint.crc32 !== expected.fingerprint.crc32) { fail("FILE_CHANGED", "DUF content changed after catalog read, despite unchanged size/time."); }
+            guard(); meta.fingerprint = fingerprint; meta.lowMemoryMode = options.lowMemoryMode === true;
+            meta.mode = config.fast ? "native-json-full-document" : "strict-streaming-record-catalog";
+            meta.wholeDocumentAllocated = !!config.fast; meta.cancellableDuringNativeParse = !config.fast;
+            meta.sourceChangeProtection = options.deepValidation===false ? "size + modification stamp" : "size + modification stamp + full-file CRC32; detects accidental changes, not an adversarial cryptographic identity";
+            if(options.deepValidation===false && gzip)meta.gzipIntegrity = config.fast ? "native-decoder-errors; no independent CRC guarantee" : "streaming parse and size; CRC disabled";
+            meta.assetDocument = config.assetDocument === true;
+            parsed.serialization.source = { path: meta.path, physicalBytes: meta.physicalBytes, modified: meta.modified, fingerprint: copy(meta.fingerprint) };
+            parsed.file = meta; return parsed;
+        } finally { whole = null; closeSources(gz, raw); }
+    }
+    function fastFromChunks(readChunk, options, b, guard) {
+        var pieces = [], size = 0, part;
+        while ((part = readChunk()).length) {
+            guard(); if (typeof part !== "string" || part.length > 16384 || /[\u0100-\uffff]/.test(part)) { fail("READ_CHUNK", "Invalid expanded byte chunk."); }
+            size += part.length; if (size > b.maxBytes) { fail("LIMIT_BYTES", "Expanded source exceeds selected budget."); } pieces.push(part);
+        }
+        var text = pieces.join(""); pieces = null; return fastFromText(text, 4, b, guard, options.duplicatePolicy || "reject", options.deepValidation);
+    }
+    function fastFromText(nativeText, major, b, guard, duplicatePolicy, deep) {
+        if (typeof JSON === "undefined" || typeof JSON.parse !== "function") { fail("API", "Native JSON.parse unavailable. No alternate parser was attempted."); }
+        var encoded = nativeChunks(nativeText, major, guard), fingerprint = crcState(), part;
+        if(deep!==false)while ((part = encoded()).length) { fingerprint.add(part); }
+        var normalized = normalizeNative(nativeText, major, guard, b), text = normalized.text; nativeText = null; guard();
+        // Validate before JSON.parse overwrites keys; known opt-in duplicates retain provenance.
+        var validated = deep===false ? {serialization:{schema:1,issuer:"SaveGuardFullDUF",policy:"native-json",duplicates:[],requiresDuplicateInterpretation:false,renderApplicationBlocked:false},stats:{}} : parse(textCursor(text, guard), { build: false, duplicatePolicy: duplicatePolicy }, b, guard), doc;
+        if (text.charCodeAt(0) === 65279) { text = text.substring(1); }
+        try { doc = JSON.parse(text); } catch (e) { fail("JSON_PARSE", "Native JSON.parse failed: " + String(e) + ". No alternate parser was attempted."); }
+        text = null; guard(); return { document: doc, serialization: validated.serialization, stats: validated.stats, bytesRead: normalized.bytes, fingerprint: fingerprint.result(), readerStats: { fullTextNormalized: true } };
+    }
+    function fromDocument(doc, file, options, b, serialization) {
+        var catalog = {}, groups = [], envelope = {}, k, j, scene = doc.scene, recordsCount = 0;
+        function add(name, records) {
+            recordsCount += records.length; if (recordsCount > b.maxRecords) { fail("LIMIT_RECORDS", "Too many DUF records."); }
+            var seen = {}; groups.push(name); catalog["$" + name] = records;
+            for (var i = 0; i < records.length; i += 1) { var v = records[i]; if (object(v) && typeof v.id === "string") { if (own(seen, "$" + v.id)) { fail("DUPLICATE_ID", "Duplicate id in " + name + ": " + v.id); } seen["$" + v.id] = true; } }
+        }
+        for (k in doc) { if (own(doc, k)) {
+            if (/_library$/.test(k) && array(doc[k])) { add(k, doc[k]); put(envelope, k, []); }
+            else if (k === "scene" && object(scene)) { var s = {}; for (j in scene) { if (own(scene, j)) { if (array(scene[j])) { add("scene." + j, scene[j]); put(s, j, []); } else { put(s, j, scene[j]); } } } put(envelope, k, s); }
+            else { put(envelope, k, doc[k]); }
+        } }
+        return provider({ records: catalog, groups: groups, envelope: envelope, file: file, serialization: serialization }, options, b, doc);
+    }
+    function provider(parsed, options, b, doc) {
+        var closed = false, names = parsed.groups.slice(0), catalog = parsed.records, env = parsed.envelope, file = copy(parsed.file), evidence = copy(parsed.serialization);
+        // Never share source identity or duplicate evidence with mutable result objects.
+        function sameEvidence(other) { return JSON.stringify(evidence) === JSON.stringify(other); }
+        function alive() { if (closed) { fail("CLOSED", "DUF record provider is closed."); } }
+        var cacheBaseline = options.deepValidation===false?null:cacheFingerprint(), invalidCache = false;
+        function cacheFingerprint() {
+            return JSON.stringify([structuralFingerprint(catalog,options),structuralFingerprint(env,options),doc ? structuralFingerprint(doc,options) : null]);
+        }
+        function cacheIntact() {
+            alive(); if(options.deepValidation===false)return true; if (invalidCache) { fail("CACHE_CHANGED", "The inspected in-memory cache changed; inspect the source again."); }
+            try { if (cacheFingerprint() === cacheBaseline) { return true; } }
+            catch (e) { if (e.code === "CANCELLED" || e.code === "LIMIT_TIME") { throw e; } invalidCache = true; fail("CACHE_CHANGED", "Inspected cache is no longer valid JSON data: " + String(e.message || e)); }
+            invalidCache = true; fail("CACHE_CHANGED", "The inspected in-memory cache changed; source CRC cannot authorize altered records.");
+        }
+        function known(group, index) {
+            alive(); if (!own(catalog, "$" + group)) { fail("GROUP", "Unknown DUF record group: " + group); }
+            if (index !== undefined && (typeof index !== "number" || Math.floor(index) !== index || index < 0 || index >= catalog["$" + group].length)) { fail("RECORD", "Invalid record index for " + group); }
+        }
+        var readFullRecords, api = { mode: file.mode, projection: doc ? "full records" : "library values numeric/boolean/null payload omitted for planning only; string references preserved",
+            groups: function () { alive(); return names.slice(0); }, readEnvelope: function () { alive(); return env; },
+            listRecords: function (group) { known(group); return catalog["$" + group]; },
+            verifySource: function () { cacheIntact(); var verified = verifySource(file, options, b); cacheIntact(); return verified; },
+            readSourceEvidence: function () { cacheIntact(); verifySource(file, options, b); cacheIntact(); return copy(evidence); },
+            assertRenderApplicationAllowed: function () {
+                cacheIntact(); verifySource(file, options, b); cacheIntact();
+                if (evidence.renderApplicationBlocked) { fail("AMBIGUOUS_RENDER_TIME", "Duplicate render-time members require a reviewed source profile; last-occurrence inspection values must not be applied."); }
+                return true;
+            },
+            readRecords: function (requests) {
+                cacheIntact(); var selection = {}, group, i, out = {}, indices;
+                for (group in requests) { if (own(requests, group)) {
+                    known(group); indices = requests[group]; if (!array(indices)) { fail("CONFIG", "Requested record indexes must be arrays."); } selection["$" + group] = {}; put(out, group, []);
+                    for (i = 0; i < indices.length; i += 1) { known(group, indices[i]); if (own(selection["$" + group], "$" + indices[i])) { fail("CONFIG", "Duplicate requested record index."); } selection["$" + group]["$" + indices[i]] = true; }
+                } }
+                if (doc) {
+                    verifySource(file, options, b);
+                    for (group in requests) { if (own(requests, group)) { for (i = 0; i < requests[group].length; i += 1) { out[group].push({ index: requests[group][i], record: catalog["$" + group][requests[group][i]] }); } } }
+                } else {
+                    var reread = sourcePass(file.path, options, b, { catalog: true, selection: selection, assetDocument: file.assetDocument === true }, file);
+                    if (!sameEvidence(reread.serialization)) { fail("SOURCE_EVIDENCE_CHANGED", "Selected reread serialization evidence differs from the inspected source."); }
+                    for (group in out) { if (own(out, group)) { out[group] = reread.records["$" + group] || []; } }
+                }
+                cacheIntact(); return out;
+            },
+            readRecordsWithEvidence: function (requests) { var records = readFullRecords(requests); return { records: records, sourceEvidence: copy(evidence) }; },
+            readRecord: function (group, index) { var request = {}; request[group] = [index]; return readFullRecords(request)[group][0].record; },
+            close: function () { if (!closed) { closed = true; catalog = null; env = null; doc = null; parsed = null; evidence = null; file = null; } } };
+        readFullRecords = api.readRecords; return api;
+    }
+    function readInternal(path, options, assetDocument) {
+        var input = options || {}; options = {}; for (var key in input) { if (own(input, key)) { options[key] = input[key]; } }
+        var b = settings(options), parsed;
+        if (typeof SaveGuardDUFChunkReader === "undefined") { fail("API", "Bounded UTF-8 reader dependency is unavailable."); }
+        parsed = sourcePass(path, options, b, options.lowMemoryMode === true ? { catalog: true, assetDocument: assetDocument } : { fast: true, assetDocument: assetDocument });
+        var p = options.lowMemoryMode === true ? provider(parsed, options, b, null) : fromDocument(parsed.document, parsed.file, options, b, parsed.serialization);
+        return { file: parsed.file, document: parsed.document || null, provider: p, sourceEvidence: copy(parsed.serialization), stats: parsed.stats, readerStats: parsed.readerStats };
+    }
+    return { read: function (path, options) { return readInternal(path, options, false); },
+        readAsset: function (path, options) { return readInternal(path, options, true); }, structuralFingerprint: structuralFingerprint, validateStructure: validateStructure, limits: limits };
+}());
+

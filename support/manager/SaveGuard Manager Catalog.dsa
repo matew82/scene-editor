@@ -1,0 +1,360 @@
+// Read-only manifest discovery; no DUF, image, scene, or settings writes.
+// Include after SaveGuard Manager Model.dsa. A caller owns this cache per dialog.
+// Optional on-disk Catalog DB (mtime/dir stamps + version/manifest summaries) is separate
+// from SaveGuardInspectionCache (per-copy DUF inspection projection).
+function SaveGuardManagerCatalog(options) {
+    options = options || {};
+    var model = SaveGuardManagerModel, cache = {}, revision = 0, dirIndex = {}, lastRootKey = "",
+        diskLoadedRoot = "", persistEnabled = options.persist !== false && options.maxDepth !== 0,
+        dbFolderName = ".saveguard-catalog-db", dbFileName = "index.json",
+        dbSchema = "saveguard-catalog-db-1", dbByteLimit = options.maxCatalogDbBytes || 33554432,
+        lastPersist = { ok: false, reusedFromDisk: 0, path: "", error: "" };
+    function own(object, key) { return Object.prototype.hasOwnProperty.call(object, key); }
+    function exists(path) { var info = new DzFileInfo(path); return info.exists() && info.isFile(); }
+    function dirExists(path) { var info = new DzFileInfo(path); return info.exists() && info.isDir() && !info.isSymLink(); }
+    function dirStamp(path) {
+        var info = new DzFileInfo(path);
+        if (!info.exists()) { return ""; }
+        return String(Number(info.lastModified().getTime())) + ":" + (info.isDir() ? "d" : "f") + ":" + String(Number(info.size()));
+    }
+    function skipDirName(name) {
+        return name === "saveguard-user" || name === ".saveguard-maintenance" || name === ".saveguard-maintenance-lock" ||
+            name === ".saveguard-recovery" || name === dbFolderName;
+    }
+    function dbPaths(root) {
+        var folder = model.path(root) + "/" + dbFolderName;
+        return { folder: folder, file: folder + "/" + dbFileName };
+    }
+    function clearMemory() { cache = {}; dirIndex = {}; lastRootKey = ""; diskLoadedRoot = ""; lastPersist = { ok: false, reusedFromDisk: 0, path: "", error: "" }; }
+    function removeDiskFile(path) {
+        var info = new DzFileInfo(path);
+        if (!info.exists()) { return true; }
+        if (!info.isFile() || info.isSymLink()) { return false; }
+        return new DzFile(path).remove() === true;
+    }
+    function invalidateDisk(root) {
+        clearMemory();
+        if (!persistEnabled) { return true; }
+        try {
+            if (root) {
+                var paths = dbPaths(root);
+                if (!removeDiskFile(paths.file)) { return false; }
+                var folderInfo = new DzFileInfo(paths.folder);
+                if (folderInfo.exists() && folderInfo.isDir()) { new DzDir(model.path(root)).rmdir(dbFolderName); }
+                return true;
+            }
+            return true;
+        } catch (ignoreInvalidate) { return false; }
+    }
+    function copyPlain(value) {
+        return JSON.parse(JSON.stringify(value));
+    }
+    function hydrateFromDisk(root, rootKey) {
+        var reused = 0;
+        if (!persistEnabled || typeof SaveGuardStorage === "undefined") { return 0; }
+        if (diskLoadedRoot === rootKey) { return 0; }
+        diskLoadedRoot = rootKey;
+        try {
+            var paths = dbPaths(root), fileInfo = new DzFileInfo(paths.file);
+            if (!fileInfo.exists() || !fileInfo.isFile() || fileInfo.isSymLink()) { return 0; }
+            if (Number(fileInfo.size()) <= 0 || Number(fileInfo.size()) > dbByteLimit) { return 0; }
+            var raw = SaveGuardStorage.readJSON(paths.file, dbByteLimit);
+            if (!raw || raw.schema !== dbSchema || typeof raw.rootKey !== "string" || raw.rootKey !== rootKey ||
+                    typeof raw.rootPath !== "string" || !raw.dirs || typeof raw.dirs !== "object") { return 0; }
+            // Refuse a DB that claims a different absolute root even when pathKey matched.
+            if (model.pathKey(raw.rootPath) !== model.pathKey(root)) { return 0; }
+            var key, entry, nextDir = {}, nextCache = {};
+            for (key in raw.dirs) {
+                if (!own(raw.dirs, key)) { continue; }
+                entry = raw.dirs[key];
+                if (!entry || typeof entry.stamp !== "string" || typeof entry.path !== "string") { continue; }
+                // Never trust disk rows blindly: folder must still exist with the same stamp.
+                if (!dirExists(entry.path) || dirStamp(entry.path) !== entry.stamp) { continue; }
+                if (("$" + model.pathKey(entry.path)) !== key) { continue; }
+                var children = null, ci, alive = [];
+                if (Object.prototype.toString.call(entry.children) === "[object Array]") {
+                    for (ci = 0; ci < entry.children.length; ci += 1) {
+                        if (typeof entry.children[ci] === "string" && dirExists(entry.children[ci])) { alive.push(model.path(entry.children[ci])); }
+                    }
+                    // If any cached child vanished, drop the listing so scan re-lists from disk.
+                    children = alive.length === entry.children.length ? alive : null;
+                }
+                var versionRecord = null;
+                if (entry.versionRecord && typeof entry.versionRecord === "object" && entry.manifestName) {
+                    versionRecord = copyPlain(entry.versionRecord);
+                    reused += 1;
+                }
+                nextDir[key] = {
+                    stamp: entry.stamp,
+                    children: children,
+                    depth: typeof entry.depth === "number" ? entry.depth : 0,
+                    versionRecord: versionRecord,
+                    manifestName: entry.manifestName || "",
+                    hadCapture: entry.hadCapture === true,
+                    derivedPresent: entry.derivedPresent && typeof entry.derivedPresent === "object" ? copyPlain(entry.derivedPresent) : {}
+                };
+            }
+            if (raw.manifests && typeof raw.manifests === "object") {
+                for (key in raw.manifests) {
+                    if (!own(raw.manifests, key)) { continue; }
+                    entry = raw.manifests[key];
+                    if (!entry || typeof entry.signature !== "string" || !entry.manifest || typeof entry.manifest !== "object") { continue; }
+                    var manifestPath = entry.path || key.substring(1), info = new DzFileInfo(manifestPath);
+                    if (!info.exists() || !info.isFile()) { continue; }
+                    var signature = Number(info.size()) + ":" + Number(info.lastModified().getTime());
+                    if (signature !== entry.signature) { continue; }
+                    nextCache[key] = {
+                        signature: signature,
+                        manifest: copyPlain(entry.manifest),
+                        modifiedAtEpochMs: Number(entry.modifiedAtEpochMs) || Number(info.lastModified().getTime())
+                    };
+                }
+            }
+            dirIndex = nextDir;
+            cache = nextCache;
+            lastPersist.reusedFromDisk = reused;
+            lastPersist.path = paths.file;
+            return reused;
+        } catch (hydrateError) {
+            dirIndex = {};
+            cache = {};
+            lastPersist.error = String(hydrateError && hydrateError.message !== undefined ? hydrateError.message : hydrateError);
+            return 0;
+        }
+    }
+    function persistToDisk(root, rootKey) {
+        lastPersist.ok = false;
+        lastPersist.error = "";
+        if (!persistEnabled || typeof SaveGuardStorage === "undefined") { return false; }
+        try {
+            var paths = dbPaths(root), dirs = {}, manifests = {}, key, entry, text;
+            for (key in dirIndex) {
+                if (!own(dirIndex, key)) { continue; }
+                entry = dirIndex[key];
+                if (!entry || typeof entry.stamp !== "string") { continue; }
+                // Persist only verified live folders.
+                if (!dirExists(entry.path || key.substring(1))) { continue; }
+                var pathValue = entry.path || key.substring(1);
+                if (dirStamp(pathValue) !== entry.stamp) { continue; }
+                dirs[key] = {
+                    path: model.path(pathValue),
+                    stamp: entry.stamp,
+                    children: entry.children ? entry.children.slice(0) : null,
+                    depth: entry.depth || 0,
+                    manifestName: entry.manifestName || "",
+                    hadCapture: entry.hadCapture === true,
+                    derivedPresent: entry.derivedPresent && typeof entry.derivedPresent === "object" ? copyPlain(entry.derivedPresent) : {},
+                    versionRecord: entry.versionRecord ? copyPlain(entry.versionRecord) : null
+                };
+            }
+            for (key in cache) {
+                if (!own(cache, key)) { continue; }
+                entry = cache[key];
+                if (!entry || typeof entry.signature !== "string" || !entry.manifest) { continue; }
+                manifests[key] = {
+                    path: key.substring(1),
+                    signature: entry.signature,
+                    modifiedAtEpochMs: entry.modifiedAtEpochMs,
+                    manifest: copyPlain(entry.manifest)
+                };
+            }
+            var payload = {
+                schema: dbSchema,
+                rootKey: rootKey,
+                rootPath: model.path(root),
+                savedAtEpochMs: new Date().getTime(),
+                dirs: dirs,
+                manifests: manifests
+            };
+            text = SaveGuardStorage.ascii(payload);
+            if (text.length > dbByteLimit) {
+                lastPersist.error = "Catalog DB exceeds " + dbByteLimit + " byte limit; not written.";
+                return false;
+            }
+            SaveGuardStorage.ensureDirectory(paths.folder);
+            if (!removeDiskFile(paths.file)) { throw Error("Cannot replace existing Catalog DB"); }
+            // Drop a leftover partial from a prior crash before writeJSONNew.
+            removeDiskFile(paths.file + ".partial");
+            SaveGuardStorage.writeJSONNew(paths.folder, dbFileName, payload);
+            lastPersist.ok = true;
+            lastPersist.path = paths.file;
+            return true;
+        } catch (persistError) {
+            lastPersist.error = String(persistError && persistError.message !== undefined ? persistError.message : persistError);
+            return false;
+        }
+    }
+    function readManifest(path) {
+        var info = new DzFileInfo(path), size = Number(info.size()), modified = Number(info.lastModified().getTime()),
+            signature = size + ":" + modified, key = "$" + model.pathKey(path), file, bytes, value;
+        if (size <= 0 || size > (options.maxManifestBytes || 2097152)) { throw Error("Manifest empty or above the 2 MiB read limit"); }
+        if (own(cache, key) && cache[key].signature === signature) { return cache[key]; }
+        file = new DzFile(path);
+        try {
+            if (!file.open(DzFile.ReadOnly)) { throw Error("Cannot open manifest"); }
+            bytes = file.read(size);
+            if (!bytes || Number(bytes.length) !== size || file.error() !== DzFile.NoError || !file.eof()) { throw Error("Incomplete manifest read"); }
+            value = JSON.parse(bytes.convertToString());
+        } finally { file.close(); }
+        var after = new DzFileInfo(path);
+        if (Number(after.size()) !== size || Number(after.lastModified().getTime()) !== modified) { throw Error("Manifest changed during read"); }
+        if (!value || typeof value !== "object" || Object.prototype.toString.call(value) === "[object Array]") { throw Error("Manifest is not an object"); }
+        cache[key] = { signature: signature, manifest: value, modifiedAtEpochMs: modified };
+        return cache[key];
+    }
+    function listChildDirs(path, depth, maxDepth) {
+        var key = "$" + model.pathKey(path), stamp = dirStamp(path), cached = own(dirIndex, key) ? dirIndex[key] : null, children, i, names = [], alive = [], refreshed = false;
+        if (!stamp) { return []; }
+        if (cached && cached.stamp === stamp && cached.children) {
+            for (i = 0; i < cached.children.length; i += 1) {
+                if (dirExists(cached.children[i])) { alive.push(cached.children[i]); }
+            }
+            // Deleted children must never stay visible. If any vanished, re-list from disk.
+            if (alive.length === cached.children.length) {
+                cached.path = model.path(path);
+                return alive.slice(0);
+            }
+            refreshed = true;
+        }
+        var dir = new DzDir(path);
+        children = dir.entryList("*", DzDir.Dirs | DzDir.NoDotAndDotDot | DzDir.NoSymLinks, DzDir.Name);
+        for (i = 0; i < (children ? children.length : 0); i += 1) {
+            if (!skipDirName(String(children[i]))) {
+                names.push(model.path(dir.filePath(String(children[i]))));
+            }
+        }
+        var next = { path: model.path(path), stamp: stamp, children: names.slice(0), depth: depth };
+        if (cached) {
+            next.versionRecord = cached.versionRecord;
+            next.manifestName = cached.manifestName;
+            next.hadCapture = cached.hadCapture;
+            next.derivedPresent = cached.derivedPresent;
+        }
+        dirIndex[key] = next;
+        if (refreshed && typeof print === "function") { print("SaveGuard catalog: refreshed child list after delete at " + path); }
+        return names;
+    }
+    function refreshVolatileFlags(versionRecord, folderPath, dir) {
+        var copiedScene = model.safeFile(folderPath, ((versionRecord.manifest || {}).scene || {}).file);
+        versionRecord.sceneFileExists = !!copiedScene && exists(copiedScene);
+        versionRecord.invalidated = exists(dir.filePath("INVALID.json"));
+        versionRecord.failed = exists(dir.filePath("FAILED.json"));
+        return versionRecord;
+    }
+    function scan(root, scanOptions) {
+        scanOptions = scanOptions || {};
+        var rootInfo = new DzFileInfo(root), canonical = model.path(rootInfo.canonicalFilePath()), warnings = [], records = [],
+            visited = {}, seenCache = {}, seenDirs = {}, stack = [{ path: model.path(rootInfo.absoluteFilePath()), depth: 0 }], directories = 0,
+            maxDirectories = options.maxDirectories || 100000, maxDepth = typeof options.maxDepth === "number" ? options.maxDepth : 6,
+            reusedVersions = 0, reusedFromDisk = 0, rootKey = "$" + model.pathKey(model.path(rootInfo.absoluteFilePath())), resultEnvelopes = [];
+        if (!rootInfo.isAbsolute()) { throw Error("Backup directory must be absolute."); }
+        if (scanOptions.force === true) { invalidateDisk(model.path(rootInfo.absoluteFilePath())); }
+        if (rootKey !== lastRootKey) { dirIndex = {}; cache = {}; lastRootKey = rootKey; diskLoadedRoot = ""; }
+        if (!rootInfo.exists()) {
+            cache = {}; dirIndex = {};
+            if (persistEnabled) { invalidateDisk(model.path(rootInfo.absoluteFilePath())); }
+            return { scenes: [], warnings: ["Backup directory does not exist yet."], versionCount: 0, revision: ++revision, directoriesRead: 0, reusedVersions: 0, reusedFromDisk: 0, catalogDb: lastPersist };
+        }
+        if (!rootInfo.isDir()) { throw Error("Backup directory is not a directory."); }
+        reusedFromDisk = hydrateFromDisk(model.path(rootInfo.absoluteFilePath()), rootKey);
+        while (stack.length) {
+            var current = stack.pop(), dir = new DzDir(current.path), actual = model.path(dir.canonicalPath()), key = "$" + model.pathKey(actual || current.path), i, childNames, stamp;
+            if (own(visited, key)) { continue; } visited[key] = true; seenDirs[key] = true;
+            if (canonical && actual && model.pathKey(actual) !== model.pathKey(canonical) && model.pathKey(actual).indexOf(model.pathKey(canonical) + "/") !== 0) {
+                warnings.push("Skipped directory outside backup root: " + current.path); continue;
+            }
+            directories += 1;
+            if (directories > maxDirectories) { warnings.push("Catalog directory limit reached; results are partial."); break; }
+            if (!dir.isReadable()) { warnings.push("Unreadable directory: " + current.path); continue; }
+            stamp = dirStamp(current.path);
+            if (!stamp) { continue; }
+            var manifestName = exists(dir.filePath("complete.json")) ? "complete.json" :
+                exists(dir.filePath("pre-save.json")) ? "" : exists(dir.filePath("staging.json")) ? "staging.json" : "";
+            if (manifestName) {
+                var manifestPath = model.path(dir.filePath(manifestName)), capturePath = model.path(dir.filePath("capture.json")),
+                    hadCapture = exists(capturePath), derivedHit = false, derivedNames = ["saveguard-derived.json", "saveguard-derived-v2.json"], di,
+                    prior = own(dirIndex, key) ? dirIndex[key] : null, canReuse = prior && prior.stamp === stamp && prior.versionRecord && prior.manifestName === manifestName && prior.hadCapture === hadCapture;
+                for (di = 0; canReuse && di < derivedNames.length; di += 1) {
+                    if (exists(current.path + "/" + derivedNames[di]) !== !!prior.derivedPresent[derivedNames[di]]) { canReuse = false; }
+                }
+                // Folder must still exist; never show a stale disk/session row for a deleted copy.
+                if (canReuse && !dirExists(current.path)) { canReuse = false; }
+                if (canReuse) {
+                    var reused = refreshVolatileFlags(copyPlain(prior.versionRecord), current.path, dir);
+                    reused.folder = current.path;
+                    records.push(reused);
+                    prior.versionRecord = reused;
+                    prior.path = model.path(current.path);
+                    seenCache["$" + model.pathKey(manifestPath)] = true;
+                    if (hadCapture) { seenCache["$" + model.pathKey(capturePath)] = true; }
+                    for (di = 0; di < derivedNames.length; di += 1) {
+                        if (prior.derivedPresent[derivedNames[di]]) { seenCache["$" + model.pathKey(current.path + "/" + derivedNames[di])] = true; }
+                    }
+                    reusedVersions += 1;
+                } else {
+                    try {
+                        var record = readManifest(manifestPath); seenCache["$" + model.pathKey(manifestPath)] = true;
+                        var presentationManifest = record.manifest,
+                            captureResultState = record.manifest.capture ? "not published" : "not recorded", presentationWarnings = [], derivedPresent = {};
+                        // Check every refresh, even when complete.json is already cached. A late
+                        // immutable capture.json becomes visible without rewriting the saved copy.
+                        if (manifestName === "complete.json" && hadCapture) {
+                            try {
+                                var captureRecord = readManifest(capturePath); seenCache["$" + model.pathKey(capturePath)] = true;
+                                presentationManifest = model.mergeCapture(record.manifest, captureRecord.manifest, current.path, manifestPath);
+                                captureResultState = "merged";
+                            } catch (captureError) {
+                                captureResultState = "rejected";
+                                var captureWarning = capturePath + ": " + String(captureError);
+                                warnings.push(captureWarning); presentationWarnings.push(captureWarning);
+                            }
+                        }
+                        for (di = 0; di < derivedNames.length; di += 1) {
+                            var derivedPath = current.path + "/" + derivedNames[di];
+                            derivedPresent[derivedNames[di]] = exists(derivedPath);
+                            if (typeof SaveGuardDerivedMetadata !== "undefined" && derivedPresent[derivedNames[di]]) {
+                                try {
+                                    var derivedRecord = readManifest(derivedPath); seenCache["$" + model.pathKey(derivedPath)] = true;
+                                    presentationManifest = SaveGuardDerivedMetadata.attach(presentationManifest, derivedRecord.manifest);
+                                } catch (derivedError) { warnings.push(derivedPath + ": " + String(derivedError)); }
+                            }
+                        }
+                        var copiedScene = model.safeFile(current.path, (record.manifest.scene || {}).file);
+                        var versionRecord = { folder: current.path, manifestPath: manifestPath, manifest: presentationManifest,
+                            captureResultState: captureResultState, presentationWarnings: presentationWarnings,
+                            manifestIdentity: model.path(new DzFileInfo(manifestPath).canonicalFilePath()) || manifestPath,
+                            modifiedAtEpochMs: record.modifiedAtEpochMs, sceneFileExists: !!copiedScene && exists(copiedScene),
+                            invalidated: exists(dir.filePath("INVALID.json")), failed: exists(dir.filePath("FAILED.json")) };
+                        records.push(versionRecord);
+                        dirIndex[key] = { path: model.path(current.path), stamp: stamp, children: prior && prior.stamp === stamp && prior.children ? prior.children : null, depth: current.depth,
+                            versionRecord: versionRecord, manifestName: manifestName, hadCapture: hadCapture, derivedPresent: derivedPresent };
+                    } catch (e) {
+                        var manifestEnvelope = typeof SaveGuardLastErrorReport !== "undefined" ? SaveGuardLastErrorReport.envelope(e, "catalog-manifest", { recoveryRequired: false }) : { code: e && e.code || "CATALOG", stage: "catalog-manifest", message: String(e && e.message || e), recoveryRequired: false };
+                        warnings.push(manifestPath + ": [" + manifestEnvelope.code + "@" + manifestEnvelope.stage + "] " + manifestEnvelope.message);
+                        resultEnvelopes.push(manifestEnvelope);
+                    }
+                }
+            }
+            if (current.depth >= maxDepth) {
+                childNames = listChildDirs(current.path, current.depth, maxDepth);
+                if (childNames.length) { warnings.push("Catalog depth limit reached: " + current.path); }
+                continue;
+            }
+            childNames = listChildDirs(current.path, current.depth, maxDepth);
+            for (i = childNames.length - 1; i >= 0; i -= 1) { stack.push({ path: childNames[i], depth: current.depth + 1 }); }
+        }
+        // Discard obsolete cached manifests and directory index entries (deleted folders disappear).
+        for (var cacheKey in cache) { if (own(cache, cacheKey) && !own(seenCache, cacheKey)) { delete cache[cacheKey]; } }
+        for (var dirKey in dirIndex) { if (own(dirIndex, dirKey) && !own(seenDirs, dirKey)) { delete dirIndex[dirKey]; } }
+        persistToDisk(model.path(rootInfo.absoluteFilePath()), rootKey);
+        var result = model.buildCatalog(records); result.warnings = warnings.concat(result.warnings); result.revision = ++revision; result.directoriesRead = directories; result.reusedVersions = reusedVersions; result.reusedFromDisk = reusedFromDisk; result.envelopes = resultEnvelopes; result.catalogDb = { ok: lastPersist.ok, path: lastPersist.path, error: lastPersist.error, reusedFromDisk: reusedFromDisk };
+        if (lastPersist.error && typeof print === "function") { print("SaveGuard catalog DB: " + lastPersist.error); }
+        return result;
+    }
+    return {
+        scan: scan,
+        clearCache: function () { clearMemory(); },
+        invalidateDisk: function (root) { return invalidateDisk(root || ""); },
+        catalogDbInfo: function () { return { ok: lastPersist.ok, path: lastPersist.path, error: lastPersist.error, schema: dbSchema, folderName: dbFolderName, fileName: dbFileName }; }
+    };
+}

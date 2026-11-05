@@ -1,0 +1,34 @@
+// Small saved-version timing metadata. No scene mutation, DUF I/O or animation/property scans.
+var SaveGuardTimeline=(function(){
+    function number(v){return typeof v==="number"&&isFinite(v)?v:null;}
+    function closeFrame(v){if(v===null)return null;var rounded=Math.round(v);return Math.abs(v-rounded)<0.0001?rounded:v;}
+    function range(value){return Object.prototype.toString.call(value)==="[object Array]"&&value.length===2&&number(value[0])!==null&&number(value[1])!==null&&value[1]>=value[0]?[value[0],value[1]]:null;}
+    function normalize(raw){
+        if(!raw||raw.schema!==1||(raw.units!=="ticks"&&raw.units!=="seconds"))return null;
+        var fps=number(raw.fps),step=number(raw.ticksPerFrame),scale=null;if(raw.units==="ticks"){if(step!==null&&step>0){fps=4800/step;scale=1/step;}}else if(fps!==null&&fps>0)scale=fps;
+        if(fps===null||fps<=0||scale===null)return null;
+        var at=number(raw.currentTime),animation=range(raw.animationRange),play=range(raw.playRange),start=animation?closeFrame(animation[0]*scale):null,end=animation?closeFrame(animation[1]*scale):null,count=start===null?null:Math.max(0,Math.floor(end)-Math.ceil(start)+1);
+        if(count!==null&&count>9007199254740991)count=null;
+        return {currentFrame:at===null?null:closeFrame(at*scale),fps:fps,frameCount:count,animationStartFrame:start,animationEndFrame:end,playStartFrame:play?closeFrame(play[0]*scale):null,playEndFrame:play?closeFrame(play[1]*scale):null,source:raw.source||"saved metadata"};
+    }
+    function snapshot(scene){
+        function get(name){try{var v=scene[name]();return v===null||v===undefined?null:number(Number(typeof v.valueOf==="function"?v.valueOf():v));}catch(e){return null;}}
+        function getRange(name){try{var r=scene[name]();return range([Number(r.start),Number(r.end)]);}catch(e){return null;}}
+        return {schema:1,units:"ticks",source:"save-success snapshot",currentTime:get("getTime"),ticksPerFrame:get("getTimeStep"),animationRange:getRange("getAnimRange"),playRange:getRange("getPlayRange")};
+    }
+    function fromDUF(scene){
+        var extra=scene&&scene.extra;if(Object.prototype.toString.call(extra)!=="[object Array]")return null;var found=null;
+        for(var i=0;i<extra.length;i++){var e=extra[i];if(!e||e.type!=="studio_scene_settings")continue;if(found)return null;found=e;}
+        var a=found&&found.animation_settings;if(!a||typeof a!=="object")return null;
+        return {schema:1,units:"seconds",source:"saved DUF",currentTime:number(a.current_time),fps:number(a.current_frames_per_second),animationRange:range(a.animation_range),playRange:range(a.play_range)};
+    }
+    function information(version,inspection){
+        var captured=normalize(version&&version.timelineInfo),fallback=inspection&&inspection.versionId===String(version.id)?normalize(inspection.timeline):null,t=captured||fallback||{},legacy=number(version&&version.savedFrame);
+        function pick(k){return t[k]!==undefined&&t[k]!==null?t[k]:fallback&&fallback[k]!==null?fallback[k]:null;}
+        function display(v){return typeof v==="number"&&isFinite(v)?String(Math.round(v*1000000)/1000000):"Not recorded";}
+        var current=pick("currentFrame");if(current===null)current=legacy;
+        var count=pick("frameCount"),start=pick("animationStartFrame"),end=pick("animationEndFrame");
+        return [{label:"Current frame",value:display(current)},{label:"Animation Range",value:start===null||end===null?"Not recorded":display(start)+" - "+display(end)},{label:"FPS",value:display(pick("fps"))}];
+    }
+    return {snapshot:snapshot,fromDUF:fromDUF,normalize:normalize,information:information};
+}());

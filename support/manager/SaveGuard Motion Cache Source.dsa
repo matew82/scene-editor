@@ -1,0 +1,31 @@
+// Source-only projection. No target properties, defaults, aliases or execution plans are retained.
+var SaveGuardMotionCacheSource=(function(){
+ function own(o,k){return !!o&&Object.prototype.hasOwnProperty.call(o,k);}
+ function need(v,m){if(!v)throw Error("Motion cache source: "+m);}
+ function copy(v){return JSON.parse(JSON.stringify(v));}
+ function project(doc,id){
+  var cat=SaveGuardSelective.catalog(doc,{fullData:true});need(!cat.errors.length,"Ambiguous source catalog");
+  var nodes=doc.scene.nodes||[],by={},keep={},owners={},records={},urls={},i,j,n,selected=null,parent=null;
+  function local(ref){var r=SaveGuardSelective.parseURI(ref);need(r.kind==="local"&&!r.nodePath&&!r.query,"Unsupported local ownership");return r.fragment;}
+  for(i=0;i<nodes.length;i++){n=nodes[i];need(!own(by,"$"+n.id),"Duplicate node identity");by["$"+n.id]=n;if(n.id===id)selected=n;}need(selected,"Missing selected figure");
+  for(i=0;i<cat.rows.length;i++){var row=cat.rows[i];if(row.id===id||row.type==="bone"&&row.figureId===id)keep["$"+row.id]=true;}
+  // Preserve descendant records even when a definition is external and catalog type is unresolved.
+  for(i=0;i<nodes.length;i++){var cursor=nodes[i],seen={};while(cursor){need(!seen["$"+cursor.id],"Source hierarchy cycle");seen["$"+cursor.id]=true;if(cursor.id===id){keep["$"+nodes[i].id]=true;break;}cursor=cursor.parent?by["$"+local(cursor.parent)]:null;}}
+  // Ancestors preserve source transforms and the direct-parent shape-alias context.
+  for(var k in keep)if(own(keep,k)){n=by[k];var visited={};while(n&&n.parent){var pid=local(n.parent);need(!visited["$"+pid],"Parent cycle");visited["$"+pid]=true;need(by["$"+pid],"Missing source ancestor");keep["$"+pid]=true;n=by["$"+pid];}}
+  if(selected.parent)parent=by["$"+local(selected.parent)];
+  function owner(n){if(!n)return;owners["$"+n.id]=true;for(var a=0;a<(n.geometries||[]).length;a++)owners["$"+n.geometries[a].id]=true;}
+  owner(selected);owner(parent);
+  var out={file_version:doc.file_version,asset_info:copy(doc.asset_info||{}),scene:{nodes:[],modifiers:[],animations:[],extra:[]}};
+  function retain(record){records["$"+record.id]=true;if(record.url){var r=SaveGuardSelective.parseURI(record.url);if(r.kind==="external")urls["$"+SaveGuardShapePlan.uri(record.url)]=true;}}
+  for(i=0;i<nodes.length;i++)if(keep["$"+nodes[i].id]){n=copy(nodes[i]);if(n.extra)n.extra=n.extra.filter(function(e){return e.type==="studio_node_channels";});out.scene.nodes.push(n);retain(n);}
+  var mods=doc.scene.modifiers||[];for(i=0;i<mods.length;i++){n=mods[i];if(n.parent&&owners["$"+local(n.parent)]){out.scene.modifiers.push(copy(n));retain(n);}}
+  var tracks=doc.scene.animations||[];for(i=0;i<tracks.length;i++){var ref=SaveGuardSelective.parseURI(tracks[i].url),canonical=null;if(ref.kind==="external")try{canonical=SaveGuardShapePlan.uri(ref.file+"#"+encodeURIComponent(ref.fragment));}catch(ignoreTrackIdentity){}if(ref.kind==="local"&&records["$"+ref.fragment]||ref.kind==="external"&&urls["$"+canonical])out.scene.animations.push(copy(tracks[i]));}
+  for(i=0;i<(doc.scene.extra||[]).length;i++)if(doc.scene.extra[i].animation_settings)out.scene.extra.push(copy(doc.scene.extra[i]));
+  function definitions(section,seeds){var library=doc[section]||[],index={},wanted={},queue=[],cursor=0;for(var q=0;q<library.length;q++){var item=library[q];need(!index["$"+item.id],"Duplicate local definition");index["$"+item.id]=item;}function add(ref){if(typeof ref!=="string"||ref.charAt(0)!=="#")return;var name=local(ref);if(!wanted["$"+name]){wanted["$"+name]=true;queue.push(name);}}for(q=0;q<seeds.length;q++)add(seeds[q].url);while(cursor<queue.length){var record=index["$"+queue[cursor++]];need(record,"Missing local definition");add(record.url);if(section==="node_library")add(record.parent);}var kept=[];for(q=0;q<library.length;q++)if(wanted["$"+library[q].id])kept.push(copy(library[q]));if(kept.length)out[section]=kept;}
+  definitions("node_library",out.scene.nodes);definitions("modifier_library",out.scene.modifiers);
+  // Shape/Pose use geometry owner IDs and morph vertex counts, not geometry/material/image libraries.
+  return out;
+ }
+ return {project:project};
+}());

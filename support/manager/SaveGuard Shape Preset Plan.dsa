@@ -1,0 +1,56 @@
+// Prototype only. Pure DUF extraction; no Scene access, native loading or property writes.
+// Depends only on SaveGuardShapePlan.compile for existing read-only source validation.
+var SaveGuardShapePresetPlan = (function () {
+ function need(v, m) { if (!v) throw Error('Shape preset: ' + m); }
+ function own(o, k) { return !!o && Object.prototype.hasOwnProperty.call(o, k); }
+ function name(v) { need(typeof v === 'string' && v.length > 0 && !/[\x00-\x1f\x7f]/.test(v), 'Invalid internal channel name'); return v; }
+ function address(n) { return 'name://@selection#' + encodeURIComponent(name(n)) + ':?value/value'; }
+ function extract(doc, id, resolve, cancelled) {
+  var source = SaveGuardShapePlan.compile(doc, id, resolve, cancelled), instances = {}, rows = [], names = {}, i, r, m, n;
+  for (i = 0; i < doc.scene.modifiers.length; i++) { m=doc.scene.modifiers[i]; if(!instances['$'+m.id])instances['$'+m.id]=[]; instances['$'+m.id].push(m); }
+  for (i = 0; i < source.rows.length; i++) {
+   if (cancelled && cancelled() === true) throw Error('Shape preset cancelled');
+   r = source.rows[i]; need(instances['$'+r.id].length===1,'Ambiguous source instance: '+r.id); m = instances['$' + r.id][0];
+   n = name(own(m, 'name') ? m.name : own(r.definition, 'name') ? r.definition.name : r.definition.id);
+   need(!own(names, '$' + n), 'Ambiguous saved internal name: ' + n); names['$' + n] = true;
+   rows.push({sourceInstanceId:r.id, sourceURI:r.uri, name:n, value:r.value, defaultValue:r.defaultValue, localMorph:r.localMorph || null, reset:false});
+  }
+  return {sourceId:id, sourceURI:source.sourceUri, geometryURI:source.geometryUri, rows:rows, definitionFiles:source.definitionFiles.slice(0), mode:'saved-only', nativeVerified:false};
+ }
+ // Complete verified target inventory is required for replacement; absence never silently means zero.
+ function withResets(plan, inventory) {
+  need(inventory && inventory.complete === true && inventory.sourceURI === plan.sourceURI && inventory.geometryURI === plan.geometryURI, 'Complete compatible reset inventory required');
+  var rows=plan.rows.slice(0), saved={}, seen={}, i, d;
+  for(i=0;i<rows.length;i++) saved['$'+rows[i].name]=true;
+  for(i=0;i<inventory.rows.length;i++) {
+   d=inventory.rows[i]; name(d.name); need(!own(seen,'$'+d.name),'Duplicate destination name'); seen['$'+d.name]=true;
+   if(saved['$'+d.name]) continue;
+   need(d.classificationVerified === true, 'Unverified destination classification');
+   if(d.type !== 'Modifier/Shape') continue;
+   need(d.defaultVerified === true && typeof d.definitionDefault === 'number' && isFinite(d.definitionDefault),'Unverified destination default');
+   rows.push({sourceInstanceId:null,sourceURI:d.uri,name:d.name,value:d.definitionDefault,defaultValue:d.definitionDefault,localMorph:d.localMorph || null,reset:true});
+  }
+  for(i=0;i<plan.rows.length;i++) need(seen['$'+plan.rows[i].name], 'Missing destination input: '+plan.rows[i].name);
+  return {sourceId:plan.sourceId,sourceURI:plan.sourceURI,geometryURI:plan.geometryURI,rows:rows,definitionFiles:plan.definitionFiles.slice(0),mode:'replace-known-shapes',nativeVerified:false};
+ }
+ function document(plan, assetId) {
+  need(typeof assetId === 'string' && /^\/SaveGuard\/[a-zA-Z0-9_-]+\.duf$/.test(assetId),'Unique owned preset asset ID required');
+  var animations=[],seen={},i,r;
+  for(i=0;i<plan.rows.length;i++) { r=plan.rows[i]; need(typeof r.value==='number'&&isFinite(r.value),'Invalid shaping value'); var target=r.exactURI?'id://@selection:'+encodeURI(SaveGuardShapePlan.uri(r.exactURI))+'?value':address(r.name);need(!own(seen,'$'+target),'Duplicate preset address');seen['$'+target]=true;animations.push({url:target,keys:[[0,r.value]]}); }
+  need(animations.length>0,'No shaping inputs');
+  return {file_version:'0.6.0.0',asset_info:{id:assetId,type:'preset_shape'},scene:{animations:animations}};
+ }
+ // Names follow DAZ preset addressing, not a claim that different source/target assets are equivalent.
+ // This read-only check detects ambiguous resolution; native loading semantics need acceptance tests.
+ function bind(plan, target) {
+  need(target && target.sourceURI===plan.sourceURI && target.geometryURI===plan.geometryURI,'Target base/geometry differs');
+  var map={},i,d,r,list,bindings=[];
+  for(i=0;i<target.inputs.length;i++) { d=target.inputs[i]; if(!map['$'+d.name])map['$'+d.name]=[];map['$'+d.name].push(d); }
+  for(i=0;i<plan.rows.length;i++) {r=plan.rows[i];list=map['$'+r.name]||[];need(list.length===1,'Missing or ambiguous native name: '+r.name);d=list[0];need(d["float"]===true&&d.alias===false&&d.owned===true,'Unsupported native channel: '+r.name);
+   if(r.localMorph)need(d.localPayloadVerified===true&&JSON.stringify(d.localMorph)===JSON.stringify(r.localMorph),'Local morph payload missing or different: '+r.name);
+   bindings.push({name:r.name,sourceURI:r.sourceURI,targetURI:d.uri,value:r.value,reset:r.reset,representation:d.representation,uriDiffers:r.sourceURI!==d.uri});
+  }
+  return bindings;
+ }
+ return {extract:extract,withResets:withResets,document:document,bind:bind,address:address,nativeVerified:false};
+}());

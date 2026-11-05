@@ -1,0 +1,215 @@
+var SaveGuardActionController = (function () {
+    function own(o, k) { return !!o && Object.prototype.hasOwnProperty.call(o, k); }
+    function array(v) { return Object.prototype.toString.call(v) === "[object Array]"; }
+    function copy(v) { return JSON.parse(JSON.stringify(v)); }
+    function callable(o, k) { return !!o && typeof o[k] === "function"; }
+    function fail(code, message) { var e = new Error(message); e.code = code; throw e; }
+    function yes(value, code, message) { if (value !== true) { fail(code, message); } }
+    function pathKey(value) { var p = String(value || "").replace(/\\/g, "/"); return /^(?:[A-Za-z]:\/|\/\/)/.test(p) ? p.toLowerCase() : p; }
+    var kinds = { loadCamera: "merge", loadLight: "merge", loadLightAssembly: "merge", loadCharacter: "merge", loadWearable: "merge", loadObject: "merge",
+        applyPose: "pose", applyShape: "shape", applyTransforms:"pose",restoreSavedPose:"pose",restoreSavedShape:"shape", applyMaterials: "materials", applyRenderSettings: "render" };
+    var tabActions = { cameras: ["loadCamera"], lights: ["loadLight","loadObject","loadLightAssembly"], characters: ["loadCharacter", "loadWearable", "applyPose", "applyShape", "applyTransforms", "restoreSavedPose", "restoreSavedShape", "applyMaterials"],
+        objects: ["loadObject","loadWearable","applyPose","applyShape","applyTransforms","restoreSavedPose","restoreSavedShape","applyMaterials"], render: ["applyRenderSettings"] };
+    function minimalPreviewCopy(nodes,dependencies) {
+        var outNodes=[],outDependencies=[],i,n,d;
+        function known(row,keys){for(var k in row)if(own(row,k)&&keys.indexOf(k)<0)return false;return true;}
+        for(i=0;i<nodes.length;i++)if(!known(nodes[i],["id","label","internalName","selected","reasons"]))return {nodes:copy(nodes),dependencies:copy(dependencies)};
+        for(i=0;i<dependencies.length;i++)if(!known(dependencies[i],["file","uris","referencedBy"]))return {nodes:copy(nodes),dependencies:copy(dependencies)};
+        for(i=0;i<nodes.length;i++){n=nodes[i];outNodes.push({id:n.id,label:n.label,internalName:n.internalName,selected:n.selected,reasons:n.reasons.slice(0)});}
+        for(i=0;i<dependencies.length;i++){d=dependencies[i];outDependencies.push({file:d.file,uris:d.uris.slice(0),referencedBy:d.referencedBy.slice(0)});}
+        return {nodes:outNodes,dependencies:outDependencies};
+    }
+    function create(ports) {
+        ports = ports || {};
+        var domain = ports.selective || (typeof SaveGuardSelective !== "undefined" ? SaveGuardSelective : null),
+            placement = ports.placement || (typeof SaveGuardDSONPlacement !== "undefined" ? SaveGuardDSONPlacement : null),
+            entries = [], closed = false, busy = false;
+        var timingCount=0;
+        function timed(name,fn){var started=new Date().getTime();try{return fn();}finally{if(timingCount++<80&&typeof print==="function"){try{print("SaveGuard internal phase: "+JSON.stringify({owner:"controller",phase:name,milliseconds:new Date().getTime()-started}));}catch(ignoredTiming){}}}}
+        function cancelCheck() { if (closed || callable(ports, "isCancelled") && ports.isCancelled() === true) { fail("CANCELLED", "Action cancelled before scene mutation."); } }
+        function requirePorts(action) {
+            var names = ["getContext", "getVersion", "validateVersion", "isCurrentSelection", "capability", "createResolver"], i;
+            for (i = 0; i < names.length; i += 1) { if (!callable(ports, names[i])) { fail("ACTION_PORT", "Missing action port: " + names[i]); } }
+            if (!callable(ports, "createApplyHost") && (!ports.applyHost || !callable(ports.applyHost, "prepare") || !callable(ports.applyHost, "apply"))) { fail("ACTION_PORT", "Staged apply host is unavailable."); }
+            if (kinds[action] === "merge") {
+                if (!domain || !callable(domain, "plan") || !callable(domain, "extract") || !placement || !callable(placement, "compute") ||
+                        !callable(ports, "namespace") || !callable(ports, "existingIds")) { fail("ACTION_PORT", "Verified merge planning, placement, namespace and ID ports are required."); }
+            } else if (kinds[action] === "pose") {
+                if (!domain || !callable(domain, "posePlan") || !callable(ports, "inspectTarget") && !callable(ports, "createApplyHost")) { fail("ACTION_PORT", "Pose planning and explicit target inspection are required."); }
+            } else if ((kinds[action] === "materials" || kinds[action] === "render" || kinds[action] === "shape") && callable(ports,"createApplyHost")) {
+                // The code-owned material host supplies the finite builder.
+            } else if (!ports.builders || typeof ports.builders[kinds[action]] !== "function") { fail("ACTION_GATED", "This action has no reviewed builder."); }
+        }
+        function capability(action) {
+            if (!own(kinds, action)) { fail("ACTION", "Unknown action."); }
+            requirePorts(action);
+            var c = ports.capability(action, kinds[action]);
+            if (!c || c.enabled !== true || (c.nativeVerified !== true && c.portabilityMode !== 'api-checked') || !c.buildId || !c.evidenceId) { fail("NATIVE_UNVERIFIED", c && c.reason || "No verified native profile enables this action."); }
+            return { buildId: String(c.buildId), evidenceId: String(c.evidenceId), kind: kinds[action] };
+        }
+        function selection(request) { yes(ports.isCurrentSelection(copy(request)), "SELECTION_CHANGED", "The selected saved row or inspection changed after preparation."); }
+        function resolve(request) {
+            cancelCheck();
+            if (!request || !own(kinds, request.actionKey) || !request.versionId || typeof request.inspectionToken !== "number" ||
+                    !isFinite(request.inspectionToken) || request.inspectionToken < 1 || !request.rowKey || !request.rowId || !request.sourceId || !request.manifestPath) { fail("REQUEST", "Incomplete action identity."); }
+            if (request.kind !== undefined && request.kind !== kinds[request.actionKey]) { fail("ROW_FORGERY", "Action kind does not match the requested operation."); }
+            var allowed = tabActions[request.tabKey];
+            if (!allowed || allowed.indexOf(request.actionKey) < 0) { fail("ROW_FORGERY", "Action does not belong to the selected tab."); }
+            var profile = capability(request.actionKey); selection(request);
+            var version = ports.getVersion(request.versionId);
+            if (!version || version.id !== request.versionId || pathKey(version.manifestPath) !== pathKey(request.manifestPath)) { fail("VERSION_CHANGED", "The selected manifest is no longer current."); }
+            var checked = ports.validateVersion(version);
+            if (checked !== true && (!checked || pathKey(checked.path) !== pathKey(version.scenePath))) { fail("VERSION_CHANGED", "Saved-copy validation did not verify the selected source."); }
+            var context = ports.getContext(request.versionId, request.inspectionToken, copy(request)), view = context && context.view;
+            if (!context || context.versionId !== request.versionId || context.inspectionToken !== request.inspectionToken ||
+                    pathKey(context.scenePath) !== pathKey(version.scenePath) || !view || view.versionId !== request.versionId || view.inspectionToken !== request.inspectionToken ||
+                    view.selectiveAvailable !== true || !context.catalog || context.catalog.errors && context.catalog.errors.length) { fail("STALE_INSPECTION", "A current unambiguous inspection is required."); }
+            var rows = view.tabs && view.tabs[request.tabKey], row = null, i;
+            for (i = 0; rows && i < rows.length; i += 1) { if (rows[i].rowKey === request.rowKey) { if (row) { fail("ROW_FORGERY", "Ambiguous presentation row."); } row = rows[i]; } }
+            var mapping = view.mapping && view.mapping.rowByKey && view.mapping.rowByKey["$" + request.rowKey];
+            if (!row || row.selectable !== true || row.id !== request.rowId || row.sourceId !== request.sourceId || !array(row.actionKeys) ||
+                    row.actionKeys.indexOf(request.actionKey) < 0 || !mapping || request.rowType !== undefined && request.rowType !== row.type) { fail("ROW_FORGERY", "The requested row does not match the retained presentation."); }
+            if (mapping.kind === "node") {
+                if (!mapping.catalogRow || context.catalog.rows[mapping.catalogRowIndex] !== mapping.catalogRow || mapping.savedId !== row.id ||
+                        mapping.catalogRow.id !== row.sourceId || mapping.catalogRow.type !== row.type) { fail("ROW_FORGERY", "Saved node identity is inconsistent."); }
+            } else if (mapping.kind === "render-setting") {
+                if (kinds[request.actionKey] !== "render" || mapping.locator !== row.sourceId || row.rowKey !== row.id ||
+                        mapping.sceneExtraIndex !== row.sceneExtraIndex || mapping.catalogRenderIndex !== row.catalogRenderIndex) { fail("ROW_FORGERY", "Saved render locator is inconsistent."); }
+            } else { fail("ROW_FORGERY", "Unsupported saved row kind."); }
+            if (kinds[request.actionKey] !== "render" && mapping.kind !== "node") { fail("ROW_FORGERY", "This operation requires a saved node."); }
+            if (!context.provider || !callable(context.provider, "verifySource") || !callable(context.provider, "readRecords")) { fail("PROVIDER", "Retained full-payload source provider is unavailable."); }
+            yes(context.provider.verifySource(), "SOURCE_CHANGED", "The retained saved DUF changed."); cancelCheck(); selection(request);
+            return { version: version, context: context, row: row, mapping: mapping, profile: profile };
+        }
+        function release(entry) {
+            if(!entry)return null;if(entry.released)return entry.cleanupError||null;entry.released=true;var errors=[];
+            function attempt(label,fn){try{if(fn()===false)errors.push(label+" returned false");}catch(e){errors.push(label+": "+String(e.message||e));}}
+            if(entry.hostReceipt&&callable(entry.host,"release"))attempt("Host release",function(){return entry.host.release(entry.hostReceipt);});
+            if(entry.ownsHost&&callable(entry.host,"close"))attempt("Host close",function(){return entry.host.close();});
+            if(entry.resolver&&callable(entry.resolver,"close"))attempt("Resolver close",function(){return entry.resolver.close();});
+            entry.cleanupError=errors.length?errors.join("; "):null;return entry.cleanupError;
+        }
+        function withCleanup(result,error){if(error)result.cleanupError=(result.cleanupError?result.cleanupError+"; ":"")+error;return result;}
+        function invalidate(){var errors=[];for(var i=0;i<entries.length;i++){entries[i].used=true;var error=release(entries[i]);if(error)errors.push(error);}entries=[];if(errors.length)fail("CLEANUP",errors.join("; "));}
+        function forget(entry) { for (var i = entries.length - 1; i >= 0; i -= 1) { if (entries[i] === entry) { entries.splice(i, 1); } } }
+        function same(entry, current) {
+            if (current.context !== entry.context || current.context.provider !== entry.provider || JSON.stringify(current.profile) !== JSON.stringify(entry.profile)) {
+                fail("STALE_RECEIPT", "The inspection or native profile changed after preparation.");
+            }
+            return true;
+        }
+        function verify(entry) {
+            same(entry, resolve(entry.request));
+            yes(entry.resolver.verifyAll(), "ASSET_CHANGED", "A saved dependency changed.");
+            return true;
+        }
+        function audit(entry, phase) {
+            if (callable(entry.host, "nativeAudit")) { yes(entry.host.nativeAudit(entry.audit, phase), "NATIVE_AUDIT", "Native audit rejected the operation."); }
+            else if (callable(ports, "nativeAudit")) { yes(ports.nativeAudit(entry.audit, phase), "NATIVE_AUDIT", "Native audit rejected the operation."); }
+        }
+        function preview(entry, result) {
+            var p = result.plan, nodes = p.includedNodes || [], warnings = (p.warnings || []).slice(0);
+            if(entry.host.motionActions)return {includedNodes:[{id:entry.request.sourceId,label:entry.row.label}],dependencies:[],warnings:p.warnings||[],summary:entry.request.actionKey+(p.restore?" replaces scoped tracks at original times, including root transforms for Pose.":" samples source frame "+p.sourceFrame+" onto the current target frame; other keys retained."),changes:p.metrics};
+            if (entry.kind === "pose") { nodes = [{ id: entry.request.sourceId, label: entry.row.label, reasons: ["saved pose source; target root transforms preserved"] }]; warnings.push("The selected target figure's root transforms are preserved. Static rotations only at frame 0; existing single frame-zero rotation keys may be replaced."); }
+            if(entry.kind === "shape")return {includedNodes:[{id:entry.request.sourceId,label:entry.row.label,reasons:["saved shaping source"]}],dependencies:copy(p.definitionFiles||[]),warnings:warnings,summary:"Restore static shaping inputs. Authored pose, transforms and materials remain; native driven rig adjustments are allowed.",changes:{assignmentCount:p.assignments.length,skippedDriven:p.skippedDriven}};
+            if(entry.kind === "materials"){return {includedNodes:[{id:entry.request.sourceId,label:entry.row.label,reasons:["saved body material source"]}],dependencies:copy(p.definitionFiles||[]),warnings:warnings,summary:"Restore matching material surfaces on the selected object. Pose, shaping, placement and other objects are retained.",changes:{surfaceCount:p.expected.length,preservePoseShapingTransforms:true}};}
+            var placementPreview = null;
+            if (result.placement) {
+                var mappedId = result.built.idMap && result.built.idMap["$" + entry.request.sourceId], selectedPlacement = result.placement.byId && result.placement.byId["$" + mappedId];
+                placementPreview = { rule: result.placement.rule, nodeCount: result.placement.nodes.length,
+                    selected: selectedPlacement ? [{ id: selectedPlacement.id, parentId: selectedPlacement.parentId, world: selectedPlacement.world ? selectedPlacement.world.slice(0) : null }] : [] };
+            }
+            var deps=result.built ? result.built.dependencies || [] : p.definitionFiles || [], fast=entry.host.minimalNative===true?minimalPreviewCopy(nodes,deps):null;
+            return { includedNodes: fast?fast.nodes:copy(nodes), dependencies: fast?fast.dependencies:copy(deps),
+                warnings: warnings, summary: entry.kind === "pose" ? "Apply saved bone transforms to the explicitly selected compatible figure." : "Load saved objects with their required ancestors and dependencies.",
+                changes: entry.kind === "pose" ? { assignmentCount: p.assignments.length, preserveRootTransforms: true } : { savedPlacement: placementPreview } };
+        }
+        function diagnostics(entry,phase){if(entry&&entry.host&&entry.host.motionActions&&entry.context.deepValidation!==true){if(typeof print==="function")print("SaveGuard motion dependency totals: "+JSON.stringify({phase:phase,stats:typeof entry.resolver.stats==="function"?entry.resolver.stats():null}));return;}try{if(entry&&typeof print==="function")print("SaveGuard integrity totals: "+JSON.stringify({phase:phase,source:typeof entry.provider.verificationStats==="function"?entry.provider.verificationStats():null,dependencies:typeof entry.resolver.verificationStats==="function"?entry.resolver.verificationStats():null}));}catch(ignoredDiagnostics){}}
+        function safeDiagnostics(entry,phase){try{diagnostics(entry,phase);}catch(ignoredDiagnostics){}}
+        function prepareAction(raw) {
+            var entry = null, ownsBusy = false;
+            try {
+                if (busy) { fail("BUSY", "An action is already active."); } cancelCheck(); busy = true; ownsBusy = true;
+                invalidate();
+                timingCount=0;var request = copy(raw), resolved = timed("prepare.resolve",function(){return resolve(request);}), context = resolved.context;
+                entry = { request: request, context: context, provider: context.provider, profile: resolved.profile, row: resolved.row, kind: kinds[request.actionKey], used: false, released: false };
+                var originalPath = resolved.version.manifest && resolved.version.manifest.source;
+                if (typeof context.lowMemoryMode !== "boolean" || typeof originalPath !== "string" || !/^(?:[A-Za-z]:[\\/]|[\\/]{2}|\/)/.test(originalPath)) { fail("RESOLVER", "Retained parser mode and original source path are required."); }
+                var resolver = (callable(context,"takeResolver")?context.takeResolver():null)||ports.createResolver({ readerOptions:{}, sourceDocumentPath: originalPath, lowMemoryMode: context.lowMemoryMode, deepValidation: context.deepValidation === true, planningDocument: context.planningDocument, nativeSelected: context.nativeSelected === true,
+                    isCancelled: function () { return closed || callable(ports, "isCancelled") && ports.isCancelled() === true; } });
+                entry.resolver = resolver;
+                if (!resolver || !callable(resolver, "resolveExternal") || !callable(resolver, "resolveAssetDocument") || !callable(resolver, "verifyAll") || !callable(resolver, "close")) { fail("RESOLVER", "A verified read-only dependency resolver is required."); }
+                entry.ownsHost = callable(ports, "createApplyHost");
+                entry.host = entry.ownsHost ? ports.createApplyHost({ context: context, version: resolved.version, resolver: resolver, row: resolved.row, mapping: resolved.mapping, request: copy(request), isCancelled: function(){return closed || callable(ports,"isCancelled") && ports.isCancelled() === true;} }) : ports.applyHost;
+                if (!entry.host || !callable(entry.host, "prepare") || !callable(entry.host, "apply")) { fail("ACTION_PORT", "Action factory did not return a staged apply host."); }
+                function external(file, dep) { cancelCheck(); return resolver.resolveExternal(file, dep); }
+                function asset(file) { cancelCheck(); return resolver.resolveAssetDocument(file); }
+                var doc = context.planningDocument, result, p, built, target = null, savedPlacement = null;
+                if (entry.kind === "merge" && callable(entry.host,"buildMerge")) {
+                    var mergeIds=entry.host.minimalNative===true?[]:ports.existingIds(context.deepValidation===true);if(!array(mergeIds))fail("EXISTING_IDS","Explicit native IDs required");
+                    result=entry.host.buildMerge(doc,request.sourceId,{namespace:ports.namespace(copy(request)),existingIds:mergeIds.slice(0),resolveExternal:external,readRecords:function(requests){cancelCheck();return context.provider.readRecords(requests);}});
+                    if(!result||!result.plan||result.plan.ready!==true||!result.built)fail("PLAN","Wearable plan is incomplete");result.placement=entry.host.computePlacement(result.built);
+                } else if (entry.kind === "pose" && callable(entry.host,"buildStaticPose")) {
+                    result=entry.host.buildStaticPose(doc,request.sourceId,asset,function(){cancelCheck();return false;});if(!result||!result.plan||result.plan.ready!==true)fail("POSE_PLAN","Static pose plan is incomplete");
+                } else if (entry.kind === "shape" && callable(entry.host,"buildShape")) {
+                    result=entry.host.buildShape(doc,request.sourceId,asset,function(){cancelCheck();return false;});if(!result||!result.plan||result.plan.ready!==true)fail("SHAPE_PLAN","Shape plan is incomplete");
+                } else if (entry.kind === "materials" && callable(entry.host,"buildMaterials")) {
+                    result=entry.host.buildMaterials(doc,request.sourceId);if(!result||!result.plan||result.plan.ready!==true)fail("MATERIAL_PLAN","Material plan is incomplete");
+                } else if (entry.kind === "render" && callable(entry.host,"buildRender")) { result=entry.host.buildRender(doc,request.sourceId);if(!result||!result.plan||result.plan.ready!==true)fail("RENDER_PLAN","Render plan incomplete");
+                } else if (entry.kind === "merge") {
+                    p = timed("prepare.plan",function(){return domain.plan(doc, [request.sourceId], { fullData: true, preserveAnimation:context.preserveAnimation===true, resolveAssetDocument: asset });});
+                    if (!p || p.ready !== true || p.errors && p.errors.length) { fail("PLAN", "Saved dependencies cannot be safely planned. " + (p && p.errors ? p.errors.slice(0, 10).join("; ") : "")); }
+                    var occupied = ports.existingIds(context.deepValidation===true); if (!array(occupied)) { fail("EXISTING_IDS", "An explicit native ID snapshot is required."); }
+                    built = timed("prepare.extract",function(){return domain.extract(doc, p, { namespace: ports.namespace(copy(request)), existingIds: occupied.slice(0), resolveExternal: external,
+                        readRecords: function (requests) { cancelCheck(); return context.provider.readRecords(requests); } });});
+                    savedPlacement = timed("prepare.placement",function(){return entry.host.nativeFigureLoading===true?entry.host.computePlacement(built):placement.compute(built.document, { selective: domain, resolveAssetDocument: asset });});
+                    result = { plan: p, built: built, placement: savedPlacement };
+                } else if (entry.kind === "pose") {
+                    if (!callable(entry.host, "inspectTarget") && !callable(ports, "inspectTarget")) { fail("TARGET", "Explicit target inspection is unavailable."); }
+                    target = callable(entry.host, "inspectTarget") ? entry.host.inspectTarget("pose") : ports.inspectTarget("pose");
+                    if (!target || !target.ticket || !target.descriptor || target.descriptor.verified !== true) { fail("TARGET", "Select one verified compatible target figure."); }
+                    p = domain.posePlan(doc, request.sourceId, target.descriptor, { includeRootTransforms: false, resolveAssetDocument: asset });
+                    if (!p || p.ready !== true || p.errors && p.errors.length || p.rootTransformsIncluded !== false || !array(p.assignments)) { fail("POSE_PLAN", "Saved pose compatibility could not be verified. " + (p && p.errors ? p.errors.slice(0, 10).join("; ") : "")); }
+                    result = { plan: p, target: target };
+                } else {
+                    // No default materials/render builders. The explicit port owns scope/target checks.
+                    result = ports.builders[entry.kind]({ request: copy(request), context: context, mapping: resolved.mapping, resolver: resolver, isCancelled: ports.isCancelled });
+                    if (!result || !result.built || !result.built.summary || result.built.summary.ready !== true) { fail("PLAN", "The explicit preset builder did not return a ready plan."); }
+                    result.plan = result.built.summary; target = result.target || null;
+                    if (entry.kind === "materials" && (!target || !target.ticket || !target.descriptor || target.descriptor.verified !== true)) { fail("TARGET", "Materials require a verified explicit target."); }
+                }
+                entry.result = result;
+                entry.audit = { actionKey: request.actionKey, kind: entry.kind, request: copy(request), built: result.built || null, plan: result.plan,
+                    placement: result.placement || null, target: target, sourcePath: context.scenePath };
+                if(!entry.host.motionActions){timed("prepare.verify-before-host",function(){return verify(entry);}); timed("prepare.audit",function(){return audit(entry,"prepare");});} cancelCheck();
+                entry.hostReceipt = entry.host.prepare({ kind: entry.kind, source: { path: context.scenePath, verify: function () { return verify(entry); } },
+                    built: result.built, plan: result.plan, targetTicket: target ? target.ticket : null }, function () { return closed || callable(ports, "isCancelled") && ports.isCancelled() === true; });
+                if (!entry.hostReceipt) { fail("HOST_RECEIPT", "Apply host did not return a staged receipt."); }
+                timed("prepare.verify-after-host",function(){return verify(entry);}); cancelCheck();
+                entry.publicReceipt = { ok: true, preview: timed("prepare.preview",function(){return preview(entry, result);}) };
+                entries.push(entry); safeDiagnostics(entry,"prepare"); return entry.publicReceipt;
+            } catch (e) { var errorDetails=typeof SaveGuardLastErrorReport!=="undefined"?SaveGuardLastErrorReport.details(e):null; var prepareFailure=withCleanup({ errorDetails:errorDetails, ok:false, code:e.code||"PREPARE", error:String(e.message||e), cancelled:e.code==="CANCELLED", cleanupError:e.cleanupError||null },release(entry));if(ownsBusy)safeDiagnostics(entry,"prepare");return prepareFailure; }
+            finally { if(ownsBusy){busy=false;} }
+        }
+        function lookup(receipt) { for (var i = 0; i < entries.length; i += 1) { if (entries[i].publicReceipt === receipt) { return entries[i]; } } fail("RECEIPT", "Unknown or copied action receipt."); }
+        function runAction(receipt) {
+            var entry = null, ownsBusy = false, result=null;
+            try {
+                if (busy) { fail("BUSY", "An action is already active."); } busy = true; ownsBusy = true;
+                entry = lookup(receipt); if (entry.used || entry.released) { fail("USED", "This action receipt is no longer valid."); }
+                timingCount=0;entry.used = true; cancelCheck(); timed("apply.verify-before-audit",function(){return verify(entry);});
+                if(!entry.host.motionActions){timed("apply.audit",function(){return audit(entry,"apply");});
+                cancelCheck(); timed("apply.verify-after-audit",function(){return verify(entry);});}
+                result = entry.host.apply(entry.hostReceipt, function () { return closed || callable(ports, "isCancelled") && ports.isCancelled() === true; });
+                if (!result || typeof result.ok !== "boolean") { fail("HOST_RESULT", "Apply host did not return a verified result."); }
+                safeDiagnostics(entry,"apply");return result;
+            } catch(e){result={errorDetails:typeof SaveGuardLastErrorReport!=="undefined"?SaveGuardLastErrorReport.details(e):null,ok:false,code:e.code||"APPLY",error:String(e.message||e),cancelled:e.code==="CANCELLED",status:e.code==="CANCELLED"?"cancelled":"blocked",cleanupError:e.cleanupError||null};if(ownsBusy)safeDiagnostics(entry,"apply");return result;}
+            finally { if(ownsBusy){var cleanupError=release(entry);if(result)withCleanup(result,cleanupError);forget(entry);busy=false;} }
+        }
+        return { prepareAction: prepareAction, runAction: runAction,
+            cancelAction: function (receipt) { try { if (busy) { fail("BUSY", "An action is already active."); } var entry = lookup(receipt); entry.used = true; var cleanupError=release(entry); forget(entry); return withCleanup({ok:true,cancelled:true},cleanupError); } catch (e) { return { ok: false, code: e.code || "RECEIPT", error: String(e.message || e) }; } },
+            capabilities: function () { var out = {}, key; for (key in kinds) { if (own(kinds, key)) { out[key] = false; if (!closed) { try { capability(key); out[key] = true; } catch (blocked) { if (typeof print === "function") { print("SaveGuard capability probe: " + key + " " + String(blocked && blocked.code || "BLOCKED") + " " + String(blocked && blocked.message !== undefined ? blocked.message : blocked)); } } } } } return out; },
+            close: function () { closed = true; invalidate(); } };
+    }
+    return { create: create, minimalPreviewCopy:minimalPreviewCopy };
+}());

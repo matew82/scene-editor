@@ -1,0 +1,155 @@
+var SaveGuardNativeSource=(function(){ var hexCharacters={},hexIndex;for(hexIndex=0;hexIndex<256;hexIndex++){var hexKey=hexIndex.toString(16);if(hexKey.length<2)hexKey="0"+hexKey;hexCharacters[hexKey]=String.fromCharCode(hexIndex);}
+if(parseInt(String(App.versionString),10)===6){var hexPairs={},pairLeft,pairRight;for(pairLeft=0;pairLeft<256;pairLeft++){var leftHex=pairLeft.toString(16);if(leftHex.length<2)leftHex="0"+leftHex;for(pairRight=0;pairRight<256;pairRight++){var rightHex=pairRight.toString(16);if(rightHex.length<2)rightHex="0"+rightHex;hexPairs[leftHex+rightHex]=hexCharacters[leftHex]+hexCharacters[rightHex];}}
+}
+function poseInputDocument(source){
+ var out={},scene={},k,excluded={geometry_library:true,uv_set_library:true,image_library:true,material_library:true};
+ for(k in source)if(own(source,k)&&k!=="scene"&&!excluded[k])out[k]=source[k];
+ for(k in source.scene)if(own(source.scene,k)&&k!=="materials"&&k!=="uvs")scene[k]=source.scene[k];out.scene=scene;return out;
+}
+function own(o,k){return !!o&&Object.prototype.hasOwnProperty.call(o,k);}
+function array(o){return Object.prototype.toString.call(o)==="[object Array]";}
+function fail(code,message){var e=new Error(message);e.code=code;throw e;}
+    function normalizeNative(text, major, guard, b) {
+        if (typeof text !== "string" || text.length > b.maxBytes) { fail("LIMIT_BYTES", "Native text exceeds the expanded budget or has invalid type."); }
+        var bytes = text.length, expression, match, pieces = [], from = 0, i, cp, n, min, c, out, count = 0;
+        if (major === 4) {
+            expression = /[^\x00-\x7f]+/g;
+            while ((match = expression.exec(text)) !== null) {
+                guard(); pieces.push(text.substring(from, match.index)); out = [];
+                for (i = 0; i < match[0].length;) {
+                    if ((i & 1023) === 0) { guard(); } cp = match[0].charCodeAt(i++);
+                    if (cp >= 194 && cp <= 223) { cp &= 31; n = 1; min = 128; }
+                    else if (cp >= 224 && cp <= 239) { cp &= 15; n = 2; min = 2048; }
+                    else if (cp >= 240 && cp <= 244) { cp &= 7; n = 3; min = 65536; }
+                    else { fail("UTF8", "Invalid native UTF-8 leading byte."); }
+                    while (n-- > 0) { c = match[0].charCodeAt(i++); if (!(c >= 128 && c <= 191)) { fail("UTF8", "Invalid native UTF-8 continuation."); } cp = cp * 64 + (c & 63); }
+                    if (cp < min || cp > 1114111 || cp >= 55296 && cp <= 57343) { fail("UTF8", "Invalid native UTF-8 code point."); }
+                    if (cp < 65536) { out.push(String.fromCharCode(cp)); } else { cp -= 65536; out.push(String.fromCharCode(55296 + (cp >> 10), 56320 + (cp & 1023))); }
+                    if (out.length >= 4096) { pieces.push(out.join("")); out = []; }
+                }
+                pieces.push(out.join("")); from = expression.lastIndex;
+            }
+            if (from) { pieces.push(text.substring(from)); text = pieces.join(""); }
+        } else if (major === 6) {
+            expression = /[\u0080-\uffff]+/g;
+            while ((match = expression.exec(text)) !== null) {
+                guard(); for (i = 0; i < match[0].length; i += 1) {
+                    if ((i & 1023) === 0) { guard(); } cp = match[0].charCodeAt(i);
+                    if (cp >= 55296 && cp <= 56319) { c = match[0].charCodeAt(++i); if (!(c >= 56320 && c <= 57343)) { fail("UTF8", "Unpaired native Unicode surrogate."); } bytes += 2; }
+                    else if (cp >= 56320 && cp <= 57343) { fail("UTF8", "Unpaired native Unicode surrogate."); }
+                    else { bytes += cp < 2048 ? 1 : 2; }
+                }
+            }
+        } else { fail("API", "Unsupported native text encoding."); }
+        if (bytes > b.maxBytes) { fail("LIMIT_BYTES", "Expanded UTF-8 size exceeds the selected budget."); }
+        return { text: text, bytes: bytes };
+    }
+    function serialKeys(text,document,guard) {
+        // Native regexp skips numeric buffers. JSON.parse has already checked grammar.
+        var re=/"(?:\\[\s\S]|[^"\\])*"|[{}]/g, stack=[],m,count=0,duplicates=[],extraIndex=0;
+        while((m=re.exec(text))!==null){if((++count&255)===0)guard();
+            var token=m[0],top=stack[stack.length-1],role="other",index=-1;
+            if(token==="{"){
+                if(!top)role="root";
+                else if(top.role==="root"&&top.key==="scene")role="scene";
+                else if(top.role==="scene"&&top.key==="extra"){role="render-record";index=extraIndex++;}
+                else if(top.role==="render-record"&&top.key==="render_options"){role="render-options";index=top.index;}
+                stack.push({role:role,index:index,key:"",seen:{}});
+            }else if(token==="}"){if(!stack.length)fail("JSON","Unexpected object close");stack.pop();}
+            else if(top){var at=re.lastIndex;while(/[ \t\r\n]/.test(text.charAt(at))&&at<text.length)at++;if(text.charAt(at)!==":")continue;
+                var key=token.indexOf("\\")<0?token.slice(1,-1):JSON.parse(token),k="$"+key;
+                if(key==="__proto__")fail("UNSAFE_KEY","Unsupported prototype member");
+                if(own(top.seen,k)){
+                    var record=document.scene&&document.scene.extra&&document.scene.extra[top.index];
+                    if(top.role!=="render-options"||(key!=="startTime"&&key!=="endTime")||document.file_version!=="0.6.2.0"||!record||record.type!=="studio_render_settings"||top.seen[k]!==1)fail("DUPLICATE_KEY","Duplicate JSON member: "+key);
+                    var tail=text.slice(at+1,at+140),number=/^\s*(-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)(?=\s*[,}])/.exec(tail);
+                    if(!number||!isFinite(Number(number[1]))||!top.firstNumeric[k])fail("DUPLICATE_KEY","Render-time duplicate must contain two finite numbers");
+                    duplicates.push({path:["scene","extra",top.index,"render_options",key],applicationAllowed:false});
+                }
+                if(top.role==="render-options"&&(key==="startTime"||key==="endTime")&&!own(top.seen,k)){if(!top.firstNumeric)top.firstNumeric={};var raw=/^\s*(-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?)(?=\s*[,}])/.exec(text.slice(at+1,at+140));top.firstNumeric[k]=!!raw&&isFinite(Number(raw[1]));}
+                top.seen[k]=(top.seen[k]||0)+1;top.key=key;
+            }
+        }if(stack.length)fail("JSON","Unclosed object");return {objectStringTokens:count,duplicates:duplicates};
+    }
+    function crc32(raw,major,guard,onProgress){
+        var tables=[],t=[],n,j,c,i,k;
+        for(n=0;n<256;n++){c=n;for(j=0;j<8;j++)c=(c>>>1)^((c&1)?3988292384:0);t[n]=c>>>0;}tables.push(t);
+        for(k=1;k<8;k++){t=[];for(n=0;n<256;n++){c=tables[k-1][n];t[n]=(tables[0][c&255]^(c>>>8))>>>0;}tables.push(t);}
+        var crc=-1,total=0,position=0;
+        while(position<raw.length){guard();var end=Math.min(position+65536,raw.length);if(major===6&&end<raw.length&&raw.charCodeAt(end-1)>=55296&&raw.charCodeAt(end-1)<=56319)end--;
+            var chunk=raw.substring(position,end);position=end;
+            if(major===6)chunk=chunk.replace(/[^\x00-\x7f]+/g,function(s){return unescape(encodeURIComponent(s));});
+            for(i=0;i+8<=chunk.length;i+=8){var a=crc^chunk.charCodeAt(i)^(chunk.charCodeAt(i+1)<<8)^(chunk.charCodeAt(i+2)<<16)^(chunk.charCodeAt(i+3)<<24);
+                crc=tables[7][a&255]^tables[6][(a>>>8)&255]^tables[5][(a>>>16)&255]^tables[4][a>>>24]^tables[3][chunk.charCodeAt(i+4)]^tables[2][chunk.charCodeAt(i+5)]^tables[1][chunk.charCodeAt(i+6)]^tables[0][chunk.charCodeAt(i+7)];}
+            for(;i<chunk.length;i++)crc=(crc>>>8)^tables[0][(crc^chunk.charCodeAt(i))&255];total+=chunk.length;if(onProgress)onProgress(total);
+        }return {crc32:(crc^-1)>>>0,bytes:total};
+    }
+    function open(path,options){
+        options=options||{};var quietAsset=options.assetDocument===true&&options.deepValidation!==true,deep=options.deepValidation===true,phaseMillis=options.maxPhaseMillis===undefined?null:options.maxPhaseMillis;if(phaseMillis!==null&&(typeof phaseMillis!=='number'||!isFinite(phaseMillis)||phaseMillis<=0))fail('CONFIG','Invalid explicit selected-source phase budget');var clock=options.clock||function(){return new Date().getTime();},deadline=null,lastPulse=quietAsset&&parseInt(String(App.versionString),10)===4?clock():0,metrics=[],closed=false,invalid=false,doc=null,snapshot=null,before=null,serialization=null;
+        function guard(){if(closed)fail("CLOSED","Native source closed");if(invalid)fail("INVALIDATED","Selected source was invalidated; inspect again");if(options.isCancelled&&options.isCancelled()){invalid=true;fail("CANCELLED","Selected source operation cancelled");}if(deadline!==null&&clock()>deadline){invalid=true;fail("LIMIT_TIME","Selected source phase exceeded its explicit time budget");}}
+        function pulse(bytes){guard();var now=clock();if(now-lastPulse>=50){lastPulse=now;if(options.onProgress)options.onProgress(bytes||0);}guard();}
+        function stage(name,fn){guard();if(options.onPhase)options.onPhase(name);if(!quietAsset&&typeof print==="function")print("SaveGuard selected load: "+name);var t=clock(),prior=deadline;deadline=phaseMillis===null?null:t+phaseMillis;try{var out=fn();var elapsed=clock()-t;metrics.push({phase:name,milliseconds:elapsed});if(!quietAsset&&typeof print==="function")print("SaveGuard selected phase: "+JSON.stringify({phase:name,milliseconds:elapsed}));guard();return out;}finally{deadline=prior;}}
+        function stat(){var f=new DzFileInfo(path);if(!f.exists()||!f.isFile()||!f.isReadable())fail("FILE_ACCESS","Source unavailable");return {bytes:Number(f.size()),modified:String(f.lastModified()),path:String(path)};}
+        function bytes(compare){var f=new DzFile(path),out=[],at=0,i=0,readMillis=0,bridgeMillis=0,progressMillis=0,partStarted;try{if(!f.open(DzFile.ReadOnly))fail("OPEN","Cannot read source snapshot");while(at<before.bytes){guard();partStarted=clock();var a=f.read(Math.min(65536,before.bytes-at)),length=typeof a.length==="number"?a.length:a.size;readMillis+=clock()-partStarted;
+                    if(!(length>0&&length<=65536)||typeof a.toHex!=="function"||(typeof f.error==="function"&&f.error()!==DzFile.NoError))fail("READ","Exact native byte bridge unavailable");partStarted=clock();var hex=String(a.toHex().convertToString());bridgeMillis+=clock()-partStarted;if(hex.length!==length*2)fail("READ","Invalid native byte bridge");hex=hex.toLowerCase();if(compare){if(compare[i]!==hex)fail("FILE_CHANGED","Source bytes changed despite metadata");}else {if(!/^[0-9a-f]+$/.test(hex))fail("READ","Invalid native byte bridge");out.push(hex);}i++;at+=length;partStarted=clock();pulse(at);progressMillis+=clock()-partStarted;}
+                if(!f.eof()||compare&&i!==compare.length)fail("FILE_CHANGED","Source size changed");if(quietAsset)metrics.push({phase:"byte snapshot components",readMillis:readMillis,bridgeMillis:bridgeMillis,progressMillis:progressMillis,chunks:i});return out;
+            }finally{f.close();}}
+        function verify(){guard();var prior=deadline;deadline=phaseMillis===null?null:clock()+phaseMillis;try{var now=stat();if(now.bytes!==before.bytes||now.modified!==before.modified)fail("FILE_CHANGED","Source metadata changed");if(deep)bytes(snapshot);now=stat();if(now.bytes!==before.bytes||now.modified!==before.modified)fail("FILE_CHANGED","Source changed while verifying");return true;}catch(e){invalid=true;throw e;}finally{deadline=prior;}}
+        function close(){closed=true;doc=null;snapshot=null;}
+                function gzipStructure(){var pos=0,nibbles=[],ni;for(ni=0;ni<10;ni++)nibbles[48+ni]=ni;for(ni=0;ni<6;ni++)nibbles[97+ni]=ni+10;
+                    function next(){if(pos>=joined.length)return -1;var value=(nibbles[joined.charCodeAt(pos)]<<4)|nibbles[joined.charCodeAt(pos+1)];pos+=2;return value;}
+                    next.skip=function(n){pulse(pos/2);if(pos+n*2>joined.length)fail("GZIP_TRUNCATED","Stored block exceeds input");pos+=n*2;};return SaveGuardGzipStructure.validate(next,cap,function(){pulse(pos/2);},clock);}
+
+        try{
+            before=stat();if(!quietAsset&&typeof print==="function")print("SaveGuard source identity: "+JSON.stringify({path:String(path),bytes:before.bytes,build:String(App.longVersionString||App.versionString),assetDocument:options.assetDocument===true,deepValidation:deep}));// Byte counters must remain exact; this is not a DAZ allocation guarantee.
+            var cap=options.maxAssetBytes===undefined?9007199254740991:options.maxAssetBytes;if(typeof cap!=="number"||!isFinite(cap)||cap!==Math.floor(cap)||cap<=0||cap>9007199254740991)fail("CONFIG","Invalid explicit byte budget");if(!isFinite(before.bytes)||before.bytes<=0||Math.floor(before.bytes)!==before.bytes||before.bytes>9007199254740991)fail("FILE_SIZE","Source size is empty or not an exactly representable byte count");if(before.bytes>cap)fail("LIMIT_BYTES","Source exceeds the explicit byte budget");
+            var plainBulk=false;
+            if(!deep){plainBulk=stage("source format probe",function(){var f=new DzFile(path);try{if(!f.open(DzFile.ReadOnly))fail("OPEN","Cannot probe source");var a=f.read(2),n=typeof a.length==="number"?a.length:a.size;if(n!==Math.min(2,before.bytes)||f.error()!==DzFile.NoError)fail("READ","Source format probe failed");return String(a.toHex().convertToString()).toLowerCase()!=="1f8b";}finally{f.close();}});}
+            if(!plainBulk)snapshot=stage("exact compressed/source-byte snapshot",function(){return bytes(null);});
+            var gzip=!plainBulk&&snapshot[0].slice(0,4)==="1f8b",joined=gzip?snapshot.join(""):null,major=parseInt(String(App.versionString),10),raw,container=null;
+            if(major!==4&&major!==6)fail("API","Native source requires DAZ4/DAZ6");
+            if(gzip){
+                // ISIZE wraps at 2^32; validate decoded byte count after native read.
+                if(before.bytes<18||joined.slice(4,6)!=="08"||(parseInt(joined.slice(6,8),16)&224))fail("GZIP","Invalid or truncated gzip header");
+                if(deep)container=stage("strict gzip structure without inflation",gzipStructure);
+                raw=stage("native gzip read (synchronous)",function(){var g=new DzGZFile(path);try{if(typeof g.read!=="function"||typeof g.eof!=="function"||typeof g.close!=="function")fail("API","Native gzip read/eof/close API unavailable; no fallback attempted");if(!g.open(DzGZFile.ReadOnly))fail("OPEN","Cannot read gzip source");var s=g.read();if(typeof s!=="string"||!g.eof()||(typeof g.error==="function"&&g.error()!==DzFile.NoError))fail("GZIP","Native gzip decoding failed");return s;}finally{if(typeof g.close==="function")g.close();}});
+            }else if(plainBulk){major=6;raw=stage("normal plain native UTF-8",function(){var f=new DzFile(path);try{if(!f.open(DzFile.ReadOnly))fail("OPEN","Cannot read plain source");var a=f.read(before.bytes),n=typeof a.length==="number"?a.length:a.size;if(n!==before.bytes||!f.eof()||f.error()!==DzFile.NoError)fail("READ","Incomplete plain source or native error");if(typeof a.convertToStringFromUtf8!=="function")fail("API","Native UTF-8 conversion unavailable");var s=a.convertToStringFromUtf8();if(typeof s!=="string"||s.length>cap)fail("LIMIT_BYTES","Invalid or oversized plain text");return s;}finally{f.close();}});
+            }else{major=4;raw=stage("native plain-byte conversion",function(){joined=null;var parts=[];for(var pi=0;pi<snapshot.length;pi++){guard();var hexChunk=snapshot[pi],characters=[],hi;if(parseInt(String(App.versionString),10)===6){for(hi=0;hi+4<=hexChunk.length;hi+=4)characters.push(hexPairs[hexChunk.substring(hi,hi+4)]);if(hi<hexChunk.length)characters.push(hexCharacters[hexChunk.substring(hi,hi+2)]);}else{for(hi=0;hi<hexChunk.length;hi+=2)characters.push(hexCharacters[hexChunk.substring(hi,hi+2)]);}parts.push(characters.join(""));characters=null;hexChunk=null;pulse(pi*65536);}var plain=parts.join("");parts=null;if(!deep)snapshot=null;return plain;});}
+            if(raw.length>cap)fail("LIMIT_BYTES","Expanded source exceeds budget");
+            var crc=gzip&&deep?stage("decoded UTF-8 CRC32 and byte count",function(){return crc32(raw,major,guard,pulse);}):null;
+            if(gzip&&deep){if(crc.bytes!==container.expandedBytes)fail("GZIP_CRC","Decoded source differs from validated gzip size");if(container.singleMember){if(crc.crc32!==container.expectedCRC32)fail("GZIP_CRC","Decoded source differs from gzip CRC");}else{var binary=major===4?raw:unescape(encodeURIComponent(raw)),offset=0;for(var mi=0;mi<container.members.length;mi++){var member=container.members[mi],part=crc32(binary.substring(offset,offset+member.expandedBytes),4,guard,pulse);if(part.crc32!==member.expectedCRC32)fail("GZIP_CRC","Decoded source differs from gzip member CRC");offset+=member.expandedBytes;}binary=null;}}
+            var expectedSize=gzip?parseInt(joined.slice(-8,-6),16)+parseInt(joined.slice(-6,-4),16)*256+parseInt(joined.slice(-4,-2),16)*65536+parseInt(joined.slice(-2),16)*16777216:null;
+            var text=stage("UTF-8 normalization",function(){var normalized=normalizeNative(raw,major,guard,{maxBytes:cap});if(gzip&&normalized.bytes%4294967296!==expectedSize){if(!container)container=stage("gzip member boundaries",gzipStructure);if(normalized.bytes!==container.expandedBytes)fail("GZIP_SIZE","Expanded size differs from gzip members");}return normalized.text;});joined=null;raw=null;if(text.charCodeAt(0)===65279)text=text.substring(1);
+            doc=stage("native JSON parse (synchronous)",function(){return JSON.parse(text);});
+            serialization=deep?stage("duplicate object-member validation",function(){return serialKeys(text,doc,function(){pulse(0);});}):{duplicates:[],checked:false};text=null;
+            stage(deep?"exact source readback":"source metadata freshness",verify);if(!deep)snapshot=null;
+        }catch(e){close();if(quietAsset&&typeof print==="function")print("SaveGuard asset input failed: "+JSON.stringify({path:String(path),error:String(e)}));throw e;}
+        function provider(value){
+            function digest(v){return SaveGuardCacheSnapshot.capture(v,{isCancelled:function(){guard();return false;}});}
+            var verificationCalls=0,cacheMillis=0,byteMillis=0;
+            var document=value,encoded=deep?digest(value):null,names=[],envelope={},key,scene=value.scene||{};
+            for(key in value)if(own(value,key)){if(/_library$/.test(key)&&array(value[key]))names.push(key);else if(key!=="scene")envelope[key]=value[key];}
+            envelope.scene={};for(key in scene)if(own(scene,key)){if(array(scene[key]))names.push("scene."+key);else envelope.scene[key]=scene[key];}
+            function intact(){guard();if(!deep)return;try{if(digest(document)!==encoded)fail("CACHE_CHANGED","Selected payload changed");}catch(error){invalid=true;throw error;}}
+            function retainedGroup(name){if(names.indexOf(name)<0)fail("GROUP","Unknown selected group");return name.indexOf("scene.")===0?document.scene[name.slice(6)]:document[name];}
+            function group(name){intact();return retainedGroup(name);}
+            function records(requests){verify();intact();var out={},g,i,indices,rows,seen;for(g in requests)if(own(requests,g)){indices=requests[g];if(!array(indices))fail("RECORD","Indexes must be arrays");rows=retainedGroup(g);out[g]=[];seen={};for(i=0;i<indices.length;i++){var n=indices[i];if(typeof n!=="number"||n!==Math.floor(n)||n<0||n>=rows.length||own(seen,"$"+n))fail("RECORD","Invalid/duplicate index");seen["$"+n]=true;out[g].push({index:n,record:rows[n]});}}return out;}
+            return {mode:"native-selected-source",groups:function(){intact();return names.slice(0);},readEnvelope:function(){intact();return JSON.parse(JSON.stringify(envelope));},listRecords:group,
+                verificationStats:function(){return {path:String(path),calls:verificationCalls,cacheMillis:cacheMillis,byteMillis:byteMillis};},
+                verifySource:function(){var started=clock(),middle;verificationCalls++;try{intact();}finally{middle=clock();cacheMillis+=middle-started;}try{return verify();}finally{byteMillis+=clock()-middle;}},readRecords:records,readRecord:function(g,n){var r={};r[g]=[n];return records(r)[g][0].record;},
+                close:function(){document=null;encoded=null;close();}};
+        }
+        function select(id,resolver,names){if(options.shapeSource===true){var shapeDocument=options.poseInputsOnly===true?stage("pose input projection",function(){return poseInputDocument(doc);}):doc;doc=null;return {document:shapeDocument,provider:provider(shapeDocument),file:before,metrics:metrics,scope:"static-shaping-source"};}if(options.renderSource===true){var renderDoc=stage("saved render projection",function(){return SaveGuardRenderSettings.selectSource(doc);});doc=null;var renderProvider=stage("saved render provider",function(){return provider(renderDoc);});return {document:renderDoc,provider:renderProvider,file:before,metrics:metrics,scope:SaveGuardRenderSettings.scope};}
+            if(options.materialsSource===true){var materialDoc=SaveGuardMaterials.selectSource(doc,id);doc=null;return {document:materialDoc,provider:provider(materialDoc),file:before,metrics:metrics,scope:"selected seven body surfaces only"};}
+            if(options.staticPoseSource===true){SaveGuardStaticPosePlan.extract(doc,id,SaveGuardSelective,{resolveAssetDocument:resolver});doc=SaveGuardStaticPosePlan.withoutAnimations(doc);}
+            var selected=stage("selected dependency plan",function(){var p=SaveGuardSelective.plan(doc,[id],{fullData:true,characterNames:names,preserveAnimation:options.preserveAnimation===true,resolveAssetDocument:resolver});if(!p.ready)fail("PLAN",p.errors.join("; "));if(p.animationSnapshot&&p.animationSnapshot.channels.length&&options.preserveAnimation!==true)fail("SCOPE","This saved figure contains animation keys. Load Object does not yet preserve animation, so loading was stopped before changing the scene.");return p;});
+            var value=stage("retain complete selected records",function(){var out={},key,i;for(key in doc)if(own(doc,key)&&key!=="scene"&&!/_library$/.test(key))out[key]=JSON.parse(JSON.stringify(doc[key]));out.scene={};
+                for(i=0;i<selected.locators.length;i++){var match=/^(scene\.)?([A-Za-z_]+)\[(\d+)\]$/.exec(selected.locators[i]);if(!match)fail("LOCATOR","Unsupported selected record locator");var parent=match[1]?out.scene:out,original=match[1]?doc.scene:doc,g=match[2];if(!parent[g])parent[g]=[];parent[g].push(JSON.parse(JSON.stringify(original[g][Number(match[3])])));}if(options.preserveAnimation===true&&out.scene.animations&&out.scene.animations.length){var extras=doc.scene.extra||[];out.scene.extra=[];for(i=0;i<extras.length;i++)if(extras[i].animation_settings)out.scene.extra.push({type:"studio_scene_settings",animation_settings:JSON.parse(JSON.stringify(extras[i].animation_settings))});}return out;});
+            // Full finite-number/depth/accessor validation is limited to retained records.
+            if(deep)stage("selected structural validation",function(){return SaveGuardFullDUF.validateStructure(value);});doc=null;
+            var p=provider(value);return {document:value,provider:p,selection:selected,file:before,metrics:metrics,serialization:serialization,scope:deep?"deep: strict gzip, CRC, duplicate keys, cache and source bytes":"normal: native decode, JSON parse, selected references and source metadata"};
+        }
+        return {select:select,fullAsset:function(){if(!options.assetDocument)fail("SCOPE","Full source exposure is limited to bounded dependency assets");if(deep)stage("asset structural validation",function(){return SaveGuardFullDUF.validateStructure(doc);});var value=doc;doc=null;return {document:value,provider:provider(value),file:before,metrics:metrics};},close:close,metrics:metrics};
+    }
+    return {poseInputDocument:poseInputDocument,open:open,readAsset:function(path,options){var o={},k;for(k in options)if(own(options,k))o[k]=options[k];if(o.lowMemoryMode===true)return SaveGuardFullDUF.readAsset(path,options);o.assetDocument=true;return open(path,o).fullAsset();},serialKeys:serialKeys,crc32:crc32};
+}());

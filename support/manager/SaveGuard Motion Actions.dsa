@@ -1,0 +1,264 @@
+// Unified pose/shape/placement candidate. No whole-figure loading or post-load result audit.
+var SaveGuardMotionActions=(function(){
+ var actions={applyPose:'pose',applyShape:'shape',applyTransforms:'transforms',restoreSavedPose:'pose',restoreSavedShape:'shape'};
+ function own(o,k){return !!o&&Object.prototype.hasOwnProperty.call(o,k);}
+ function need(v,m){if(!v)throw Error('Saved motion: '+m);}
+ function text(v){return v&&typeof v.toString==='function'?String(v.toString()):String(v||'');}
+ function num(v){v=Number(v&&typeof v.valueOf==='function'?v.valueOf():v);need(isFinite(v),'Non-finite numeric input');return v;}
+ function uri(v){return SaveGuardShapePlan.uri(text(v));}
+ function local(v){need(typeof v==='string'&&v.charAt(0)==='#','Local owner required');return decodeURIComponent(v.substring(1));}
+ function value(c,fallback){return own(c,'current_value')?num(c.current_value):own(c,'value')?num(c.value):fallback;}
+ function validateKeys(keys,sampling,guard){need(Object.prototype.toString.call(keys)==='[object Array]'&&keys.length,'Empty/malformed saved track');var prior=-Infinity;for(var i=0;i<keys.length;i++){if(guard)guard();var k=keys[i];need(Object.prototype.toString.call(k)==='[object Array]'&&k.length>=2&&typeof k[0]==='number'&&typeof k[1]==='number'&&isFinite(k[0])&&isFinite(k[1])&&k[0]>prior,'Malformed or unordered saved keys');if(sampling===true)need(Math.abs(k[0]*4800)<=9007199254740991&&(i===0||Math.round(k[0]*4800)>Math.round(prior*4800)),'Sampled keys cannot be represented uniquely by native ticks');prior=k[0];}return keys;}
+ function interpolation(k,env){var a=k.length===3?k[2]:['TCB',0,0,0],names={TCB:'InterpTCB',LINEAR:'InterpLinear',CONST:'InterpConstant',HERMITE:'InterpHermite'},counts={TCB:4,LINEAR:1,CONST:1,HERMITE:3};need(k.length===2||k.length===3,'Unsupported key tuple');need(Object.prototype.toString.call(a)==='[object Array]'&&names[a[0]]&&a.length===counts[a[0]],'Unsupported interpolation metadata');var out=[env.DzProperty[names[a[0]]]],i;need(typeof out[0]==='number','Native interpolation enum unavailable');for(i=1;i<4;i++)out.push(i<a.length?num(a[i]):0);return out;}
+ function mergeStaticKeys(p,tick,value,env){var keys=[],replaced=false,n=num(p.getNumKeys());for(var i=0;i<n;i++){var t=num(p.getKeyTime(i)),values=p.getKeyInterpolationTypeValues(i),kind=p.getKeyInterpolationType(i),meta;need(values&&values.length===4,'Native key metadata unavailable');if(kind===env.DzProperty.InterpTCB)meta=['TCB',num(values[1]),num(values[2]),num(values[3])];else if(kind===env.DzProperty.InterpLinear)meta=['LINEAR'];else if(kind===env.DzProperty.InterpConstant)meta=['CONST'];else if(kind===env.DzProperty.InterpHermite)meta=['HERMITE',num(values[1]),num(values[2])];else throw Error('Unsupported native key interpolation');keys.push([t/4800,t===tick?value:num(p.getKeyValue(i)),meta]);if(t===tick)replaced=true;}if(!replaced)keys.push([tick/4800,value]);keys.sort(function(a,b){return a[0]-b[0];});return keys;}
+ function evaluate(keys,seconds,env){
+  validateKeys(keys,true);for(var i=0;i<keys.length;i++)if(keys[i][0]===seconds)return keys[i][1];if(keys.length===1)return keys[0][1];
+  var constant=true;for(i=0;i<keys.length;i++){if(keys[i][1]!==keys[0][1])constant=false;var meta=keys[i].length===3?keys[i][2]:['TCB',0,0,0];if(meta&&meta[0]==='HERMITE'&&(meta[1]!==0||meta[2]!==0))constant=false;}if(constant){for(i=0;i<keys.length;i++)interpolation(keys[i],env);return keys[0][1];}
+  need(typeof env.DzFloatProperty==='function'&&env.DzProperty&&typeof env.DzProperty.InterpTCB==='number','Detached native interpolation API unavailable');
+  var p=new env.DzFloatProperty(),out;try{p.setCanAnimate(true);p.setIsClamped(false);for(i=0;i<keys.length;i++){var ip=interpolation(keys[i],env);p.setValue(Math.round(keys[i][0]*4800),keys[i][1],ip[0],ip[1],ip[2],ip[3]);}out=num(p.getRawValue(Math.round(seconds*4800)));}finally{if(p&&typeof p.deleteLater==='function')p.deleteLater();}return out;
+ }
+ function nativeAtOrigin(env,body,result,canRestore){
+  need(env.Scene&&typeof env.Scene.setTime==='function','Native scene time API unavailable');var original=num(env.Scene.getTime()),attempted=false;
+  result.originalTime=original;try{attempted=true;var originStarted=new Date().getTime();env.Scene.setTime(0);if(/^4\./.test(String(env.App.longVersionString||env.App.versionString||'')))result.setLoadOriginMillis=new Date().getTime()-originStarted;result.loadOriginRequested=0;return body();}
+  finally{if(attempted)try{need(!canRestore||canRestore(),'Owned Undo unavailable; cursor was not restored');env.Scene.setTime(original);result.cursorReturnRequested=true;}catch(e){result.cursorReturnError=String(e);result.ok=false;result.error=(result.error?result.error+'; ':'')+'Could not return time cursor: '+String(e);}}
+ }
+ function aliasEndpoint(alias,env,guard){var endpoint=alias,seen=[];while(endpoint&&endpoint.isAlias()){if(guard)guard();for(var i=0;i<seen.length;i++)need(!env.pointersAreEqual(seen[i],endpoint),'Alias cycle');seen.push(endpoint);need(typeof endpoint.getAliasTarget==='function','Alias target API unavailable');endpoint=endpoint.getAliasTarget();}return endpoint;}
+ function selectedFigure(env){
+  var n=env.Scene.getPrimarySelection();if(n&&n.inherits('DzFigure'))return n;
+  if(!n||!n.inherits('DzBone'))return null;
+  var skeleton=n.getSkeleton(),seen=[],walk=n;
+  if(!skeleton||!skeleton.inherits('DzFigure'))return null;
+  while(walk&&!env.pointersAreEqual(walk,skeleton)){if(!walk.inherits('DzBone')||seen.indexOf(walk)>=0)return null;seen.push(walk);walk=walk.getNodeParent();}
+  return walk?skeleton:null;
+ }
+
+
+ // Selection is action-scoped, never serialized into a source/preset cache.
+ var poseSelection=null;
+ function capturePoseSelection(scene,equal){
+  need(scene&&typeof scene.getSelectedNodeList==='function'&&typeof equal==='function','Selected-node API unavailable');
+  var raw=scene.getSelectedNodeList(),nodes=[],primary=scene.getPrimarySelection(),root=primary&&primary.inherits('DzBone')?primary.getSkeleton():primary;
+  function contains(list,n){for(var i=0;i<list.length;i++)if(equal(list[i],n))return true;return false;}
+  for(var i=0;i<raw.length;i++)if(!contains(nodes,raw[i]))nodes.push(raw[i]);
+  need(primary&&contains(nodes,primary),'Select a compatible object, figure or one of its bones');
+  function belongs(node){
+   var at=node,seen=[];
+   while(at){
+    if(equal(at,root))return true;
+    if(contains(seen,at))return false;seen.push(at);
+    if(at.inherits('DzBone'))return equal(at.getSkeleton(),root);
+    if(at.inherits('DzFigure'))return false;
+    if(typeof at.getNodeParent!=='function')return false;
+    at=at.getNodeParent();
+   }
+   return false;
+  }
+  for(i=0;i<nodes.length;i++)need(belongs(nodes[i]),'Select nodes belonging to one figure or object');
+  var state={scene:scene,blocked:false,ended:false};
+  state.verify=function(){need(!state.ended,'Pose selection scope ended');var now=scene.getSelectedNodeList();need(equal(scene.getPrimarySelection(),primary)&&now.length===nodes.length,'Selected nodes changed; prepare again');for(var j=0;j<now.length;j++)need(contains(nodes,now[j]),'Selected nodes changed; prepare again');};
+  state.restore=function(){if(state.blocked)return;var now=scene.getSelectedNodeList(),j;for(j=0;j<nodes.length;j++)need(nodes[j].isInScene(),'An original selected node is no longer in the scene');for(j=0;j<now.length;j++)if(!contains(nodes,now[j]))now[j].select(false);for(j=0;j<nodes.length;j++)if(!nodes[j].isSelected())nodes[j].select(true);if(!equal(scene.getPrimarySelection(),primary))need(scene.setPrimarySelection(primary)!==false,'Cannot restore primary selection');};
+  return state;
+ }
+ function beginPoseSelection(scene,equal){need(!poseSelection,'A pose action is already active');poseSelection=capturePoseSelection(scene,equal);return poseSelection;}
+ function endPoseSelection(state){if(!state)return;try{state.restore();}finally{state.ended=true;if(poseSelection===state)poseSelection=null;}}
+
+ function selectedMotionTarget(env){var figure=selectedFigure(env);if(figure)return figure;var node=env.Scene.getPrimarySelection();return node&&node.inherits('DzNode')&&!node.inherits('DzBone')?node:null;}
+ function excessKeyIndices(p,keys,diagnostic){
+  function fallback(reason){if(diagnostic)diagnostic.reason=reason;return null;}
+  if(!keys||!keys.length)return fallback("payload-not-eligible");
+  if(!keys||!keys.length||typeof p.deleteKeys!=='function'||typeof p.getKeyTime!=='function'||typeof p.beginEdit!=='function'||typeof p.finishEdit!=='function'||typeof p.isEditing!=='function'||typeof p.cancelEdit!=='function')return fallback('key-edit-api');
+  var wanted={},i,t,prev=-Infinity,out=[],count;
+  try{
+   if(p.isEditing())return fallback('already-editing');
+   for(i=0;i<keys.length;i++){t=Number(keys[i][0])*4800;if(!isFinite(t)||Math.floor(t)!==t||wanted['$'+t])return fallback('source-time');wanted['$'+t]=true;}
+   count=num(p.getNumKeys());if(count<0||Math.floor(count)!==count)return fallback('target-key-count');
+   for(i=0;i<count;i++){t=num(p.getKeyTime(i));if(!isFinite(t)||Math.floor(t)!==t||t<=prev)return fallback('target-time');prev=t;if(!wanted['$'+t])out.push(i);}
+  }catch(e){return fallback('key-read-error');}return out;
+ }
+ function trimExtraKeys(p,indices,guard){
+  if(!indices.length)return 0;
+  var error=null,count=0;if(guard)guard();p.beginEdit();
+  try{for(var i=indices.length-1;i>=0;i--){if(guard)guard();need(num(p.deleteKeys(indices[i],indices[i]))===1,'Could not remove obsolete key');count++;}}
+  catch(e){error=e;}
+  try{if(guard)guard();p.finishEdit();}catch(e){if(!error)error=e;else error=Error(String(error)+'; finishEdit: '+String(e));try{if(guard)guard();p.cancelEdit();}catch(cleanup){error=Error(String(error)+'; cancelEdit: '+String(cleanup));}}
+  if(error)throw error;return count;
+ }
+ function create(env,info){
+  var action=info.request.actionKey,kind=actions[action],restore=action.indexOf('restoreSaved')===0,includeTransforms=action==='applyPose'&&info.request.includeRootTransforms===true,context=info.context,doc=context.planningDocument,id=info.request.sourceId,closed=false,prepared=null,execution=null,snapshotStage=SaveGuardShapePresetIO.create(env).snapshotStaging(),issued=[],target=null,targetTime=null;
+  need(kind,'Unknown action');var selectedPose=action==='applyPose'?(poseSelection||capturePoseSelection(env.Scene,env.pointersAreEqual)):null;if(selectedPose)need(selectedPose.scene===env.Scene,'Pose selection belongs to another scene');if(action==='applyPose')need(typeof env.cancelUndo==='function','Undo rollback is unavailable for pose');
+  function check(cancel){if(selectedPose)selectedPose.verify();need(!closed&&context.planningDocument===doc&&context.provider.verifySource()===true,'Source changed');if(cancel&&cancel())throw Error('Cancelled before scene changes');if(target)need(env.pointersAreEqual(target,selectedMotionTarget(env))&&num(env.Scene.getTime())===targetTime,'Selected figure or target time changed; prepare again');return true;}
+  function prepareTiming(phase){try{if(typeof print==='function')print('SaveGuard prepare timing: '+JSON.stringify({phase:phase,at:new Date().getTime()}));}catch(ignoredTiming){}}
+  function build(source,sourceId,resolve,cancel){
+   need(!issued.length,"Finish the prepared motion action before rebuilding");
+   function sourceKeys(keys){return validateKeys(keys,!restore,guard);}
+   prepareTiming("build.enter");
+   need(source===doc&&sourceId===id,'Source identity changed');check(cancel);target=selectedMotionTarget(env);need(target&&target.isInScene(),'Select a compatible object, figure or one of its bones');targetTime=num(env.Scene.getTime());
+   var wantedRole=kind==='shape'?'Modifier/Shape':'Modifier/Pose',channels=[],targets={},sourceChannels={},sourceBindings={},sourceRecords={},definitionCache={},propertyMetadata=[],errors=[],warnings=[],definitionReads=0,definitionMillis=0,prepareStarted=new Date().getTime(),importCount=0,embeddedDefinitions=[],embeddedInstances=[],i,j;
+   function guard(){if(cancel&&cancel()){var cancelled=Error('Cancelled before scene changes');cancelled.code='CANCELLED';throw cancelled;}}
+   function addTarget(identity,url,p,owner,defaultValue,directAccessor){need(!targets['$'+identity],'Duplicate target asset/property identity: '+identity);need(p&&p.inherits('DzFloatProperty')&&(directAccessor===true||env.pointersAreEqual(p.getOwner(),owner))&&!p.isAlias(),'Invalid property ownership: '+identity);var t={identity:identity,url:url,p:p,owner:owner,defaultValue:defaultValue===undefined?num(p.getDefaultValue()):defaultValue,raw:num(p.getRawValue()),keyCount:num(p.getNumKeys())};targets['$'+identity]=t;return t;}
+   function role(p){var pr=p&&typeof p.getPresentation==='function'?p.getPresentation():null;return pr?text(pr.type):'';}
+   // Metadata belongs to this build's exact property-list entries, not names or URIs.
+   function propertyInfo(index){var meta=propertyMetadata[index];if(!meta){var property=props[index],numeric=property.inherits('DzFloatProperty');meta={property:property,numeric:numeric,alias:numeric?property.isAlias():false};propertyMetadata[index]=meta;}return meta;}
+   function propertyName(meta){if(!own(meta,'name'))meta.name=text(meta.property.getName());return meta.name;}
+   function propertyRole(meta){if(!own(meta,'role'))meta.role=role(meta.property);return meta.role;}
+   function loadDefinition(file){if(!definitionCache['$'+file]){definitionReads++;var at=new Date().getTime();try{definitionCache['$'+file]=resolve(file);}finally{var elapsed=new Date().getTime()-at;definitionMillis+=elapsed;if(/^4\./.test(String(env.App.longVersionString||env.App.versionString||'')))try{var loadedDefinition=definitionCache['$'+file];if(typeof print==='function')print('SaveGuard DEFINITION TIMING: '+JSON.stringify({uri:file,path:loadedDefinition&&loadedDefinition.path,bytes:loadedDefinition&&loadedDefinition.sourceBytes,totalMillis:elapsed,readerPhases:loadedDefinition&&loadedDefinition.readMetrics||null}));}catch(ignoreDiagnostic){}}}return definitionCache['$'+file];}
+   var definitions=SaveGuardShapePlan.definitions(doc,loadDefinition,cancel);
+   function definition(ref){return definitions.get(uri(ref),'modifier_library');}
+   function setSource(identity,url,staticValue,defaultValue,record,query){need(!sourceChannels['$'+identity],'Duplicate source channel '+identity);var c={identity:identity,url:url,staticValue:staticValue,defaultValue:defaultValue,keys:null};sourceChannels['$'+identity]=c;channels.push(c);if(record){if(!sourceBindings['$'+record.id])sourceBindings['$'+record.id]={record:record,queries:{}};sourceBindings['$'+record.id].queries[query]=c;}return c;}
+   var nodes=doc.scene.nodes||[],saved=null;for(i=0;i<nodes.length;i++){need(!sourceRecords['$'+nodes[i].id],'Duplicate source node');sourceRecords['$'+nodes[i].id]=nodes[i];if(nodes[i].id===id)saved=nodes[i];}need(saved,'Saved object missing');
+   var figureTarget=target.inherits('DzFigure'),verifiedPropGeometries={};
+   if(info.request.rowType&&info.request.rowType!=='figure')need(!figureTarget,'A saved prop requires a compatible prop target');
+   if(!figureTarget){
+    need(!target.inherits('DzBone')&&!target.inherits('DzCamera')&&!target.inherits('DzLight'),'Select a compatible prop');
+    // Props are addressed locally, never by a scene-wide label/name search.
+    // Asset identity must be established before any channels are staged.
+    var sourceAsset=saved.url,liveAsset=text(target.assetSource)||text(target.assetUri);
+    if(typeof sourceAsset==='string'&&sourceAsset.charAt(0)!=='#')need(liveAsset&&uri(sourceAsset)===uri(liveAsset),'Saved prop and selected target asset differ or have no verifiable asset identity');
+    else if(kind!=='transforms')need(saved.geometries&&saved.geometries.length,'Pose/shape transfer requires a verifiable prop or geometry asset identity');
+    if(kind!=='transforms'&&saved.geometries&&saved.geometries.length){
+     var propObject=target.getObject(),propShape=propObject&&propObject.getCurrentShape(),propGeometry=propShape&&propShape.getGeometry(),geometryAsset=propGeometry&&(text(propGeometry.assetSource)||text(propGeometry.assetUri)),geometryMatch=false;
+     need(propGeometry&&geometryAsset,'Selected prop geometry asset identity is unavailable');
+     for(var geometryIndex=0;geometryIndex<saved.geometries.length;geometryIndex++){var savedGeometry=saved.geometries[geometryIndex];if(savedGeometry.url&&savedGeometry.url.charAt(0)!=='#'&&uri(savedGeometry.url)===uri(geometryAsset)){geometryMatch=true;verifiedPropGeometries['$'+savedGeometry.id]=true;}}
+     need(geometryMatch,'Saved prop and selected target geometry differ or have no verifiable asset identity');
+    }
+    need(saved.type!=='figure'&&!(saved.preview&&saved.preview.type==='figure'),'A saved figure requires a figure target');
+   }
+   // SRT source defaults are resolved from the figure/rig definitions, never all morph definitions.
+   if(kind!=='shape'){
+    var pose=figureTarget?SaveGuardSelective.poseSource(doc,id,{resolveAssetDocument:loadDefinition,isCancelled:cancel}):kind==='transforms'||includeTransforms?SaveGuardSelective.transformSource(doc,[id],{resolveAssetDocument:loadDefinition,isCancelled:cancel}):{ready:true,nodes:[],errors:[]};need(pose.ready,pose.errors.join('; '));var by={},sourceRoot=null,allBones=figureTarget?target.getAllBones():[],mappedBonesByName={};
+    for(i=0;i<pose.nodes.length;i++){by['$'+pose.nodes[i].id]=pose.nodes[i];if(pose.nodes[i].id===id)sourceRoot=pose.nodes[i];}
+    function bindBone(n){var chain=[],seen={},q=n;while(q.id!==id){need(!seen['$'+q.id],'Bone hierarchy cycle');seen['$'+q.id]=true;chain.unshift(q.internalName);q=by['$'+q.parentId];need(q,'Source bone ancestor missing');}var live=target;for(var a=0;a<chain.length;a++){var child=live.getNodeChildren(false),hit=null;for(var b=0;b<child.length;b++)if(text(child[b].getName())===chain[a]){need(!hit,'Ambiguous bone path');hit=child[b];}need(hit&&hit.inherits('DzBone')&&env.pointersAreEqual(hit.getSkeleton(),target),'Missing bone path '+chain.join('/'));live=hit;}return {node:live,path:chain.map(function(s){return encodeURIComponent(s);}).join('/')};}
+    var fields=[['translation','Pos'],['rotation','Rot'],['scale','Scale']],axes=['x','y','z'];
+    for(i=0;i<pose.nodes.length;i++){guard();var n=pose.nodes[i],isRoot=n.id===id;if(kind==='transforms'&&!isRoot||kind==='pose'&&!includeTransforms&&(!restore||!figureTarget)&&isRoot)continue;var binding=isRoot?{node:target,path:''}:bindBone(n),prefix='name://@selection'+(binding.path?'/'+binding.path:'')+':';if(!isRoot){var mappedName='$'+text(binding.node.getName());if(!mappedBonesByName[mappedName])mappedBonesByName[mappedName]=[];mappedBonesByName[mappedName].push(binding.node);}
+     for(var f=0;f<fields.length;f++)for(var a=0;a<3;a++){var query='?'+fields[f][0]+'/'+axes[a]+'/value',identity='node:'+n.id+query,p=binding.node['get'+axes[a].toUpperCase()+fields[f][1]+'Control']();addTarget(identity,prefix+query,p,binding.node,undefined,true);var c=setSource(identity,prefix+query,num(n.state[fields[f][0]][a]),targets['$'+identity].defaultValue,sourceRecords['$'+n.id],query);var rawArray=sourceRecords['$'+n.id][fields[f][0]]||[];for(var ci=0;ci<rawArray.length;ci++)if(rawArray[ci].id===axes[a]&&(rawArray[ci].keys||rawArray[ci].keyframes))c.keys=sourceKeys(rawArray[ci].keys||rawArray[ci].keyframes);}
+     var gp=binding.node.getScaleControl(),gq='?scale/general/value',gid='node:'+n.id+gq;addTarget(gid,prefix+gq,gp,binding.node,undefined,true);var gc=setSource(gid,prefix+gq,num(n.state.general_scale),targets['$'+gid].defaultValue,sourceRecords['$'+n.id],gq),gs=sourceRecords['$'+n.id].general_scale;sourceBindings['$'+n.id].queries['?general_scale/value']=gc;if(gs&&(gs.keys||gs.keyframes))gc.keys=sourceKeys(gs.keys||gs.keyframes);
+    }
+   }
+   if(kind==='pose')for(i=0;i<allBones.length;i++){var nb=allBones[i],mappedCandidates=mappedBonesByName['$'+text(nb.getName())]||[];var alreadyMapped=false;for(var mi=0;mi<mappedCandidates.length;mi++)if(env.pointersAreEqual(mappedCandidates[mi],nb)){alreadyMapped=true;break;}if(alreadyMapped)continue;need(env.pointersAreEqual(nb.getSkeleton(),target),'Target bone ownership changed');var chain=[],visited=[],walk=nb;while(!env.pointersAreEqual(walk,target)){need(walk&&visited.indexOf(walk)<0,'Invalid target bone hierarchy');visited.push(walk);chain.unshift(encodeURIComponent(text(walk.getName())));walk=walk.getNodeParent();}var ep='name://@selection/'+chain.join('/')+':';for(var ef=0;ef<fields.length;ef++)for(var ea=0;ea<3;ea++){var eq='?'+fields[ef][0]+'/'+axes[ea]+'/value';addTarget('extraBone:'+chain.join('/')+eq,ep+eq,nb['get'+axes[ea].toUpperCase()+fields[ef][1]+'Control'](),nb,undefined,true);}addTarget('extraBone:'+chain.join('/')+'?scale/general/value',ep+'?scale/general/value',nb.getScaleControl(),nb,undefined,true);}
+   prepareTiming("bones.complete");
+   if(kind!=='transforms'){
+    var object=target.getObject(),mods=[],allMods={},modifierNames={},props=target.getPropertyList(),assetNodeByName={},geometries=saved.geometries||[],owners={};owners['$'+id]=true;for(i=0;i<geometries.length;i++)if(figureTarget||verifiedPropGeometries['$'+geometries[i].id])owners['$'+geometries[i].id]=true;
+    for(i=0;object&&i<object.getNumModifiers();i++){guard();var mod=object.getModifier(i),inventoryName=text(mod.getName());if(!modifierNames['$'+inventoryName])modifierNames['$'+inventoryName]=[];modifierNames['$'+inventoryName].push(mod);var p=typeof mod.getValueControl==='function'?mod.getValueControl():null;if(!p||!p.inherits('DzFloatProperty')||p.isAlias())continue;var u=null;try{u=uri(mod.assetUri);}catch(ignore){}var item={mod:mod,p:p,uri:u,role:role(p)||role(mod),name:inventoryName};mods.push(item);if(u){need(!allMods['$'+u],'Duplicate target modifier URI');allMods['$'+u]=item;}if(item.role===wantedRole&&u)addTarget(u,'id://@selection:'+encodeURI(u)+'?value',p,mod);}
+    // Serialized modifier assets can be node-owned numeric controls, not DzModifiers.
+    for(i=0;i<props.length;i++){var am=propertyInfo(i),ap=am.property;if(!am.numeric||am.alias)continue;var au=null;try{au=uri(text(ap.assetUri).replace(/\?value(?:\/value)?$/,''));}catch(ignorePropertyURI){}if(!au)continue;
+     need(!allMods['$'+au]||env.pointersAreEqual(allMods['$'+au].p,ap),'Duplicate target asset/property identity: '+au);
+     var an=propertyName(am),ai={mod:target,p:ap,uri:au,role:propertyRole(am),name:an,nodeProperty:true};allMods['$'+au]=ai;assetNodeByName['$'+an]=ai;
+     if(ai.role===wantedRole&&!targets['$'+au])addTarget(au,'name://@selection#'+encodeURIComponent(an)+':?value/value',ap,target);
+    }
+   prepareTiming("inventory.complete");
+    var animatedIds={},animatedAssets={},sourceTracks=doc.scene.animations||[];
+    for(i=0;i<sourceTracks.length;i++){var ar=SaveGuardSelective.parseURI(sourceTracks[i].url);if(ar.kind==='local')animatedIds['$'+ar.fragment]=true;else if(ar.kind==='external')try{animatedAssets['$'+uri(ar.file+'#'+encodeURIComponent(ar.fragment))]=true;}catch(ignoreAnimationIdentity){}}
+    var sourceMods=doc.scene.modifiers||[];
+    for(i=0;i<sourceMods.length;i++){guard();var m=sourceMods[i];if(!m.parent||m.parent.charAt(0)!=='#'||!owners['$'+local(m.parent)]||!m.url)continue;var d=null,u=null,t=null,presentation='',isLocal=m.url.charAt(0)==='#',name=m.name||m.id;
+     if(isLocal){var did=local(m.url);d=definitions.get(m.url,'modifier_library');presentation=d.presentation&&d.presentation.type||'';name=m.name||d.name||d.id;}
+     else{u=uri(m.url);t=allMods['$'+u];presentation=m.presentation&&m.presentation.type|| (t?t.role:'');
+      var early=m.channel||{},noTrack=!early.keys&&!early.keyframes&&!animatedIds['$'+m.id]&&!animatedAssets['$'+u];
+      // An absent modifier with no serialized channel and no track has no authored input to import.
+      // Existing scoped target controls are still reset from their actual property defaults.
+      if(!t&&!m.channel&&noTrack)continue;
+      if(!presentation&&t&&noTrack){var targetDefault=num(t.p.getDefaultValue()),savedInput=value(early,targetDefault);if(!restore&&savedInput===num(t.p.getRawValue()))continue;if(savedInput===targetDefault&&num(t.p.getRawValue())===targetDefault&&num(t.p.getNumKeys())===0)continue;}
+      if(!presentation&&noTrack&&own(early,'value')&&own(early,'current_value')&&early.value===early.current_value&&typeof early.value==='number'&&isFinite(early.value)&&(!t?early.value===0:(num(t.p.getDefaultValue())===early.value&&num(t.p.getRawValue())===early.value&&num(t.p.getNumKeys())===0)))continue;
+      if(!presentation){d=definition(u);presentation=d.presentation&&d.presentation.type||'';name=m.name||d.name||d.id;}}
+     if(m.presentation&&m.presentation.type){presentation=String(m.presentation.type);if(t){t.role=presentation;if(presentation!==wantedRole)delete targets['$'+u];else if(!targets['$'+u])addTarget(u,t.nodeProperty?'name://@selection#'+encodeURIComponent(t.name)+':?value/value':'id://@selection:'+encodeURI(u)+'?value',t.p,t.mod);}}
+     if(!presentation&&isLocal){for(j=0;j<mods.length;j++)if(mods[j].name===name&&mods[j].role){need(!presentation||presentation===mods[j].role,'Conflicting embedded control role '+name);presentation=mods[j].role;}}
+     if(t&&presentation&&!t.role)t.role=presentation;if(t&&presentation===wantedRole&&!targets['$'+u])addTarget(u,t.nodeProperty?'name://@selection#'+encodeURIComponent(t.name)+':?value/value':'id://@selection:'+encodeURI(u)+'?value',t.p,t.mod);
+     if(presentation!==wantedRole){if(!presentation&&d&&d.channel&&d.channel.type==='float')warnings.push('Outside explicit '+wantedRole+' scope: unclassified control '+m.id);continue;}
+     var localURL=null;
+     if(isLocal){var hits=[];for(j=0;j<mods.length;j++)if(mods[j].name===name)hits.push(mods[j]);
+      var rawCandidates=modifierNames['$'+name]||[];need(rawCandidates.length<=1,'Ambiguous embedded morph target '+name+' ('+rawCandidates.length+' candidates)');need(rawCandidates.length===hits.length,'Existing embedded target has an alias or unsupported value control: '+name);
+      var localData=SaveGuardShapePlan.localMorph({parent:d.parent,morph:d.morph},uri(d.parent),guard);u='local:'+did;
+      if(hits.length){t=hits[0];need(t.mod.inherits('DzMorph'),'Embedded target is not a morph: '+name);var gm=target.getObject().getCurrentShape().getGeometry();
+       need(num(gm.getNumVertices())===localData.vertexCount&&SaveGuardShapeNative.sameMorph(localData,SaveGuardShapeNative.morphData(t.mod,guard)),'Embedded morph payload conflict: '+name);
+       need((!d.formulas||!d.formulas.length)&&(!d.extra||!d.extra.length),'Existing embedded formula/extension identity not established: '+name);
+       need(typeof t.p.getNumControllers==='function'&&typeof t.p.getNumSlaveControllers==='function'&&t.p.getNumControllers()===0&&t.p.getNumSlaveControllers()===0,'Existing embedded controller identity not established: '+name);
+       need(d.channel&&num(d.channel.value)===num(t.p.getDefaultValue()),'Embedded morph authored default differs: '+name);
+       if(t.uri&&targets['$'+t.uri])delete targets['$'+t.uri];localURL='name://@selection#'+encodeURIComponent(name)+':?value/value';addTarget(u,localURL,t.p,t.mod);
+      }else{
+       // Copy the whole source definition, never construct ERC or a figure instance.
+       var copied=JSON.parse(JSON.stringify(d)),instanceId='SGEmbedded_'+did;
+       need(!sourceRecords['$'+instanceId],'Embedded instance ID conflicts with source node '+instanceId);
+       for(var ei=0;ei<embeddedDefinitions.length;ei++)need(embeddedDefinitions[ei].id!==copied.id&&embeddedInstances[ei].id!==instanceId,'Duplicate embedded definition '+did);
+       var refs=[copied.formulas||[]];while(refs.length){var refValue=refs.pop();if(typeof refValue==='string'&&refValue.charAt(0)==='#')need(local(refValue.split('?')[0])===did,'Embedded formula needs source-local binding: '+refValue);else if(refValue&&typeof refValue==='object')for(var rk in refValue)if(own(refValue,rk))refs.push(refValue[rk]);}
+       embeddedDefinitions.push(copied);embeddedInstances.push({id:instanceId,url:'#'+encodeURIComponent(copied.id),parent:'name://@selection:'});localURL='#'+encodeURIComponent(instanceId)+'?value';
+      }
+     }
+     var sc=m.channel||{},dc=d&&d.channel||{},def=own(sc,'value')?num(sc.value):own(dc,'value')?num(dc.value):t?(targets['$'+u]?targets['$'+u].defaultValue:num(t.p.getDefaultValue())):null;
+     need(def!==null||own(sc,'current_value'),'Missing source default '+m.id);var v=value(sc,isLocal?value(dc,def):def),url=isLocal?localURL:t&&t.nodeProperty?targets['$'+u].url:'id://@selection:'+encodeURI(u)+'?value';var ch=setSource(u,url,v,def,m,'?value');sourceBindings['$'+m.id].queries['?value/value']=ch;if(sc.keys||sc.keyframes)ch.keys=sourceKeys(sc.keys||sc.keyframes);
+    }
+    // Explicit node-owned controls. Structural SRT and rest rig properties are never inferred from labels.
+    var nodeControls={},structural=/^(?:[XYZ](?:Translate|Rotate|Scale)|Scale|[XYZ](?:Origin|End|Orientation))$/;
+    var nodeRoles={},savedExtras=saved.extra||[];for(i=0;i<savedExtras.length;i++)if(savedExtras[i].type==='studio_node_channels')for(j=0;j<(savedExtras[i].channels||[]).length;j++){var nr=savedExtras[i].channels[j],nc=nr.channel,np=nr.presentation||nc&&nc.presentation;if(nc&&np&&np.type)nodeRoles['$'+nc.id]=String(np.type);}
+    for(i=0;i<props.length;i++){var pm=propertyInfo(i),p=pm.property,name=propertyName(pm);if(!pm.numeric||pm.alias||structural.test(name)||(nodeRoles['$'+name]||propertyRole(pm))!==wantedRole)continue;need(!nodeControls['$'+name],'Duplicate node control');nodeControls['$'+name]=p;var boundNode=assetNodeByName['$'+name];if(!boundNode||!targets['$'+boundNode.uri])addTarget('property:'+name,'name://@selection#'+encodeURIComponent(name)+':?value/value',p,target);}
+    // Unknown controls are retained. Do not inspect their activity merely to word a warning.
+    var retainedUnknownModifiers=0,retainedUnknownNodes=0;
+    for(i=0;i<mods.length;i++)if(!mods[i].role)retainedUnknownModifiers++;
+    for(i=0;i<props.length;i++){var um=propertyInfo(i),un=propertyName(um);if(um.numeric&&!um.alias&&!structural.test(un)&&!nodeRoles['$'+un]&&!propertyRole(um))retainedUnknownNodes++;}
+    if(retainedUnknownModifiers)warnings.push('Unclassified target modifier retained: '+retainedUnknownModifiers+' controls; activity not inspected; full replacement not established.');
+    if(retainedUnknownNodes)warnings.push('Unclassified target node control retained: '+retainedUnknownNodes+' controls; activity not inspected; full replacement not established.');
+    var extra=saved.extra||[];for(i=0;i<extra.length;i++)if(extra[i].type==='studio_node_channels')for(j=0;j<(extra[i].channels||[]).length;j++){var nc=extra[i].channels[j].channel;if(!nc)continue;var p=nodeControls['$'+nc.id];if(!p)continue;var boundNode=assetNodeByName['$'+nc.id],nodeIdentity=boundNode&&targets['$'+boundNode.uri]?boundNode.uri:'property:'+nc.id,nodeDefault=targets['$'+nodeIdentity].defaultValue,nodeValue=value(nc,nodeDefault),pc=sourceChannels['$'+nodeIdentity];if(pc){need(pc.staticValue===nodeValue,'Conflicting saved node/asset input '+nc.id);if(!sourceBindings['$'+saved.id])sourceBindings['$'+saved.id]={record:saved,queries:{}};sourceBindings['$'+saved.id].queries['?'+nc.id+'/value']=pc;}else pc=setSource(nodeIdentity,targets['$'+nodeIdentity].url,nodeValue,nodeDefault,saved,'?'+nc.id+'/value');if(nc.keys||nc.keyframes){need(!pc.keys,'Duplicate saved node/asset keys '+nc.id);pc.keys=sourceKeys(nc.keys||nc.keyframes);}}
+   }
+   if(kind==='shape')for(var aliasIndex=0;aliasIndex<props.length;aliasIndex++){
+    var aliasMeta=propertyInfo(aliasIndex),alias=aliasMeta.property;if(!aliasMeta.numeric||!aliasMeta.alias||propertyRole(aliasMeta)!==wantedRole)continue;
+    var aliasURI=null;try{aliasURI=uri(text(alias.assetUri).replace(/\?value(?:\/value)?$/,''));}catch(noAliasAsset){continue;}if(!aliasURI)continue;
+    var aliasDef=definition(aliasURI);if(!aliasDef.channel||aliasDef.channel.type!=='alias'||!aliasDef.presentation||aliasDef.presentation.type!==wantedRole)continue;
+    var targetRef=String(aliasDef.channel.target_channel||''),assetStart=targetRef.indexOf(':/');if(assetStart>=0)targetRef=targetRef.substring(assetStart+1);targetRef=targetRef.replace(/\?value(?:\/value)?$/,'');var endpointURI=uri(targetRef);
+    var parentId=saved.parent&&local(saved.parent),sourceParent=sourceRecords['$'+parentId],candidates=[];
+    for(var arx=0;arx<(doc.scene.modifiers||[]).length;arx++){var candidate=doc.scene.modifiers[arx],candidateURI;try{candidateURI=uri(candidate.url);}catch(ignoreAliasLocal){continue;}if(candidateURI===endpointURI)candidates.push(candidate);}
+    if(!candidates.length||!sourceParent)continue;
+    var parentOwners={};parentOwners['$'+parentId]=true;for(var ag=0;ag<(sourceParent.geometries||[]).length;ag++)parentOwners['$'+sourceParent.geometries[ag].id]=true;
+    var matched=null;for(arx=0;arx<candidates.length;arx++){candidate=candidates[arx];if(!candidate.parent||!parentOwners['$'+local(candidate.parent)])continue;need(!matched,'Ambiguous saved alias endpoint');matched=candidate;}if(!matched)continue;
+    var endpoint=aliasEndpoint(alias,env,guard);need(endpoint,'Unresolved saved shape alias '+propertyName(aliasMeta));
+    var epOwner=endpoint.getOwner(),endpointRef=text(endpoint.assetUri).replace(/\?value(?:\/value)?$/,''),ownerRef=text(epOwner.assetUri);
+    if(endpointRef.charAt(0)==='#'){need(epOwner.inherits&&epOwner.inherits('DzModifier')&&typeof epOwner.getValueControl==='function'&&env.pointersAreEqual(epOwner.getValueControl(),endpoint),'Local alias endpoint is not the owning modifier value control');endpointRef=ownerRef;}
+    var actualURI=uri(endpointRef||ownerRef);need(actualURI===endpointURI,'Alias endpoint differs from definition');
+    var parent=target.getNodeParent();need(parent&&parent.inherits('DzFigure'),'Saved shape alias requires a direct figure parent');need(uri(text(parent.assetSource)||text(parent.assetUri))===uri(sourceParent.url),'Alias parent asset differs');
+    var modifierEndpoint=epOwner.inherits&&epOwner.inherits('DzModifier'),endpointName=text(modifierEndpoint?epOwner.getName():endpoint.getName());
+    if(modifierEndpoint){var parentObject=parent.getObject();need(parentObject&&typeof parentObject.findModifierIndex==='function'&&typeof epOwner.getValueControl==='function','Alias modifier ownership API unavailable');var ownerIndex=parentObject.findModifierIndex(epOwner);need(ownerIndex>=0&&env.pointersAreEqual(parentObject.getModifier(ownerIndex),epOwner)&&env.pointersAreEqual(epOwner.getValueControl(),endpoint),'Alias modifier does not belong to selected parent');}
+    else need(typeof parent.findProperty==='function'&&env.pointersAreEqual(parent.findProperty(endpointName),endpoint),'Alias endpoint is not uniquely bound to the parent property');
+    var aliasIdentity='parent-alias:'+endpointURI;if(targets['$'+aliasIdentity]){need(env.pointersAreEqual(targets['$'+aliasIdentity].p,endpoint),'Conflicting alias endpoints');continue;}
+    var parentName=text(parent.getName());need(parentName&&parentName===String(sourceParent.name||''),'Alias parent native name differs');
+    var aliasURL='name://@selection/'+encodeURIComponent(parentName)+'#'+encodeURIComponent(endpointName)+':?value/value',aliasTarget=addTarget(aliasIdentity,aliasURL,endpoint,epOwner),ac=matched.channel||{},aliasSource=setSource(aliasIdentity,aliasURL,value(ac,aliasTarget.defaultValue),aliasTarget.defaultValue,matched,'?value');sourceBindings['$'+matched.id].queries['?value/value']=aliasSource;if(ac.keys||ac.keyframes)aliasSource.keys=sourceKeys(ac.keys||ac.keyframes);
+   }
+   if(!figureTarget){var authored=false;for(var authoredKey in sourceChannels)if(own(sourceChannels,authoredKey)){authored=true;break;}need(authored,'No supported saved '+kind+' channels for this object');}
+   prepareTiming("classification.complete");
+   // Bind saved tracks to one source instance before rewriting their destination address.
+   var tracks=doc.scene.animations||[],bindingsByURI={};for(var bk in sourceBindings)if(own(sourceBindings,bk)){var ub=null;try{ub=uri(sourceBindings[bk].record.url);}catch(ignoreBindURI){}if(ub){if(!bindingsByURI['$'+ub])bindingsByURI['$'+ub]=[];bindingsByURI['$'+ub].push(sourceBindings[bk]);}}
+   var ownerRecords={},ownerDuplicates={};function indexOwners(rows,parent){for(var oi=0;oi<(rows||[]).length;oi++){var or=rows[oi];if(!or||!or.id)continue;var ok='$'+or.id;if(ownerRecords[ok])ownerDuplicates[ok]=true;else ownerRecords[ok]={record:or,parent:parent||or.parent};if(or.geometries)indexOwners(or.geometries,or.id);}}indexOwners(doc.scene.nodes);indexOwners(doc.scene.modifiers);
+   function qualifiedOwner(bind,parts){if(!parts.length)return true;var chain=[],seen={},at=bind.record.id;while(at){need(!seen['$'+at]&&!ownerDuplicates['$'+at],'Ambiguous saved animation ancestry');seen['$'+at]=true;chain.unshift(String(at));var entry=ownerRecords['$'+at];if(at===id||!entry)break;var parent=entry.parent;if(!parent)break;at=parent.charAt(0)==='#'?local(parent):parent;}
+    for(var end=0;end<chain.length;end++){if(parts.length>end+1)continue;var match=true;for(var pi=0;pi<parts.length;pi++)if(parts[pi]!==chain[end-parts.length+1+pi]){match=false;break;}if(match)return true;}return false;}
+   for(i=0;i<tracks.length;i++){guard();var track=tracks[i],ref=SaveGuardSelective.parseURI(track.url),hits=[],anchor=ref.nodePath?decodeURIComponent(ref.nodePath).split('/').filter(function(x){return x;}):[],last=anchor.length?anchor[anchor.length-1]:null;
+    if(ref.kind==='local'&&sourceBindings['$'+ref.fragment]){need(qualifiedOwner(sourceBindings['$'+ref.fragment],anchor),'Foreign qualified saved animation owner '+track.url);hits.push(sourceBindings['$'+ref.fragment]);}
+    else if(ref.kind==='external'){var canonical=null;try{canonical=uri(ref.file+'#'+encodeURIComponent(ref.fragment));}catch(ignoreURI){}var candidates=bindingsByURI['$'+canonical]||[];for(var bi=0;bi<candidates.length;bi++){var bind=candidates[bi],br=bind.record;if(!qualifiedOwner(bind,anchor))continue;hits.push(bind);}}
+    if(!hits.length)continue;need(hits.length===1,'Ambiguous saved animation owner '+track.url);var query=decodeURIComponent(ref.query||''),channel=hits[0].queries[query],vector=/^\?(translation|rotation|scale)(?:\/value)?$/.exec(query);if(!channel&&vector){for(var ax=0;ax<3;ax++){var vc=hits[0].queries['?'+vector[1]+'/'+['x','y','z'][ax]+'/value'];if(!vc)continue;need(!vc.keys,'Duplicate vector track');var vk=[];for(var ki=0;ki<track.keys.length;ki++){var row=track.keys[ki];need(row[1]&&row[1].length===3,'Malformed vector key');var one=row.slice(0);one[1]=row[1][ax];vk.push(one);}vc.keys=sourceKeys(vk);}continue;}if(!channel){need(!!sourceRecords['$'+hits[0].record.id],'Unsupported scoped input track '+track.url);need(!/^\?(translation|rotation|scale)(?:\/|$)/.test(query),'Unsupported scoped transform track '+track.url);continue;}need(!channel.keys,'Duplicate inline/scene track '+track.url);channel.keys=sourceKeys(track.keys);
+   }
+   var frame=null,fps=null,seconds=null;if(!restore){var savedRaw=SaveGuardTimeline.fromDUF(doc.scene),savedTiming=SaveGuardTimeline.normalize(savedRaw)||SaveGuardTimeline.normalize(info.version&&info.version.timelineInfo);fps=savedTiming&&savedTiming.fps;
+    if(own(info.request,'sourceFrame')){frame=info.request.sourceFrame;need(typeof frame==='number'&&isFinite(frame),'Choose a valid source frame');need(typeof fps==='number'&&isFinite(fps)&&fps>0,'Source FPS was not recorded in this backup; a source frame cannot be evaluated without it');seconds=frame/fps;}
+    else{var currentRaw=savedRaw&&typeof savedRaw.currentTime==='number'?savedRaw:info.version&&info.version.timelineInfo;need(currentRaw&&typeof currentRaw.currentTime==='number'&&isFinite(currentRaw.currentTime)&&(currentRaw.units==='seconds'||currentRaw.units==='ticks'),'Saved current time is unavailable');seconds=currentRaw.currentTime/(currentRaw.units==='ticks'?4800:1);frame=savedTiming?savedTiming.currentFrame:null;}
+   }
+   prepareTiming("sourceTracks.complete");
+   var animations=[],reset=[],seenTarget={},key,sourceCount=0,retainedConstants=0;
+   function sameConstantInput(t,ch,desired){if(t.raw!==desired||t.keyCount>1)return false;if(t.keyCount===1&&num(t.p.getKeyValue(0))!==desired)return false;return !ch||!ch.keys||ch.keys.length===1&&ch.keys[0][1]===desired;}
+
+   // Apply stages a native preset only; it never resets, unlocks or edits target properties.
+   // Existing Restore keys require direct reset/trim; only those properties need writability.
+   for(key in targets)if(own(targets,key)){var t=targets[key],ch=sourceChannels[key],keys=null,desired=ch?ch.staticValue:t.defaultValue;guard();if(restore&&(t.p.isLocked()||t.p.isLinked()||typeof t.p.isReadOnly==='function'&&t.p.isReadOnly())&&sameConstantInput(t,ch,desired)){seenTarget[key]=true;retainedConstants++;continue;}if(restore){if(t.keyCount)reset.push(t);if(ch&&ch.keys)keys=ch.keys;else if(desired!==t.defaultValue||t.raw!==desired||t.keyCount)keys=[[0,num(desired)]];}else{if(ch&&ch.keys)desired=evaluate(ch.keys,seconds,env);if(num(desired)!==t.raw)keys=mergeStaticKeys(t.p,targetTime,num(desired),env);}if(restore&&t.keyCount)need(!t.p.isLocked()&&!t.p.isAlias()&&!t.p.isLinked()&&!(typeof t.p.isReadOnly==='function'&&t.p.isReadOnly()),'Scoped property not writable: '+t.identity);if(keys){animations.push({url:t.url,keys:keys});if(action==='restoreSavedPose'&&/^4\./.test(String(env.App.longVersionString||env.App.versionString||''))&&t.keyCount){if(ch&&ch.url===t.url){t.nativeReplacementKeys=keys;t.trimOrigin='source';}else if(!ch&&keys.length===1&&keys[0][0]===0&&keys[0][1]===t.defaultValue){t.nativeReplacementKeys=keys;t.trimOrigin='default';}else t.trimFallback='binding-or-track';}}seenTarget[key]=true;}
+   for(key in sourceChannels)if(own(sourceChannels,key)&&!seenTarget[key]){var ch=sourceChannels[key],keys=restore?(ch.keys||[[0,num(ch.staticValue)]]):[[targetTime/4800,ch.keys?evaluate(ch.keys,seconds,env):num(ch.staticValue)]];animations.push({url:ch.url,keys:keys});importCount++;}
+   if(retainedConstants)warnings.push('Retained '+retainedConstants+' nonwritable scoped channels already at the saved constant value; existing constant keys were preserved.');
+   prepareTiming("targetTracks.complete");
+   prepared={document:{file_version:'0.6.1.0',asset_info:{id:'/SaveGuard/motion-'+new Date().getTime()+'.duf',type:kind==='shape'?'preset_shape':'preset_pose'},scene:{animations:animations}},reset:reset,metrics:{implementation:'restore-scoped-reset-20261021',definitionReads:definitionReads,definitionMillis:definitionMillis,prepareMillis:new Date().getTime()-prepareStarted,nativeImports:importCount,sourceChannels:channels.length,presetChannels:animations.length,resetChannels:reset.length},ready:true,errors:errors,warnings:warnings,assignments:animations,definitionFiles:[],sourceFrame:restore?null:frame,sourceSeconds:restore?null:seconds,sourceFPS:restore?null:fps,targetTime:targetTime,restore:restore};
+   if(embeddedDefinitions.length){prepared.document.modifier_library=embeddedDefinitions;prepared.document.scene.modifiers=embeddedInstances;var identityText=JSON.stringify(embeddedDefinitions).replace(/[\u007f-\uffff]/g,function(c){return '\\u'+('0000'+c.charCodeAt(0).toString(16)).slice(-4);}),identityHash=SaveGuardShapePresetIO.sha(),identityHex='';for(var hi=0;hi<identityText.length;hi++){identityHex+=('0'+identityText.charCodeAt(hi).toString(16)).slice(-2);}identityHash.updateHex(identityHex);prepared.document.asset_info.id='/SaveGuard/embedded-'+identityHash.finish()+'.duf';}
+   var privateReset=[];for(var resetIndex=0;resetIndex<reset.length;resetIndex++){var resetItem=reset[resetIndex],privateKeys=null;if(resetItem.nativeReplacementKeys){privateKeys=[];for(var keyIndex=0;keyIndex<resetItem.nativeReplacementKeys.length;keyIndex++){var keyTuple=resetItem.nativeReplacementKeys[keyIndex],privateTuple=keyTuple.slice(0);if(keyTuple.length===3&&Object.prototype.toString.call(keyTuple[2])==='[object Array]')privateTuple[2]=keyTuple[2].slice(0);privateKeys.push(privateTuple);}}privateReset.push({p:resetItem.p,nativeReplacementKeys:privateKeys,trimFallback:resetItem.trimFallback,trimOrigin:resetItem.trimOrigin});}
+   var captured=snapshotStage.capture(prepared.document);if(execution)snapshotStage.discard(execution.snapshot);execution={snapshot:captured,hasAnimations:animations.length>0,reset:privateReset};
+   if(typeof print==='function')print('SaveGuard motion preparation: '+JSON.stringify(prepared.metrics));return {plan:prepared};
+  }
+  var api={motionActions:true,buildStaticPose:build,buildShape:build,prepare:function(request,cancel){check(cancel);need(prepared&&request.plan===prepared,'Unknown motion plan');var receipt={};issued.push(receipt);return receipt;},apply:function(receipt,cancel){check(cancel);need(issued.indexOf(receipt)>=0,'Unknown/used motion receipt');issued.splice(issued.indexOf(receipt),1);var stage=snapshotStage,token=null,held=false,accepting=false,originalPrimary=null,targetWasSelected=false,selectionChanged=false,r={ok:false,nativeExecuted:false,mutationStarted:false,restorationClaimed:false};function available(){if(r.undoStateUnknown)return false;try{if(env.UndoStack.canPushItems()===true&&env.UndoStack.isInUndoRedo()===false)return true;}catch(e){r.undoError=String(e);}held=false;r.undoStateUnknown=true;r.undoOwnershipLost=true;return false;}function owned(){need(available(),'Owned Undo unavailable; no further scene writes or blind accept/cancel');}try{
+    var io=env.App.getAssetIOMgr();need(!io.isReadingOrWriting()&&!env.Scene.isLoading()&&!env.UndoStack.isInUndoRedo()&&!env.UndoStack.canPushItems(),'Scene I/O or Undo busy');if(execution.hasAnimations){var stageStarted=new Date().getTime();token=stage.create(execution.snapshot);r.temporaryPath=token.path;need(stage.verify(token),'Temporary preset changed');r.stagingMillis=new Date().getTime()-stageStarted;}check(cancel);if(!token&&!execution.reset.length){r.ok=true;r.message='Scoped values already match at the selected frame.';return r;}
+    if(restore&&execution.reset.length){need(env.DzProperty&&typeof env.DzProperty.ResetValue==='number','ResetValue API unavailable');for(var ri=0;ri<execution.reset.length;ri++)need(typeof execution.reset[ri].p.reset==='function','Property reset API unavailable');}
+    var selectionStarted=new Date().getTime();originalPrimary=env.Scene.getPrimarySelection();if(action!=='applyPose'&&!env.pointersAreEqual(originalPrimary,target)){need(typeof env.Scene.setPrimarySelection==='function'&&typeof target.isSelected==='function'&&typeof target.select==='function','Figure selection API unavailable');targetWasSelected=target.isSelected();selectionChanged=true;need(env.Scene.setPrimarySelection(target)!==false,'Cannot address owning figure');}
+    if(/^4\./.test(String(env.App.longVersionString||env.App.versionString||'')))r.selectionMillis=new Date().getTime()-selectionStarted;
+    nativeAtOrigin(env,function(){var undoStarted=new Date().getTime();r.undoBeginAttempted=true;try{env.beginUndo();}catch(beginError){r.undoStateUnknown=true;throw beginError;}if(/^4\./.test(String(env.App.longVersionString||env.App.versionString||'')))r.beginUndoMillis=new Date().getTime()-undoStarted;held=true;owned();var resetStarted=new Date().getTime();for(var ri=0;ri<execution.reset.length;ri++){owned();r.mutationStarted=true;var rt=execution.reset[ri],reason={},extra=excessKeyIndices(rt.p,rt.nativeReplacementKeys,reason);if(extra===null){var why=rt.trimFallback||reason.reason||'unknown';if(!r.resetFallbackReasons)r.resetFallbackReasons={};r.resetFallbackReasons[why]=(r.resetFallbackReasons[why]||0)+1;rt.p.reset(env.DzProperty.ResetValue);r.fullResetChannels=(r.fullResetChannels||0)+1;}else{r.trimmedChannels=(r.trimmedChannels||0)+1;if(rt.trimOrigin==='default')r.defaultTrackTrimChannels=(r.defaultTrackTrimChannels||0)+1;r.deletedExtraKeys=(r.deletedExtraKeys||0)+trimExtraKeys(rt.p,extra,owned);}}r.resetMillis=new Date().getTime()-resetStarted;if(token){owned();r.nativeExecuted=true;r.mutationStarted=true;r.nativeStarted=new Date().getTime();r.nativeCode=io.doLoad(token.path,env.DzAssetIOMgr.MergeFile);if(r.nativeCode!==null&&r.nativeCode!==undefined&&typeof r.nativeCode.valueOf==='function')r.nativeCode=r.nativeCode.valueOf();owned();r.nativeMillis=new Date().getTime()-r.nativeStarted;need(r.nativeCode===0,'Native preset returned '+r.nativeCode);}owned();accepting=true;env.acceptUndo('SaveGuard '+action);held=false;r.undoAccepted=true;r.ok=true;r.message='Native '+action+' completed.';},r,function(){return !r.undoStateUnknown&&(!held||available());});
+   }catch(e){if(e.cleanupError)r.cleanupError=String(e.cleanupError);if(e.temporaryPath)r.temporaryPath=String(e.temporaryPath);if(typeof SaveGuardLastErrorReport!=='undefined')r.errorDetails=SaveGuardLastErrorReport.details(e);r.error=String(e);r.status=r.mutationStarted?'failed-state-unknown':'stopped';if(held&&!accepting&&available())try{if(action==='applyPose'){r.undoCancelAttempted=true;need(env.cancelUndo()!==false,'Undo cancel returned false');held=false;need(env.UndoStack.canPushItems()===false,'Undo cancellation did not return to idle');r.rollbackCompleted=true;r.status='rolled-back';}else{accepting=true;env.acceptUndo('SaveGuard '+action+' - failed attempt');held=false;r.undoAccepted=true;}}catch(u){r.undoError=String(u);r.recoveryRequired=true;}if(held)r.undoStateUnknown=true;
+   }finally{if(selectedPose){selectedPose.blocked=r.undoStateUnknown===true;try{selectedPose.restore();r.selectionReturned=!selectedPose.blocked;}catch(poseSelectionError){r.selectionError=String(poseSelectionError);r.ok=false;r.error=(r.error?r.error+'; ':'')+String(poseSelectionError);}}if(selectionChanged&&!r.undoStateUnknown)try{if(held)owned();if(!targetWasSelected)target.select(false);if(held)owned();need(env.Scene.setPrimarySelection(originalPrimary)!==false,'Cannot restore primary selection');r.selectionReturned=true;}catch(se){r.selectionError=String(se);r.ok=false;r.error=(r.error?r.error+'; ':'')+String(se);}if(token)try{var cleanupStarted=new Date().getTime();r.temporaryRemoved=stage.removeOwned(token)===true;if(!r.temporaryRemoved)r.cleanupError='Owned temporary cleanup failed';}catch(e){r.cleanupError=String(e);}if(token&&cleanupStarted!==undefined)r.cleanupMillis=new Date().getTime()-cleanupStarted;if(r.cleanupError)r.message=(r.message||r.error||'Action failed')+' Temporary cleanup error: '+r.cleanupError;if(typeof print==='function')print('SaveGuard motion RESULT: '+JSON.stringify(r));}return r;},release:function(receipt){var at=issued.indexOf(receipt);if(at>=0)issued.splice(at,1);},close:function(){closed=true;issued=[];prepared=null;if(execution)snapshotStage.discard(execution.snapshot);execution=null;}};return api;
+ }
+ return {beginPoseSelection:beginPoseSelection,endPoseSelection:endPoseSelection,aliasEndpoint:aliasEndpoint,excessKeyIndices:excessKeyIndices,trimExtraKeys:trimExtraKeys,actions:actions,selectedFigure:selectedFigure,nativeAtOrigin:nativeAtOrigin,create:create,evaluate:evaluate,validateKeys:validateKeys,mergeStaticKeys:mergeStaticKeys};
+}());

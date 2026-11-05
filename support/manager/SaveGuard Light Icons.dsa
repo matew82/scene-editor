@@ -1,0 +1,6 @@
+// Presentation only. No scene, property, shader or asset inspection.
+var SaveGuardLightIcons=(function(){
+ function key(row){var kind='neutral';if(row&&row.type==='light'){kind=/^(distant|spot|point)$/.test(row.lightKind||'')?row.lightKind:'generic';if(row.lightAssembly)kind+='-group';}else if(row&&(row.emissive||row.iconEmission))kind='emissive';else if(row&&!row.contextOnly&&row.iconKind==='camera')kind=row.cameraOwnVisible===false?'camera-hidden':row.cameraOwnVisible===true?'camera':'camera-unknown';else if(row&&!row.contextOnly&&/^(character|figure|object|wearable)$/.test(row.iconKind||''))kind=row.iconKind;return kind;}
+ function create(adapter){var cache={};return {key:key,get:function(row){var k=key(row);if(Object.prototype.hasOwnProperty.call(cache,k))return cache[k];cache[k]=null;try{if(!adapter||typeof adapter.lightIconPath!=='function')return null;var p=new Pixmap(adapter.lightIconPath(k));if(!p.isNull()&&Number(p.width)===20&&Number(p.height)===20)cache[k]=p;}catch(ignoredIcon){}return cache[k];}};}
+ return {key:key,create:create};
+}());

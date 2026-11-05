@@ -1,0 +1,838 @@
+var SaveGuardNativeRuntime = (function () {
+    function normal(value) { return String(value || "").replace(/\\/g, "/").replace(/\/$/, ""); }
+    function key(value) { value = normal(value); return /^(?:[A-Za-z]:\/|\/\/)/.test(value) ? value.toLowerCase() : value; }
+    function fail(message) { throw Error(message); }
+    function own(value, name) { return !!value && Object.prototype.hasOwnProperty.call(value, name); }
+    function array(value) { return Object.prototype.toString.call(value) === "[object Array]"; }
+    function nodeSignature(type, extras) { return JSON.stringify([type, extras.slice(0).sort()]); }
+    function validNodeSignatures(values) {
+        var seen = {}, i, j, item, names, signature;
+        if (!array(values) || !values.length) { return false; }
+        for (i = 0; i < values.length; i += 1) {
+            item = values[i]; names = {};
+            if (!item || !/^(node|figure|bone|camera|light)$/.test(item.type) || !array(item.extraTypes)) { return false; }
+            for (j = 0; j < item.extraTypes.length; j += 1) {
+                var name = item.extraTypes[j]; if (typeof name !== "string" || !name || name.indexOf("*") >= 0 || own(names, "$" + name)) { return false; } names["$" + name] = true;
+            }
+            signature = nodeSignature(item.type, item.extraTypes); if (own(seen, signature)) { return false; } seen[signature] = true;
+        }
+        return true;
+    }
+    function validGeometrySignatures(values) {
+        if (values === undefined) { return true; }
+        var seen = {}, i, j, item, signature;
+        if (!array(values)) { return false; }
+        for (i = 0; i < values.length; i += 1) {
+            item = values[i];
+            if (!item || typeof item.type !== "string" || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(item.type) || !array(item.extraTypes)) { return false; }
+            for (j = 0; j < item.extraTypes.length; j += 1) {
+                if (typeof item.extraTypes[j] !== "string" || !item.extraTypes[j] || item.extraTypes[j].indexOf("*") >= 0 || item.extraTypes.indexOf(item.extraTypes[j]) !== j) { return false; }
+            }
+            signature = nodeSignature(item.type, item.extraTypes); if (own(seen, signature)) { return false; } seen[signature] = true;
+        }
+        return true;
+    }
+    function extraTypes(record, inherited) {
+        var result = inherited ? inherited.slice(0) : [], extras = record.extra || [], i;
+        if (!array(extras)) { fail("Invalid saved node extension array."); }
+        for (i = 0; i < extras.length; i += 1) {
+            if (!extras[i] || typeof extras[i].type !== "string" || !extras[i].type) { fail("Saved node extension has no exact type."); }
+            if (result.indexOf(extras[i].type) < 0) { result.push(extras[i].type); }
+        }
+        return result.sort();
+    }
+    function validEntityKinds(values) {
+        var seen = {}, i;
+        if (!array(values) || !values.length || values.length > 21) { return false; }
+        for (i = 0; i < values.length; i += 1) {
+            if (typeof values[i] !== "string" || !/^(camera|light|object|figure|bone|wearable|render-helper)(:emissive|:emission-unknown)?$/.test(values[i]) || own(seen, "$" + values[i])) { return false; }
+            seen["$" + values[i]] = true;
+        }
+        return true;
+    }
+    // Classification is independent of tabs, labels, recognized Genesis names, and preview.type.
+    // The resolver reads verified asset documents; it never asks the current scene for a match.
+    function entityScope(document, ids, resolveAssetDocument, includeDefinitions) {
+        var catalog = SaveGuardSelective.catalog(document, { fullData: true }), rows = {}, states = {}, scopes = {}, cache = {}, resolving = {}, definitions = [], result = [], scopeSerial = 0, i;
+        if (!array(ids) || !ids.length || catalog.errors.length) { fail("Saved entity scope is missing or ambiguous."); }
+        for (i = 0; i < catalog.rows.length; i += 1) { rows["$" + catalog.rows[i].id] = catalog.rows[i]; }
+        function scope(doc, file) {
+            var list = doc && doc.node_library || [], map = {}, children = {}, j, record, parent;
+            if (!array(list)) { fail("Saved node definitions must be an array."); }
+            for (j = 0; j < list.length; j += 1) {
+                record = list[j];
+                if (!record || typeof record.id !== "string" || !record.id || own(map, "$" + record.id)) { fail("Saved node definition IDs are missing or ambiguous."); }
+                map["$" + record.id] = record;
+                parent = SaveGuardSelective.parseURI(record.parent || "");
+                if (parent.kind === "local" && !parent.nodePath && !parent.query) {
+                    if (!own(children, "$" + parent.fragment)) { children["$" + parent.fragment] = []; }
+                    children["$" + parent.fragment].push(record);
+                }
+            }
+            scopeSerial += 1; return { document: doc, file: file, map: map, list: list, children: children, identity: scopeSerial };
+        }
+        var root = scope(document, document.asset_info && document.asset_info.id || "");
+        function absolute(file, base) {
+            if (file.charAt(0) === "/") { return file; }
+            if (!base || base.charAt(0) !== "/") { fail("A relative entity definition has no verified source root."); }
+            var parts = (base.substring(0, base.lastIndexOf("/") + 1) + file).split("/"), out = [], j;
+            for (j = 0; j < parts.length; j += 1) {
+                if (parts[j] === "..") { if (!out.length) { fail("Entity definition escapes its content root."); } out.pop(); }
+                else if (parts[j] && parts[j] !== ".") { out.push(parts[j]); }
+            }
+            return "/" + out.join("/");
+        }
+        function definition(uri, current) {
+            var chain = [], parsed, selectedScope, token, record, inherited, result, extras, j, file, loaded, item;
+            while (true) {
+                parsed = SaveGuardSelective.parseURI(uri); selectedScope = current;
+                if (!parsed.fragment || parsed.nodePath || parsed.query || (parsed.kind !== "local" && parsed.kind !== "external")) { fail("Entity scope requires an exact saved node definition URL."); }
+                if (parsed.kind === "external") {
+                    file = absolute(parsed.file, current.file);
+                    if (!own(scopes, "$" + file)) {
+                        loaded = typeof resolveAssetDocument === "function" && resolveAssetDocument(file);
+                        if (!loaded || loaded.verified !== true || !loaded.document) { fail("Entity definition is missing or unverified: " + file); }
+                        scopes["$" + file] = scope(loaded.document, file);
+                    }
+                    selectedScope = scopes["$" + file];
+                }
+                // Authored asset IDs never replace the verified document identity.
+                token = "$" + selectedScope.identity + "#" + parsed.fragment;
+                if (own(resolving, token)) { fail("Entity definition inheritance is cyclic."); }
+                if (own(cache, token)) { inherited = cache[token]; break; }
+                record = selectedScope.map["$" + parsed.fragment];
+                if (!record) { fail("The exact saved node definition is missing: " + uri); }
+                resolving[token] = true; chain.push({ token: token, record: record, scope: selectedScope });
+                if (!record.source) { inherited = { type: "node", follower: false, render: false, extraTypes: [] }; break; }
+                uri = record.source; current = selectedScope;
+            }
+            while (chain.length) {
+                item = chain.pop(); token = item.token; record = item.record; selectedScope = item.scope;
+            result = { type: own(record, "type") ? record.type : inherited.type, follower: inherited.follower, render: inherited.render, scope: selectedScope, id: record.id, extraTypes: extraTypes(record, inherited.extraTypes) };
+            if (typeof result.type !== "string" || !/^(node|figure|bone|camera|light)$/.test(result.type)) { fail("Unsupported saved entity type: " + result.type); }
+            if (record.presentation && own(record.presentation, "type")) {
+                if (typeof record.presentation.type !== "string") { fail("Invalid saved entity presentation type."); }
+                result.follower = /^Follower(?:\/|$)/.test(record.presentation.type);
+            }
+            extras = record.extra || [];
+            if (!array(extras)) { fail("Invalid saved entity extension array."); }
+            for (j = 0; j < extras.length; j += 1) { if (extras[j] && /^studio\/node\/(environment|tone_mapper)$/.test(extras[j].type)) { result.render = true; } }
+                delete resolving[token]; cache[token] = result; definitions.push(result); inherited = result;
+            }
+            return inherited;
+        }
+        function state(id) {
+            var row = rows["$" + id];
+            if (!row) { fail("Saved entity is absent from the source instance list: " + id); }
+            if (!own(states, "$" + id)) { states["$" + id] = definition(row.url, root, 0); }
+            return states["$" + id];
+        }
+        function kindOf(meta) { return meta.render ? "render-helper" : meta.follower ? "wearable" : meta.type === "node" ? "object" : meta.type; }
+        var seenIds = {};
+        for (i = 0; i < ids.length; i += 1) {
+            var id = ids[i], row = rows["$" + id], meta = state(id), kind = kindOf(meta), parent = row && row.parentId, seenParents = {};
+            if (typeof id !== "string" || own(seenIds, "$" + id)) { fail("Duplicate saved entity selection."); } seenIds["$" + id] = true;
+            if (row.conformTarget || row.wearable) { kind = "wearable"; }
+            while (parent) {
+                if (parent === id || own(seenParents, "$" + parent)) { fail("Saved entity parent hierarchy is cyclic."); } seenParents["$" + parent] = true;
+                if (state(parent).type === "figure" && kind !== "bone" && kind !== "camera" && kind !== "light") { kind = "wearable"; }
+                parent = rows["$" + parent].parentId;
+            }
+            if (row.renderSettingsNode) { kind = "render-helper"; }
+            if (row.emissive === true) { kind += ":emissive"; }
+            else if (row.emissionUnknown === true) { kind += ":emission-unknown"; }
+            result.push({ id: id, kind: kind, nodeType: meta.type, extraTypes: extraTypes(document.scene.nodes[row.rowIndex], meta.extraTypes) });
+        }
+        if (includeDefinitions) {
+            // A local library may contain bone definitions instantiated with its selected root.
+            for (i = 0; i < root.list.length; i += 1) { definition("#" + encodeURIComponent(root.list[i].id), root, 0); }
+            // Inspect linked definition descendants in referenced external assets as well.
+            var expanded = {}, at = 0;
+            while (at < definitions.length) {
+                var meta = definitions[at], list = meta.scope.children["$" + meta.id] || [], token = "$" + meta.scope.identity + "#" + meta.id, j;
+                at += 1; if (own(expanded, token)) { continue; } expanded[token] = true;
+                result.push({ definition: meta.scope.file + "#" + meta.id, kind: kindOf(meta), nodeType: meta.type, extraTypes: meta.extraTypes });
+                for (j = 0; j < list.length; j += 1) {
+                    var p = SaveGuardSelective.parseURI(list[j].parent || "");
+                    if (p.kind === "local" && !p.nodePath && !p.query && p.fragment === meta.id) { definition("#" + encodeURIComponent(list[j].id), meta.scope, 0); }
+                }
+            }
+        }
+        return result;
+    }
+    // Reuse code-owned contracts within the implemented DAZ 4/6 engine families.
+    // Provenance remains attached to the actual Windows acceptance build.
+    function hostSupported(env){env=env||{};var b=String(env.buildId||env.App&&env.App.longVersionString||'');if(!/^(4|6)\./.test(b))return false;if(env.platform!=='Windows'&&env.platform!=='macOS')return false;var app=env.App,scene=env.Scene,undo=env.UndoStack;if(!app||!scene||!undo)return false;var required=[[app,'getAssetIOMgr'],[app,'getTempPath'],[app,'getContentMgr'],[scene,'getPrimarySelection'],[scene,'getNumNodes'],[undo,'canPushItems'],[undo,'isInUndoRedo'],[env,'beginUndo'],[env,'acceptUndo'],[env,'cancelUndo'],[env,'pointersAreEqual']];if(typeof scene.getNodeList!=='function'&&(typeof scene.getNumNodes!=='function'||typeof scene.getNode!=='function'))return false;for(var i=0;i<required.length;i++)if(typeof required[i][0][required[i][1]]!=='function')return false;try{var io=app.getAssetIOMgr();return !!io&&typeof io.doLoad==='function'&&typeof io.isReadingOrWriting==='function'&&typeof (env.DzAssetIOMgr?env.DzAssetIOMgr.MergeFile:env.MergeFile)==='number'&&isFinite(env.DzAssetIOMgr?env.DzAssetIOMgr.MergeFile:env.MergeFile);}catch(e){return false;}}
+    function nativeEvidenceHost(env){var b=String(env.buildId||env.App&&env.App.longVersionString||'');return env.platform==='Windows'&&(b==='4.24.0.4'||b==='6.25.2026.14722');}
+    function portProfiles(env,profiles){var result=JSON.parse(JSON.stringify(profiles)),build=String(env.buildId||env.App&&env.App.longVersionString||''),template=build.charAt(0)==='4'?'4.24.0.4':'6.25.2026.14722';if(nativeEvidenceHost(env)||!hostSupported(env))return result;for(var group in result)if(Object.prototype.hasOwnProperty.call(result,group)&&Object.prototype.toString.call(result[group])==='[object Array]')for(var i=0;i<result[group].length;i++){var p=result[group][i];if(p.platform==='Windows'&&p.buildId===template){p.evidencePlatform='Windows';p.evidenceBuildId=p.buildId;p.nativePlatformVerified=false;p.portabilityMode='api-checked';p.platform=env.platform;p.buildId=build;}}return result;}
+    function create(env, storage, profiles, ports) {
+        // Retain private evidence records; callers cannot widen an issued action by editing arrays.
+        profiles = portProfiles(env,profiles || { apply: [], poseTarget: [], restore: [] });
+        ports = ports || {}; // Reviewed code-owned reconstruction ports; never source DUF/settings.
+        var build = String(env.buildId || ""), serial = 0, opened = [], closed = false;
+        var kinds = { loadCamera: "merge", loadLight: "merge", loadLightAssembly: "merge", loadCharacter: "merge", loadWearable: "merge", loadObject: "merge",
+            applyPose: "pose", applyShape: "shape", applyTransforms:"pose",restoreSavedPose:"pose",restoreSavedShape:"shape", applyMaterials: "materials", applyRenderSettings: "render" };
+        function matching(group, kind) {
+            var list = profiles[group] || [], result = [], i, p;
+            for (i = 0; i < list.length; i += 1) { p = list[i];
+                if (p && p.buildId === build && p.platform === env.platform && (env.platform === "Windows" || env.platform === "macOS") &&
+                        p.verified === true && p.evidenceId && (!kind || p.kind === kind)) { result.push(p); }
+            }
+            return result;
+        }
+        function adapter(kind, record) {
+            var selected = record && record.adapter || kind + "-basic";
+            var allowed = { merge: ["merge-basic"], pose: ["pose-basic", "pose-erc-v1"],
+                materials: ["materials-basic", "materials-extended"], render: ["render-basic", "render-extended"] };
+            return allowed[kind] && allowed[kind].indexOf(selected) >= 0 ? selected : null;
+        }
+        function actionProfiles(action, kind) {
+            var figureAction=action==="loadCharacter"||action==="loadWearable",figureEvidence=matching("figureLoad","figure-load");if(figureAction&&(figureEvidence.length!==1||!figureEvidence[0].characterActions||figureEvidence[0].characterActions.indexOf(action)<0))return [];var lookupAction=figureAction?"loadObject":action;
+            var candidates = matching("apply", kind), result = [], i, j, record, keys, seen, valid;
+            for (i = 0; i < candidates.length; i += 1) {
+                record = candidates[i]; keys = record.actionKeys; seen = {}; valid = true;
+                if (kind === "merge" && (!validEntityKinds(record.allowedEntityKinds) || !validNodeSignatures(record.nodeSignatures) || !validGeometrySignatures(record.geometrySignatures))) { continue; }
+                if (kind === "merge" && record.geometrySignatures && record.geometrySignatures.length &&
+                        ((record.meshAudit !== "static-polygon-v1" || typeof SaveGuardStaticMeshAudit === "undefined") &&
+                         (record.meshAudit !== "static-prop-preview-v1" || typeof SaveGuardStaticPropAudit === "undefined" || !record.shaderSignatures || !array(record.actionKeys) || record.actionKeys.length !== 1 || (record.actionKeys[0] !== "loadObject" && record.actionKeys[0] !== "loadLightAssembly")) || (record.destinationScope !== "empty-clean-v1" && record.destinationScope !== "additive-static-v1"))) { continue; }
+                if (Object.prototype.toString.call(keys) !== "[object Array]" || !keys.length || keys.length > 8) { continue; }
+                for (j = 0; j < keys.length; j += 1) {
+                    if (typeof keys[j] !== "string" || kinds[keys[j]] !== kind || Object.prototype.hasOwnProperty.call(seen, "$" + keys[j])) { valid = false; break; }
+                    seen["$" + keys[j]] = true;
+                }
+                if (valid && Object.prototype.hasOwnProperty.call(seen, "$" + lookupAction)) { result.push(record); }
+            }
+            return result;
+        }
+        function targetProfile(action) { var list=matching("targetActions"),found=[];for(var ti=0;ti<list.length;ti++)if(list[ti].actionKey===action&&list[ti].undoRedoVerified===true)found.push(list[ti]);return found.length===1?found[0]:null; }
+        function capability(action) {if(typeof SaveGuardMotionActions!=="undefined"&&SaveGuardMotionActions.actions[action])return {enabled:!closed&&hostSupported(env),nativeVerified:false,portabilityMode:"api-checked",buildId:build,evidenceId:"backups/five-actions-candidate-20261021/evidence-timing-v3/result.json",kind:SaveGuardMotionActions.actions[action]==="shape"?"shape":"pose",adapter:"five-saved-actions",reason:hostSupported(env)?"Native API route; full action acceptance not claimed":"Required native APIs unavailable"};if(action==="applyShape"){var ready=!closed&&hostSupported(env)&&typeof SaveGuardShapeManager!=="undefined";return {enabled:ready,nativeVerified:false,portabilityMode:"api-checked",buildId:build,evidenceId:"backups/apply-shape-native-integration-r3-20261021/validation.json",kind:"shape",adapter:"native-shaping-preset-complete-inputs",reason:ready?"Generic native preset acceptance pending; complete-input candidate":"Shape APIs are unavailable"};}if(action==="applyRenderSettings"){var rp=targetProfile(action);return !closed&&rp&&typeof SaveGuardRenderManager!=="undefined"?{enabled:true,nativeVerified:nativeEvidenceHost(env),portabilityMode:!nativeEvidenceHost(env)?'api-checked':null,buildId:build,evidenceId:rp.evidenceId,kind:"render",adapter:"static-render-properties"}:{enabled:false,nativeVerified:false,buildId:build,reason:"Render restoration requires native acceptance."};}
+            if(action==="applyMaterials"){var mp=targetProfile(action);return !closed&&mp&&typeof SaveGuardMaterialsManager!=="undefined"?{enabled:true,nativeVerified:nativeEvidenceHost(env),portabilityMode:!nativeEvidenceHost(env)?'api-checked':null,buildId:build,evidenceId:mp.evidenceId,kind:"materials",adapter:"selected-object-materials"}:{enabled:false,nativeVerified:false,buildId:build,reason:"Object materials require native acceptance on this host."};}
+            if(action==="applyPose"||action==="loadWearable"){var tp=targetProfile(action),moduleReady=action==="applyPose"?typeof SaveGuardPoseManager!=="undefined":typeof SaveGuardWearableManager!=="undefined";return !closed&&tp&&moduleReady?{enabled:true,nativeVerified:nativeEvidenceHost(env),portabilityMode:!nativeEvidenceHost(env)?'api-checked':null,buildId:build,evidenceId:tp.evidenceId,kind:kinds[action],adapter:action==="applyPose"?"native-static-pose":"existing-target-wearable"}:{enabled:false,nativeVerified:false,buildId:build,reason:"This target operation requires separate native acceptance on this host."};}
+            var kind = kinds[action], list = action === "restoreVersion" ? matching("restore") : actionProfiles(action, kind), needs = [], i, records, evidence,
+                selected = list.length === 1 && kind ? adapter(kind, list[0]) : null;
+            if (action !== "restoreVersion" && !kind) { list = []; }
+            if (kind && !selected) { list = []; }
+            if (kind === "pose") { needs = [["poseTarget", "pose-target"], selected === "pose-erc-v1" ? ["poseExtended", "pose-erc"] : ["poseControls", "pose-controls"]]; }
+            if (kind === "materials") { needs = [["preset", "materials-selection"], selected === "materials-extended" ? ["materialExtended", "material-values-extended"] : ["materialValues", "material-values"]]; }
+            if (kind === "render") { needs = selected === "render-extended" ? [["renderExtended", "render-extended"]] : [["preset", "render-basic"]]; }
+            if (!closed && list.length === 1) {
+                evidence = [list[0].evidenceId]; if (selected) { evidence.push(selected); }
+                for (i = 0; i < needs.length; i += 1) {
+                    records = matching(needs[i][0], needs[i][1]);
+                    if (needs[i][0] === "materialValues" || needs[i][0] === "materialExtended") {
+                        var shaderKeys = {}, j, shaderKey;
+                        if (!records.length) { return { enabled: false, nativeVerified: false, buildId: build, reason: "This action requires semantic material validation." }; }
+                        for (j = 0; j < records.length; j += 1) {
+                            shaderKey = "$" + JSON.stringify(records[j].sourceExtraTypes || []);
+                            if (Object.prototype.hasOwnProperty.call(shaderKeys, shaderKey)) { return { enabled: false, nativeVerified: false, buildId: build, reason: "Ambiguous semantic material validation." }; }
+                            shaderKeys[shaderKey] = true; evidence.push(records[j].evidenceId);
+                        }
+                    } else {
+                        if (records.length !== 1) { return { enabled: false, nativeVerified: false, buildId: build, reason: "This action requires separate native validation for " + needs[i][1] + "." }; }
+                        evidence.push(records[0].evidenceId);
+                    }
+                }
+                return { enabled: true, nativeVerified:nativeEvidenceHost(env),portabilityMode:!nativeEvidenceHost(env)?'api-checked':null, buildId: build, evidenceId: evidence.join("|"), kind: kind || "restore", adapter: selected };
+            }
+            return { enabled: false, nativeVerified: false, buildId: build, reason: "This saved-content action is unavailable on this DAZ Studio build." };
+        }
+        function flags() {
+            var result = { restoreVersion: capability("restoreVersion").enabled }, name;
+            for (name in kinds) { if (Object.prototype.hasOwnProperty.call(kinds, name)) { result[name] = capability(name).enabled; } }
+            return result;
+        }
+        function namespace() { serial += 1; return "SaveGuard_" + new Date().getTime() + "_" + Math.floor(Math.random() * 0x100000000).toString(16) + "_" + serial; }
+        function existingIds(deep) { return SaveGuardSceneInventory.ids(env.Scene,deep===true); }
+        function newStager() {
+            var records=[];
+            function allocate() {
+            if (typeof env.App.getTempPath !== "function") { fail("DAZ temporary storage is unavailable."); }
+            var tempInfo = new env.DzFileInfo(String(env.App.getTempPath()));
+            if (!tempInfo.exists() || !tempInfo.isDir()) { fail("DAZ temporary storage does not exist."); }
+            // Resolve the system temporary root first; macOS may legitimately alias its parent.
+            var base = normal(tempInfo.canonicalFilePath());
+            if (!base) { fail("DAZ temporary storage has no canonical path."); }
+            var root = normal(storage.reserve(base, "saveguard-apply"));
+            function owned(path, approved) {
+                path = normal(path); approved = normal(approved);
+                if (key(approved) !== key(root) || key(root).indexOf(key(base) + "/") !== 0 ||
+                        (key(path) !== key(root) && key(path).indexOf(key(root) + "/") !== 0)) { return false; }
+                var cursor = path, info;
+                while (true) {
+                    info = new env.DzFileInfo(cursor);
+                    if (!info.exists() || !info.isDir() || info.isSymLink() || key(info.canonicalFilePath()) !== key(cursor)) { return false; }
+                    if (key(cursor) === key(root)) { return true; }
+                    cursor = normal(info.path());
+                    if (key(cursor) !== key(root) && key(cursor).indexOf(key(root) + "/") !== 0) { return false; }
+                }
+            }
+            if (!owned(root, root)) { fail("The new action staging directory could not be verified."); }
+            function removeRoot(){if(!new env.DzFileInfo(root).exists())return true;if(!owned(root,root))fail("Owned action root changed: "+root);if(!new env.DzDir(base).rmdir(root.substring(base.length+1)))fail("Cannot remove owned empty action root: "+root);return true;}
+            try{return {stager:SaveGuardApplyHost.createStager(storage,env,root,owned),removeRoot:removeRoot};}catch(e){try{removeRoot();}catch(cleanupError){e.cleanupError=String(cleanupError.message||cleanupError);}throw e;}
+        }
+
+            function release(token){var item=null;for(var i=0;i<records.length;i++)if(records[i].token===token)item=records[i];if(!item)return false;if(item.released){if(item.error)fail(item.error);return true;}item.released=true;var errors=[];try{if(item.stager.release(token)!==true)errors.push("Owned payload cleanup returned false");}catch(e){errors.push(String(e.message||e));}try{item.removeRoot();}catch(e2){errors.push(String(e2.message||e2));}if(errors.length){item.error=errors.join("; ");fail(item.error);}return true;}
+            return {stage:function(document,sourcePath){var item=allocate();try{item.token=item.stager.stage(document,sourcePath);records.push(item);return item.token;}catch(e){try{item.removeRoot();}catch(cleanupError){e.cleanupError=(e.cleanupError?e.cleanupError+"; ":"")+String(cleanupError.message||cleanupError);}throw e;}},verify:function(token){for(var i=0;i<records.length;i++)if(records[i].token===token&&!records[i].released)return records[i].stager.verify(token);return false;},release:release};
+        }
+        function createApplyHost(info) {
+            if (closed || !info || !info.request || !info.resolver) { fail("The prepared action context is unavailable."); }
+            var action = info.request.actionKey, kind = kinds[action], acceptedCapability = capability(action), selected = acceptedCapability.adapter;
+            if (acceptedCapability.enabled !== true) { fail("This saved-content action is unavailable on this DAZ Studio build."); }
+            if(build.indexOf("6.")===0&&info.context.lowMemoryMode===true)fail("DAZ6 loading requires Low RAM mode OFF; the streaming path is not implemented for this engine.");
+            if(SaveGuardMinimalNative.eligible(info.request)){var minimalHost=SaveGuardMinimalNative.create(env,info,newStager),minimalClose=minimalHost.close;minimalHost.close=function(){var value=minimalClose.apply(minimalHost,arguments),index=opened.indexOf(minimalHost);if(index>=0)opened.splice(index,1);return value;};opened.push(minimalHost);return minimalHost;}
+            if(action==="applyRenderSettings"){var rh=SaveGuardRenderManager.create(env,info,targetProfile(action)),rc=rh.close;rh.close=function(){var v=rc.apply(rh,arguments),ri=opened.indexOf(rh);if(ri>=0)opened.splice(ri,1);return v;};opened.push(rh);return rh;}
+            if(typeof SaveGuardMotionActions!=="undefined"&&SaveGuardMotionActions.actions[action]){var mh=SaveGuardMotionActions.create(env,info),mc=mh.close;mh.close=function(){var r=mc.apply(mh,arguments),i=opened.indexOf(mh);if(i>=0)opened.splice(i,1);return r;};opened.push(mh);return mh;}
+            if(action==="applyShape"){var sh=SaveGuardShapeManager.create(env,info),sc=sh.close;sh.close=function(){var v=sc.apply(sh,arguments),si=opened.indexOf(sh);if(si>=0)opened.splice(si,1);return v;};opened.push(sh);return sh;}
+            if(action==="applyMaterials"){var mh=SaveGuardMaterialsManager.create(env,info,targetProfile(action),newStager),mc=mh.close;mh.close=function(){var v=mc.apply(mh,arguments),mi=opened.indexOf(mh);if(mi>=0)opened.splice(mi,1);return v;};opened.push(mh);return mh;}
+            if(action==="applyPose"||action==="loadWearable"){var targetHost;if(action==="applyPose")targetHost=SaveGuardPoseManager.create(env,info,targetProfile(action),newStager);else{var wearableProfiles=matching("figureLoad","figure-load");if(wearableProfiles.length!==1)fail("Verified figure import profile is unavailable");targetHost=SaveGuardWearableManager.create(env,info,wearableProfiles[0],newStager);}var targetClose=targetHost.close;targetHost.close=function(){var value=targetClose.apply(targetHost,arguments),at=opened.indexOf(targetHost);if(at>=0)opened.splice(at,1);return value;};opened.push(targetHost);return targetHost;}
+            if((action==="loadObject"||action==="loadCharacter"||action==="loadWearable")&&typeof SaveGuardFigureLoad!=="undefined"){
+                var figureProfiles=matching("figureLoad","figure-load"),figureProfile=figureProfiles.length===1?figureProfiles[0]:null,figureCandidates={},hasCandidate=false,figureRows=info.context.planningDocument.scene.nodes||[],figureIndex;
+                if(figureProfile){for(figureIndex=0;figureIndex<figureRows.length;figureIndex++){var figureRow=figureRows[figureIndex];if(typeof figureRow.url==="string"&&figureProfile.nodeUrls.indexOf(decodeURIComponent(figureRow.url))>=0){figureCandidates["$"+figureRow.id]=true;hasCandidate=true;}}}
+                if(hasCandidate){var figurePlan=SaveGuardSelective.plan(info.context.planningDocument,[info.request.sourceId],{fullData:true,preserveAnimation:info.context.preserveAnimation===true,resolveAssetDocument:info.resolver.resolveAssetDocument});if(!figurePlan.ready)fail("Figure selection closure is incomplete.");for(figureIndex=0;figureIndex<figurePlan.nodeIds.length;figureIndex++)if(figureCandidates["$"+figurePlan.nodeIds[figureIndex]]){var figureHost=SaveGuardFigureLoad.create(env,info,figureProfile,newStager);var closeFigure=figureHost.close;figureHost.close=function(){var result=closeFigure.apply(figureHost,arguments),index=opened.indexOf(figureHost);if(index>=0)opened.splice(index,1);return result;};opened.push(figureHost);return figureHost;}}
+            }
+            if(action==="loadCharacter"||action==="loadWearable")fail("Character/wearable action requires an accepted figure import scope.");
+            var entityProfile = kind === "merge" ? actionProfiles(action, kind)[0] : null,
+                entityDeepValidation = info.context && info.context.deepValidation === true, entityContext = info.context, entityDocument = info.context && info.context.planningDocument,
+                entityResolver = info.resolver, entitySourceId = info.request.sourceId, initialEntity = null, entityPlan = null,
+                entityProvider = info.context && info.context.provider, providerPins = {}, resolverPins = {}, entityFingerprint = null,
+                entityFingerprintFunction = null, entityFingerprintOwner = null, entityLowMemoryMode = info.context && info.context.lowMemoryMode, entityAssetFingerprints = {},
+                entityExistingIds = null, entityPayloadNamespace = null, entityPayloadDigest = null, entitySnapshotOwner = null, entitySnapshotFunction = null;
+            if (kind === "merge") {
+                if (typeof SaveGuardFullDUF === "undefined" || typeof SaveGuardFullDUF.structuralFingerprint !== "function") { fail("Merge source integrity requires the bounded reader fingerprint helper."); }
+                entityFingerprintOwner = SaveGuardFullDUF; entityFingerprintFunction = SaveGuardFullDUF.structuralFingerprint;
+                if (entityContext.nativeSelected === true) { if (typeof SaveGuardCacheSnapshot === "undefined" || typeof SaveGuardCacheSnapshot.capture !== "function") { fail("Selected cache snapshot API unavailable."); } entitySnapshotOwner = SaveGuardCacheSnapshot; entitySnapshotFunction = SaveGuardCacheSnapshot.capture; }
+                var providerNames = ["verifySource", "groups", "listRecords", "readRecords", "readEnvelope", "readRecord", "readSourceEvidence", "readRecordsWithEvidence"], pi, pn;
+                if (!entityProvider) { fail("A retained merge source provider is required."); }
+                for (pi = 0; pi < providerNames.length; pi += 1) {
+                    pn = providerNames[pi]; providerPins[pn] = entityProvider[pn];
+                    if (pi < 4 && typeof providerPins[pn] !== "function") { fail("The merge source provider is incomplete."); }
+                }
+                var resolverNames = ["verifyAll", "resolveAssetDocument", "resolveExternal"];
+                for (pi = 0; pi < resolverNames.length; pi += 1) {
+                    pn = resolverNames[pi]; resolverPins[pn] = entityResolver[pn]; if (typeof resolverPins[pn] !== "function") { fail("The merge dependency resolver is incomplete."); }
+                }
+                entityExistingIds = existingIds().slice(0);
+            }
+            function mergeSourceIntegrity() {
+                if (info.context !== entityContext || entityContext.planningDocument !== entityDocument || entityContext.provider !== entityProvider ||
+                        info.resolver !== entityResolver || (entityContext.deepValidation === true) !== entityDeepValidation || entityContext.lowMemoryMode !== entityLowMemoryMode ||
+                        SaveGuardFullDUF !== entityFingerprintOwner || entityFingerprintOwner.structuralFingerprint !== entityFingerprintFunction) { fail("The retained merge source identity changed."); }
+                var name;
+                if (entitySnapshotOwner && (SaveGuardCacheSnapshot !== entitySnapshotOwner || entitySnapshotOwner.capture !== entitySnapshotFunction)) { fail("Selected cache snapshot API changed."); }
+                for (name in providerPins) { if (own(providerPins, name) && entityProvider[name] !== providerPins[name]) { fail("The retained merge source provider method changed."); } }
+                for (name in resolverPins) { if (own(resolverPins, name) && entityResolver[name] !== resolverPins[name]) { fail("The retained merge dependency resolver changed."); } }
+                if (providerPins.verifySource.call(entityProvider) !== true || resolverPins.verifyAll.call(entityResolver) !== true) { fail("The saved merge source or dependencies changed."); }
+                if (!entityDeepValidation) { return; }
+                var digest = entitySnapshotFunction ? entitySnapshotFunction.call(entitySnapshotOwner, entityDocument) : entityFingerprintFunction.call(entityFingerprintOwner, entityDocument, { lowMemoryMode: entityLowMemoryMode === true }).digest;
+                if (entityFingerprint === null) { entityFingerprint = digest; }
+                else if (digest !== entityFingerprint) { fail("The retained saved merge document changed."); }
+            }
+            function mergeAssetDocument(file) {
+                var loaded = resolverPins.resolveAssetDocument.call(entityResolver, file);
+                if (!loaded || loaded.verified !== true || !loaded.document) { fail("The saved entity definition is missing or unverified."); }
+                if (typeof loaded.verify === "function" && loaded.verify() !== true) { fail("The saved entity definition file changed."); }
+                if (!entityDeepValidation) { return loaded; }
+                var digest = entitySnapshotFunction ? entitySnapshotFunction.call(entitySnapshotOwner, loaded.document) : entityFingerprintFunction.call(entityFingerprintOwner, loaded.document, { lowMemoryMode: entityLowMemoryMode === true }).digest, k = "$" + file;
+                if (own(entityAssetFingerprints, k) && entityAssetFingerprints[k] !== digest) { fail("A retained external entity definition document changed."); }
+                entityAssetFingerprints[k] = digest; return loaded;
+            }
+            function geometryCoverage(document) {
+                var definitions = document.geometry_library || [], signatures = entityProfile.geometrySignatures || [], nodes = document.scene.nodes || [], i, j;
+                function accept(record, instance) {
+                    if (!record || typeof record.type !== "string" || record.source) { fail("Geometry scope requires a complete exact saved definition."); }
+                    var extras = extraTypes(record), signature, matched = false, k;
+                    if (instance) { extras = extraTypes(instance, extras); }
+                    signature = nodeSignature(record.type, extras);
+                    for (k = 0; k < signatures.length; k += 1) { if (signature === nodeSignature(signatures[k].type, signatures[k].extraTypes)) { matched = true; break; } }
+                    if (!matched) { fail("Native evidence does not cover the exact saved geometry signature: " + signature); }
+                }
+                function lookup(uri) {
+                    var ref = SaveGuardSelective.parseURI(uri), records = definitions, found = null, k;
+                    if (ref.nodePath || ref.query || (ref.kind !== "local" && ref.kind !== "external")) { fail("Geometry scope requires an exact saved definition reference."); }
+                    if (ref.kind === "external") {
+                        if (!ref.file || ref.file.charAt(0) !== "/") { fail("Geometry scope requires a verified absolute content asset path."); }
+                        records = mergeAssetDocument(ref.file).document.geometry_library || [];
+                    }
+                    if (!array(records)) { fail("Saved geometry definitions are unavailable."); }
+                    for (k = 0; k < records.length; k += 1) { if (records[k] && records[k].id === ref.fragment) { if (found) { fail("Saved geometry definition is ambiguous."); } found = records[k]; } }
+                    if (!found) { fail("The exact saved geometry definition is missing."); } return found;
+                }
+                if (!array(definitions)) { fail("Saved geometry definitions are unavailable."); }
+                for (i = 0; i < definitions.length; i += 1) { accept(definitions[i], null); }
+                for (i = 0; i < nodes.length; i += 1) {
+                    var instances = nodes[i].geometries || []; if (!array(instances)) { fail("Saved geometry instances are malformed."); }
+                    for (j = 0; j < instances.length; j += 1) { accept(lookup(instances[j].url), instances[j]); }
+                }
+            }
+            function payloadDigest(built) {
+                return entityFingerprintFunction.call(entityFingerprintOwner, { document: built.document, idMap: built.idMap,
+                    dependencies: built.dependencies || [], placement: built.placement || null }, { lowMemoryMode: entityLowMemoryMode === true }).digest;
+            }
+            function verifyExpectedPayload(built) {
+                // Fingerprint first: reject accessors before inspecting caller-controlled fields.
+                if (entityDeepValidation) { payloadDigest(built); }
+                var match = /^\/SaveGuard\/([A-Za-z][A-Za-z0-9_-]{2,80})\.duf$/.exec(built.document.asset_info && built.document.asset_info.id || ""), namespace, k, mapped;
+                if (!match) { fail("The staged payload has no exact extraction namespace."); } namespace = match[1];
+                for (k in built.idMap) { if (own(built.idMap, k)) {
+                    mapped = built.idMap[k];
+                    if (typeof mapped !== "string" || mapped.substring(0, namespace.length + 1) !== namespace + "_" || !/^[1-9][0-9]*$/.test(mapped.substring(namespace.length + 1))) { fail("Every extracted ID must belong to the same independently checked namespace."); }
+                } }
+                if (entityPayloadNamespace !== null && entityPayloadNamespace !== namespace) { fail("The prepared extraction namespace changed."); }
+                if (!entityDeepValidation) { entityPayloadNamespace = namespace; return; }
+                if (entityPayloadDigest === null) {
+                    mergeSourceIntegrity();
+                    // The authoritative reader performs the same explicit full-record reread in
+                    // Low RAM mode. No projected numeric arrays stand in for complete payloads.
+                    var expected = SaveGuardSelective.extract(entityDocument, entityPlan, { namespace: namespace, existingIds: entityExistingIds,
+                        resolveExternal: function (file, dependency) { return resolverPins.resolveExternal.call(entityResolver, file, dependency); },
+                        readRecords: function (requests) {
+                            mergeSourceIntegrity(); var records = providerPins.readRecords.call(entityProvider, requests); mergeSourceIntegrity(); return records;
+                        } });
+                    try {
+                        if (JSON.stringify(expected.idMap) !== JSON.stringify(built.idMap)) { fail("The extracted ID mapping differs from independent source extraction."); }
+                        entityPayloadDigest = payloadDigest(expected); entityPayloadNamespace = namespace;
+                    } finally { expected = null; }
+                    mergeSourceIntegrity();
+                }
+                if (payloadDigest(built) !== entityPayloadDigest) { fail("The staged payload differs from independent complete source extraction."); }
+            }
+            function planRecord(locator) {
+                var m = /^(scene\.[A-Za-z_]+|[A-Za-z_]+)\[([0-9]+)\]$/.exec(locator), list;
+                if (!m) { fail("Unsupported independent merge record locator."); }
+                list = m[1].indexOf("scene.") === 0 ? entityDocument.scene[m[1].substring(6)] : entityDocument[m[1]];
+                if (!array(list) || !list[Number(m[2])]) { fail("An independently planned saved record is missing."); }
+                return { group: m[1], record: list[Number(m[2])] };
+            }
+            // Compare all JSON plan fields; object insertion order is not plan semantics.
+            function closureDifference(left,right){
+                function valueSummary(value){if(value===null)return {type:"null"};var type=typeof value;if(type==="string")return {type:type,value:value.substring(0,160),length:value.length};if(type==="number"||type==="boolean")return {type:type,value:value};return {type:type,array:array(value),length:array(value)?value.length:null};}
+                function difference(at,reason,a,b){return {path:at.substring(0,500),reason:reason,extracted:valueSummary(a),independent:valueSummary(b)};}
+                var stack=[{a:left,b:right,at:"plan",entered:false}],ancestorsA=[],ancestorsB=[],frame,a,b,at,aa,ba,i,k,keysA,keysB;
+                while(stack.length){
+                    frame=stack[stack.length-1];a=frame.a;b=frame.b;at=frame.at;
+                    if(!frame.entered){
+                        if(a===null||b===null||typeof a!==typeof b){if(a===b){stack.pop();continue;}return difference(at,"value/type differs",a,b);}
+                        if(typeof a!=="object"){if(a!==b)return difference(at,"value differs",a,b);stack.pop();continue;}
+                        if(ancestorsA.indexOf(a)>=0||ancestorsB.indexOf(b)>=0)return difference(at,"cyclic plan value",a,b);
+                        aa=array(a);ba=array(b);if(aa!==ba)return difference(at,"array/object differs",a,b);
+                        if(aa){if(a.length!==b.length)return difference(at+".length","array length differs",a.length,b.length);frame.length=a.length;}
+                        else{keysA=[];keysB=[];for(k in a)if(own(a,k))keysA.push(k);for(k in b)if(own(b,k))keysB.push(k);keysA.sort();keysB.sort();if(keysA.length!==keysB.length)return difference(at,"object field count differs",keysA.length,keysB.length);for(i=0;i<keysA.length;i++)if(keysA[i]!==keysB[i])return difference(at,"object field differs",keysA[i],keysB[i]);frame.keys=keysA;frame.length=keysA.length;}
+                        frame.entered=true;frame.index=0;frame.array=aa;ancestorsA.push(a);ancestorsB.push(b);
+                    }
+                    if(frame.index===frame.length){stack.pop();ancestorsA.pop();ancestorsB.pop();continue;}
+                    k=frame.array?frame.index:frame.keys[frame.index];frame.index++;
+                    stack.push({a:a[k],b:b[k],at:(at+(frame.array?"["+k+"]":"."+k)).substring(0,500),entered:false});
+                }
+                return null;
+            }
+
+            function closureCoverage(built, summary) {
+                var difference = closureDifference(summary, entityPlan); if (difference) { if(typeof print==="function")print("SAVEGUARD_CLOSURE_DIFFERENCE "+JSON.stringify(difference)); fail("The extracted closure differs from the independent saved-source plan at "+difference.path+" ("+difference.reason+")."); }
+                var groups = ["geometry_library", "node_library", "uv_set_library", "modifier_library", "image_library", "material_library", "scene.nodes", "scene.uvs", "scene.modifiers", "scene.materials", "scene.extra"], expected = {}, i, j, item, list, map, mappedId;
+                for (i = 0; i < entityPlan.locators.length; i += 1) {
+                    item = planRecord(entityPlan.locators[i]); if (!expected[item.group]) { expected[item.group] = []; } expected[item.group].push(item.record);
+                    if ((item.group === "material_library" || item.group === "scene.materials") && entityProfile.meshAudit !== "static-prop-preview-v1") { fail("Merge material payloads require separate exact shader semantic validation; basic entity evidence is insufficient."); }
+                    if (item.group === "modifier_library" || item.group === "scene.modifiers") { fail("Merge modifier payloads require separate semantic validation."); }
+                }
+                // Animation records are ordered records, not necessarily ID-bearing entities.
+                var sourceAnimations = expected["scene.animations"] || [], outputAnimations = built.document.scene.animations || [];
+                if (!array(outputAnimations) || outputAnimations.length !== sourceAnimations.length) { fail("Imported animation coverage differs from the independent source closure."); }
+                function animationRecord(source) {
+                    var result = {}, k, ref, parts, p, mapped, resolved, value;
+                    for (k in source) { if (own(source, k)) { result[k] = source[k]; } }
+                    ref = SaveGuardSelective.parseURI(source.url); parts = ref.nodePath.split("/");
+                    if (ref.kind !== "local" && ref.kind !== "external") { fail("Unsupported preserved animation target."); }
+                    for (p = 0; p < parts.length; p += 1) { if (parts[p]) { mapped = built.idMap["$" + decodeURIComponent(parts[p])]; if (!mapped) { fail("Unmapped preserved animation owner."); } parts[p] = encodeURIComponent(mapped); } }
+                    mapped = ref.kind === "local" ? built.idMap["$" + ref.fragment] : ref.fragment;
+                    if (!mapped) { fail("Unmapped preserved animation target."); }
+                    value = ref.file;
+                    if (value) { resolved = resolverPins.resolveExternal.call(entityResolver, value, { uris: [source.url] }); if (!resolved || resolved.exists !== true) { fail("Unverified preserved animation dependency."); } value = resolved.uri || value; }
+                    result.url = ref.scheme + (parts.join("/") ? parts.join("/") + ":" : "") + (value || "") + "#" + encodeURIComponent(mapped) + ref.query;
+                    if (own(source, "id")) { result.id = built.idMap["$" + source.id] || source.id; }
+                    return result;
+                }
+                for (i = 0; i < sourceAnimations.length; i += 1) {
+                    // Complete tuple/metadata comparison; no value evaluation or timeline conversion.
+                    if (JSON.stringify(animationRecord(sourceAnimations[i])) !== JSON.stringify(outputAnimations[i])) { fail("Extraction changed an authored animation record at ordinal " + i + "."); }
+                }
+                function relationship(source, output, field) {
+                    var a = source[field], b = output[field];
+                    if (!a) { if (b) { fail("Extraction added an unplanned saved relationship."); } return; }
+                    var ap = SaveGuardSelective.parseURI(a), bp = SaveGuardSelective.parseURI(b), paths = ap.nodePath.split("/"), p;
+                    if (ap.kind !== "local" || bp.kind !== "local" || ap.query || bp.query || bp.fragment !== built.idMap["$" + ap.fragment] || ap.scheme !== bp.scheme) { fail("Extraction changed a required saved relationship: " + field); }
+                    for (p = 0; p < paths.length; p += 1) { if (paths[p]) { paths[p] = encodeURIComponent(built.idMap["$" + decodeURIComponent(paths[p])]); } }
+                    if (paths.join("/") !== bp.nodePath) { fail("Extraction changed a required saved relationship path."); }
+                }
+                function sourceReference(source, output, field) {
+                    var a = source[field], b = output[field]; if (!a) { if (b) { fail("Extraction added an unplanned asset source."); } return; }
+                    var ap = SaveGuardSelective.parseURI(a), bp = SaveGuardSelective.parseURI(b), resolved;
+                    if (ap.kind === "local") { relationship(source, output, field); return; }
+                    if (ap.kind !== "external" || ap.nodePath || ap.query || bp.kind !== "external" || bp.nodePath || bp.query || ap.fragment !== bp.fragment) { fail("Extraction changed the exact saved asset definition."); }
+                    resolved = resolverPins.resolveExternal.call(entityResolver, ap.file, { uris: [a] });
+                    if (!resolved || resolved.exists !== true || (resolved.uri || ap.file) !== bp.file) { fail("Extraction changed the verified saved asset file."); }
+                }
+                for (i = 0; i < groups.length; i += 1) {
+                    var group = groups[i], sourceRecords = expected[group] || [];
+                    list = group.indexOf("scene.") === 0 ? built.document.scene[group.substring(6)] || [] : built.document[group] || [];
+                    if (!array(list) || list.length !== sourceRecords.length) { fail("Imported record coverage differs from the independent source closure: " + group); }
+                    map = {};
+                    for (j = 0; j < list.length; j += 1) { if (!list[j] || typeof list[j].id !== "string" || own(map, "$" + list[j].id)) { fail("Imported record identity is missing or ambiguous."); } map["$" + list[j].id] = list[j]; }
+                    for (j = 0; j < sourceRecords.length; j += 1) {
+                        mappedId = built.idMap["$" + sourceRecords[j].id]; item = map["$" + mappedId];
+                        if (!item) { fail("An independently required saved record was omitted."); }
+                        if (group === "node_library" || group === "scene.nodes") {
+                            relationship(sourceRecords[j], item, "parent"); relationship(sourceRecords[j], item, "parent_in_place"); relationship(sourceRecords[j], item, "conform_target");
+                            sourceReference(sourceRecords[j], item, group === "node_library" ? "source" : "url");
+                            if (group === "scene.nodes") {
+                                var sourceGeometries = sourceRecords[j].geometries || [], importedGeometries = item.geometries || [], gi;
+                                if (!array(sourceGeometries) || !array(importedGeometries) || sourceGeometries.length !== importedGeometries.length) { fail("Extraction changed the saved geometry attachment count."); }
+                                for (gi = 0; gi < sourceGeometries.length; gi += 1) {
+                                    if (built.idMap["$" + sourceGeometries[gi].id] !== importedGeometries[gi].id) { fail("Extraction changed a saved geometry instance identity."); }
+                                    sourceReference(sourceGeometries[gi], importedGeometries[gi], "url");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            function acceptEntities(values) {
+                for (var i = 0; i < values.length; i += 1) {
+                    if (entityProfile.allowedEntityKinds.indexOf(values[i].kind) < 0) {
+                        fail("Native evidence does not cover saved entity kind " + values[i].kind + " (" + (values[i].id || values[i].definition) + ").");
+                    }
+                    var signature = nodeSignature(values[i].nodeType, values[i].extraTypes), matched = false, j;
+                    for (j = 0; j < entityProfile.nodeSignatures.length; j += 1) { if (signature === nodeSignature(entityProfile.nodeSignatures[j].type, entityProfile.nodeSignatures[j].extraTypes)) { matched = true; break; } }
+                    if (!matched) { fail("Native evidence does not cover the exact saved node extension signature: " + signature); }
+                }
+            }
+            function materialScope(document) {
+                if (entityDeepValidation || !entityProfile || entityProfile.meshAudit !== "static-prop-preview-v1") { return; }
+                var materials=document.scene.materials||[],definitions=document.material_library||[],i,j,m,uri,found,signature,extra;
+                for(i=0;i<materials.length;i+=1){m=materials[i];uri=SaveGuardSelective.parseURI(m.url);signature=false;
+                    if(uri.kind==="external"){
+                        for(j=0;j<entityProfile.shaderSignatures.length;j+=1){if(entityProfile.shaderSignatures[j].uri===m.url){signature=true;}}
+                        if(!signature){fail("This shader definition is outside the supported static-prop profile.");}
+                    }else if(uri.kind==="local"){
+                        if(!entityProfile.localUberEvidence||entityProfile.localUberEvidence.nativeAccepted!==true){fail("Local shader profile unavailable.");}
+                        found=null;for(j=0;j<definitions.length;j+=1){if(definitions[j].id===uri.fragment){if(found){fail("Ambiguous local shader definition.");}found=definitions[j];}}
+                        extra=found&&found.extra;
+                        if(!found||found.source||found.url||!array(extra)||extra.length!==2||extra[0].type!=="studio/material/uber_iray"||extra[0].version!=="1.1.0.0"||extra[1].type!=="studio_material_channels"){fail("Local shader type is outside the supported static-prop profile.");}
+                    }else{fail("A supported material definition reference is required.");}
+                }
+            }
+            var assemblyExpected=null,assemblyNamespace=null,assemblyCancelled=null,assemblyValidated=[];
+            function assemblyGuard(){if(assemblyCancelled&&assemblyCancelled()===true){var e=Error('Native assembly preparation cancelled');e.code='CANCELLED';throw e;}}
+            
+            function assemblyDifference(a,b){
+                var stack=[{a:a,b:b,path:'payload',parents:[]}];while(stack.length){assemblyGuard();var f=stack.pop();if(f.a===f.b)continue;if(f.a===null||f.b===null||typeof f.a!==typeof f.b||typeof f.a!=='object')return f.path;
+                    if(array(f.a)!==array(f.b))return f.path;var ka=Object.keys(f.a).sort(),kb=Object.keys(f.b).sort();if(ka.length!==kb.length)return f.path;
+                    for(var pi=0;pi<f.parents.length;pi++)if(f.parents[pi].a===f.a||f.parents[pi].b===f.b)fail('Cyclic native assembly payload');var parents=f.parents.concat([{a:f.a,b:f.b}]);
+                    for(var ki=ka.length-1;ki>=0;ki--){if(ka[ki]!==kb[ki])return f.path;stack.push({a:f.a[ka[ki]],b:f.b[kb[ki]],path:f.path+'.'+ka[ki],parents:parents});}
+                }return null;
+            }
+            function assemblyCoverage(built,summary){
+                if(!built||!built.document||!built.idMap||!summary||summary.ready!==true)fail('Native assembly closure is missing');
+                if((function(){return assemblyDifference(summary,entityPlan);})())fail('Native assembly plan coverage differs');
+                var match=/^\/SaveGuard\/([A-Za-z][A-Za-z0-9_-]{2,80})\.duf$/.exec(built.document.asset_info&&built.document.asset_info.id||'');if(!match)fail('Native assembly extraction namespace is missing');
+                if(assemblyNamespace!==null&&assemblyNamespace!==match[1])fail('Native assembly extraction namespace changed');
+                if(!assemblyExpected){assemblyNamespace=match[1];assemblyExpected=(function(){return SaveGuardSelective.extract(entityDocument,entityPlan,{namespace:assemblyNamespace,existingIds:entityExistingIds,resolveExternal:function(file,dep){assemblyGuard();return resolverPins.resolveExternal.call(entityResolver,file,dep);},isCancelled:assemblyCancelled});})();}
+                var difference=(function(){return assemblyDifference({document:built.document,idMap:built.idMap,dependencies:built.dependencies||[],placement:built.placement||null},{document:assemblyExpected.document,idMap:assemblyExpected.idMap,dependencies:assemblyExpected.dependencies||[],placement:assemblyExpected.placement||null});})();
+                if(difference)fail('Native assembly authored record/animation coverage differs at '+difference);return true;
+            }
+            function entityGate(built, selectionOnly, privatePlan) {
+                if (!entityProfile) { return true; }
+                if (info.context !== entityContext || info.context.planningDocument !== entityDocument || info.resolver !== entityResolver ||
+                        info.request.actionKey !== action || info.request.sourceId !== entitySourceId) { fail("The saved entity action context changed."); }
+                mergeSourceIntegrity();
+                if(action==="loadLightAssembly"){
+                    assemblyGuard();if(privatePlan){for(var av=0;av<assemblyValidated.length;av++)if(assemblyValidated[av].built===built&&assemblyValidated[av].plan===privatePlan)return true;}SaveGuardLightAssemblies.scope(entityDocument,entitySourceId,{resolveAssetDocument:mergeAssetDocument,isCancelled:assemblyCancelled});
+                    if(entityPlan===null){entityPlan=SaveGuardSelective.plan(entityDocument,[entitySourceId],{fullData:true,preserveAnimation:entityContext.preserveAnimation===true,resolveAssetDocument:mergeAssetDocument,isCancelled:assemblyCancelled});if(!entityPlan.ready)fail('Independent native assembly closure is not ready');}
+                    if(selectionOnly!==true){assemblyCoverage(built,privatePlan||built&&built.summary);if(privatePlan)assemblyValidated.push({built:built,plan:privatePlan});}mergeSourceIntegrity();return true;
+                }
+                if (entityPlan === null) {
+                    entityPlan = SaveGuardSelective.plan(entityDocument, [entitySourceId], { fullData: true, preserveAnimation: action === "loadLightAssembly" && entityContext.preserveAnimation === true, resolveAssetDocument: mergeAssetDocument });
+                    if (!entityPlan || entityPlan.ready !== true) { fail("The independent saved-source dependency closure is not ready."); }
+                    acceptEntities(entityScope(entityDocument, entityPlan.nodeIds, mergeAssetDocument, false));
+                    mergeSourceIntegrity();
+                }
+                var selectedEntities = entityScope(entityDocument, [entitySourceId], mergeAssetDocument, false), signature = JSON.stringify(selectedEntities);
+                acceptEntities(selectedEntities);
+                if (initialEntity === null) { initialEntity = signature; }
+                else if (initialEntity !== signature) { fail("The selected saved entity semantics changed."); }
+                if (selectionOnly === true) { return true; }
+                var summary = privatePlan || built && built.summary;
+                if (!built || !summary || summary.ready !== true || !array(summary.selectedIds) || summary.selectedIds.length !== 1 ||
+                        summary.selectedIds[0] !== entitySourceId || !array(summary.nodeIds) || !built.idMap || !built.document || !built.document.scene ||
+                        !array(built.document.scene.nodes) || built.document.scene.nodes.length !== summary.nodeIds.length) { fail("The extracted entity closure is missing or changed."); }
+                closureCoverage(built, summary);
+                var before = entityScope(entityDocument, summary.nodeIds, mergeAssetDocument, false), mapped = [], i, j, actual = {}, imported;
+                acceptEntities(before);
+                for (i = 0; i < built.document.scene.nodes.length; i += 1) { actual["$" + built.document.scene.nodes[i].id] = true; }
+                for (i = 0; i < before.length; i += 1) {
+                    var id = built.idMap["$" + before[i].id];
+                    if (typeof id !== "string" || !own(actual, "$" + id) || mapped.indexOf(id) >= 0) { fail("The extracted entity ID mapping is missing or ambiguous."); }
+                    mapped.push(id);
+                }
+                if (summary.nodeIds.indexOf(entitySourceId) < 0) { fail("The selected saved entity is absent from its extracted closure."); }
+                imported = entityScope(built.document, mapped, mergeAssetDocument, true); acceptEntities(imported);
+                for (j = 0; j < before.length; j += 1) { if (before[j].kind !== imported[j].kind) { fail("Extraction changed the saved entity kind."); } }
+                geometryCoverage(built.document); materialScope(built.document);
+                verifyExpectedPayload(built);
+                mergeSourceIntegrity();
+                return true;
+            }
+            if (kind === "merge") { entityGate(null, true); }
+            var reconstruction = null, extensions = null, materialValues = null, targetInspector = null, nativeHost = null, geometryBinding = null, sourceEvidence = null;
+            if (kind === "merge" && action!=="loadLightAssembly" && typeof SaveGuardNativeReconstruction !== "undefined") {
+                reconstruction = SaveGuardNativeReconstruction.create(env, { assetResolver: info.resolver, selective: SaveGuardSelective,
+                    placement: SaveGuardDSONPlacement, profiles: matching("reconstruction", "native-reconstruction"),
+                    readRotationOrder: ports.readRotationOrder, resolveFollowMode: ports.resolveFollowMode, getBoundaryEvidence: ports.getBoundaryEvidence });
+            }
+            var meshAudit = action!=="loadLightAssembly" && entityDeepValidation && entityProfile && entityProfile.meshAudit === "static-prop-preview-v1" ? SaveGuardStaticPropAudit.create({ profile: entityProfile, exactDefinitionCache: entityContext.nativeSelected === true && entityLowMemoryMode === false,
+                assetResolver: { resolveAssetDocument: mergeAssetDocument, resolveExternal: function (file, dep) { return resolverPins.resolveExternal.call(entityResolver, file, dep); } } }) :
+                action!=="loadLightAssembly" && entityDeepValidation && entityProfile && entityProfile.meshAudit === "static-polygon-v1" ? SaveGuardStaticMeshAudit.create() : null;
+            var audit = SaveGuardMergeAudit.create(env, {
+                validateSelectedAnimation: action==="loadLightAssembly"&&entityContext.preserveAnimation===true?function(entry){closureCoverage(entry.built,entry.plan);return true;}:null, importScoped: !!entityProfile && entityProfile.destinationScope === "additive-static-v1" && !entityDeepValidation, basicOnly: !entityDeepValidation, assetResolver: info.resolver, reuseStaticAssessment: !!meshAudit && entityContext.nativeSelected === true && entityLowMemoryMode === false, selective: SaveGuardSelective, placement: SaveGuardDSONPlacement, reconstruction: reconstruction,
+                assessImportedContent: meshAudit ? meshAudit.assess : null, verifyImportedContent: action==="loadLightAssembly"?null:meshAudit ? meshAudit.verify : null });
+            if(action==='loadLightAssembly')audit.preflight=function(entry){
+                (function(){return entityGate(entry.built,false,entry.plan);})();var ids={},k;for(k in entry.built.idMap)if(own(entry.built.idMap,k))ids['$'+entry.built.idMap[k]]=true;
+                var inventory=SaveGuardSceneInventory.nodes(env.Scene);
+                for(var ni=0;ni<inventory.length;ni++){assemblyGuard();var node=inventory[ni];if(own(ids,'$'+String(node.assetId)))fail('Native assembly namespace collides with an existing asset');var assetUri=node.assetUri;if(assetUri){var uriId=SaveGuardSceneInventory.assetUriId(assetUri);if(uriId&&own(ids,'$'+uriId))fail('Native assembly namespace collides with an existing asset URI');}}
+                mergeSourceIntegrity();return true;
+            };
+            var meshSnapshot = null, meshEntry = null;
+            if (meshAudit) {
+                var captureMeshBaseline = audit.captureAudit;
+                audit.captureAudit = function (entry) { meshSnapshot = captureMeshBaseline(entry); meshEntry = entry; return meshSnapshot; };
+            }
+            function emptyDestination() {
+                if(action==="loadLightAssembly")return;
+                if (!entityProfile || !entityProfile.meshAudit) { return; }
+                if (entityProfile.destinationScope === "additive-static-v1") {
+                    var count=Number(env.Scene.getNumNodes());
+                    if(count>0 && (!entityProfile.destinationEvidence || entityProfile.destinationEvidence.undoRedoVerified!==true)){fail("Populated-scene native Undo/Redo acceptance is pending.");}
+                    if(!isFinite(count)||count<0||Math.floor(count)!==count||env.UndoStack.canPushItems()!==false||env.UndoStack.isInUndoRedo()!==false){fail("Static-object loading requires a valid scene count and idle Undo.");}
+                    return;
+                }
+                var time = env.Scene.getTime(); if (time !== null && time !== undefined && typeof time.valueOf === "function") { time = time.valueOf(); }
+                if (env.Scene.getNumNodes() !== 0 || env.Scene.getPrimarySelection() || String(env.Scene.getFilename()) !== "" ||
+                        env.Scene.needsSave() !== false || env.Scene.assetNeedSave !== false && env.Scene.assetNeedSave !== undefined || time !== 0 ||
+                        env.UndoStack.canPushItems() !== false || env.UndoStack.isInUndoRedo() !== false) { fail("This static-object candidate requires an empty, unnamed, clean scene at time zero with idle Undo."); }
+            }
+            function verifySource() { return !!info.context && !!info.context.provider && info.context.provider.verifySource() === true && info.resolver.verifyAll() === true; }
+            function disposeExtensions() {
+                var errors = [];
+                try { if (extensions && extensions !== audit && typeof extensions.release === "function") { extensions.release(); } } catch (e) { errors.push(String(e.message || e)); }
+                try { if (materialValues && typeof materialValues.release === "function") { materialValues.release(); } } catch (e2) { errors.push(String(e2.message || e2)); }
+                extensions = null; materialValues = null; targetInspector = null; nativeHost = null;
+                if (errors.length) { fail("Action adapter cleanup failed: " + errors.join("; ")); }
+            }
+            try {
+                if (kind === "pose") {
+                    targetInspector = SaveGuardPoseTarget.create(env, { selective: SaveGuardSelective, document: info.context.planningDocument,
+                        sourceFigureId: info.request.sourceId, resolveAssetDocument: info.resolver.resolveAssetDocument,
+                        verifySource: verifySource, verifiedProfiles: matching("poseTarget", "pose-target") });
+                    extensions = selected === "pose-erc-v1" ? SaveGuardPoseExtended.create(env, { target: targetInspector, audit: audit, assetResolver: info.resolver,
+                        verifiedProfiles: matching("poseExtended", "pose-erc") }) : SaveGuardPosePorts.create(env, { target: targetInspector, audit: audit, assetResolver: info.resolver,
+                        verifiedProfiles: matching("poseControls", "pose-controls") });
+                } else if (kind === "materials" || kind === "render") {
+                    if (selected === "render-extended") {
+                        var retainedProvider = info.context && info.context.provider, retainedEvidenceReader = info.context && info.context.readSourceEvidence,
+                            originalVersion = info.context && info.context.planningDocument && info.context.planningDocument.file_version;
+                        if (!retainedProvider || typeof retainedEvidenceReader !== "function" || typeof originalVersion !== "string" || !originalVersion) { fail("Extended rendering requires authoritative source serialization evidence."); }
+                        var providerMethods = {}, methodNames = ["verifySource", "groups", "listRecords", "readRecords"], methodIndex;
+                        for (methodIndex = 0; methodIndex < methodNames.length; methodIndex += 1) {
+                            var methodName = methodNames[methodIndex];
+                            if (typeof retainedProvider[methodName] !== "function") { fail("Extended rendering requires a full saved record provider."); }
+                            providerMethods[methodName] = retainedProvider[methodName];
+                        }
+                        providerMethods.readRecordsWithEvidence = retainedProvider.readRecordsWithEvidence;
+                        var currentSource = function () {
+                            if (closed || localClosed) { fail("The render action is closed."); }
+                            if (info.context.provider !== retainedProvider || info.context.readSourceEvidence !== retainedEvidenceReader ||
+                                    info.context.planningDocument.file_version !== originalVersion) { fail("The retained render source evidence changed."); }
+                            for (var method in providerMethods) { if (Object.prototype.hasOwnProperty.call(providerMethods, method) &&
+                                    retainedProvider[method] !== providerMethods[method]) { fail("The retained render source provider changed."); } }
+                            return verifySource();
+                        };
+                        var sourceRead = function (name, argument) {
+                            if (!currentSource()) { fail("The saved render source changed."); }
+                            var result = providerMethods[name].call(retainedProvider, argument);
+                            if (!currentSource()) { fail("The saved render source changed during its read."); }
+                            return result;
+                        };
+                        sourceEvidence = { verifySource: currentSource, readSourceEvidence: function () {
+                            if (!currentSource()) { fail("The saved render source changed."); } return retainedEvidenceReader.call(info.context);
+                        }, groups: function () { return sourceRead("groups"); }, listRecords: function (group) { return sourceRead("listRecords", group); },
+                            readRecords: function (requests) { return sourceRead("readRecords", requests); },
+                            readRecordsWithEvidence: function (requests) {
+                                var before = sourceEvidence.readSourceEvidence(), wrapped, records;
+                                if (typeof providerMethods.readRecordsWithEvidence === "function") {
+                                    wrapped = sourceRead("readRecordsWithEvidence", requests);
+                                    if (!wrapped || JSON.stringify(wrapped.sourceEvidence) !== JSON.stringify(before)) { fail("Saved render payload evidence changed."); }
+                                    records = wrapped.records;
+                                } else { records = sourceRead("readRecords", requests); }
+                                var after = sourceEvidence.readSourceEvidence();
+                                if (JSON.stringify(before) !== JSON.stringify(after)) { fail("Saved render payload evidence changed during its read."); }
+                                return { records: records, sourceEvidence: after };
+                            } };
+                        extensions = SaveGuardRenderExtended.create(env, { audit: audit, assetResolver: info.resolver, sourceProvider: sourceEvidence,
+                            originalFileVersion: originalVersion, verifiedProfiles: matching("renderExtended", "render-extended") });
+                    } else {
+                        if (kind === "materials") {
+                            materialValues = selected === "materials-extended" ? SaveGuardMaterialExtended.create(env, { selective: SaveGuardSelective,
+                                assetResolver: info.resolver, verifiedProfiles: matching("materialExtended", "material-values-extended"),
+                                getGeometrySourceUrl: function () { if (closed || localClosed || !geometryBinding) { fail("A verified target geometry binding is not available."); } return geometryBinding; } }) :
+                                SaveGuardMaterialValues.create(env, { selective: SaveGuardSelective, assetResolver: info.resolver, verifiedProfiles: matching("materialValues", "material-values") });
+                        }
+                        var presetOptions = { selective: SaveGuardSelective, audit: audit, assetResolver: info.resolver,
+                            verifiedProfiles: matching("preset", kind === "materials" ? "materials-selection" : "render-basic"), materialValues: materialValues };
+                        extensions = selected === "materials-extended" ? SaveGuardExtendedMaterialPorts.create(env, presetOptions) : SaveGuardPresetPorts.create(env, presetOptions);
+                    }
+                } else { extensions = audit; }
+                nativeHost = SaveGuardApplyHost.createNative(env, extensions, actionProfiles(action, kind));
+                if (kind === "merge") {
+                    var originalPreflight = nativeHost.preflight;
+                    if (typeof originalPreflight !== "function") { fail("The native entity preflight is unavailable."); }
+                    // ApplyHost's private entry moves built.summary to entry.plan.
+                    nativeHost.preflight = function (entry) { emptyDestination(); entityGate(entry.built, false, entry.plan); return originalPreflight.apply(nativeHost, arguments); };
+                    if (meshAudit && action!=="loadLightAssembly") {
+                        var acceptVerifiedMesh = nativeHost.acceptUndo;
+                        nativeHost.acceptUndo = function (caption) {
+                            if (!meshSnapshot || !meshEntry || audit.verifyOutcome(meshSnapshot, meshEntry) !== true) { fail("Static geometry changed before commit."); }
+                            return acceptVerifiedMesh(caption);
+                        };
+                    }
+                }
+                var accepted = nativeHost.capability(kind);
+                if (!accepted || accepted.enabled !== true || (accepted.nativeVerified !== true && accepted.portabilityMode !== 'api-checked')) { fail(accepted && accepted.reason || "Native action validation is incomplete."); }
+            } catch (constructionError) { try { disposeExtensions(); } catch (cleanupError) { constructionError.cleanupError = String(cleanupError.message || cleanupError); } throw constructionError; }
+            var flow = null, localClosed = false, stager = null, receipts = [];
+            function live() { if (localClosed) { fail("The prepared action is closed."); } }
+            var wrapper = {
+                prepare: function (request, cancelled) {
+                    live();
+                    if (!request || request.kind !== kind) { fail("The prepared action kind changed."); }
+                    if(action==="loadLightAssembly")assemblyCancelled=cancelled||null;
+                    if (kind === "merge" && action!=="loadLightAssembly") { entityGate(request.built); }
+                    if (!flow) {
+                        // Allocate a directory only when explicit action preparation stages a payload.
+                        var lazyStager = { stage: function (document, path) { if (!stager) { stager = newStager(); } return stager.stage(document, path); },
+                            verify: function (token) { return !!stager && stager.verify(token); },
+                            release: function (token) { return !!stager && stager.release(token); } };
+                        flow = SaveGuardApplyHost.create({ host: nativeHost, stager: lazyStager, nativeMergeOutput: action === "loadLightAssembly" });
+                    }
+                    var receipt = flow.prepare(request, cancelled); receipts.push(receipt); return receipt;
+                },
+                apply: function (receipt, cancelled) {
+                    if (localClosed || !flow) { fail("The prepared action is closed."); }
+                    if(action==="loadLightAssembly")assemblyCancelled=cancelled||null;
+                    var result = flow.apply(receipt, cancelled);
+                    if (action!=="loadLightAssembly" && entityProfile && entityProfile.meshAudit === "static-prop-preview-v1") {
+                        result.staticPropPreview = { coverage: entityDeepValidation ? "mesh, UV, material names/classes and explicit texture bindings" : "native result, node identity, references, parent and saved placement", shaderEquivalenceVerified: false,
+                            nativeManagerWorkflowVerified: false, deepValidation: entityDeepValidation, observations: meshAudit ? meshAudit.observations() : [] };
+                        if (result.ok === true) { result.message = "Static prop loaded with its saved placement. Check surface appearance before saving."; }
+                    }
+                    return result;
+                },
+                release: function (receipt) { var i = receipts.indexOf(receipt); if (i < 0 || !flow) { return false; } receipts.splice(i, 1); return flow.release(receipt); },
+                inspectTarget: function (requestedKind) {
+                    live(); if (requestedKind !== kind || (kind !== "pose" && kind !== "materials")) { fail("Target inspection does not match this action."); }
+                    var target = nativeHost.inspectSelectedFigure();
+                    if (selected === "materials-extended") {
+                        var geometries = target && target.descriptor && target.descriptor.geometries, uri = geometries && geometries.length === 1 && geometries[0].sourceUrl;
+                        if (typeof uri !== "string" || !uri || geometryBinding !== null && geometryBinding !== uri) { fail("The verified target geometry binding is missing or changed."); }
+                        geometryBinding = uri;
+                    }
+                    return target;
+                },
+                computePlacement: function (built) {
+                    live(); if (kind !== "merge") { fail("Placement belongs to a merge action."); }
+                    if(action==="loadLightAssembly")return {rule:"native-preserved-ancestors",nodes:[],byId:{}};
+                    entityGate(built);
+                    if (reconstruction && reconstruction.requires(built.document)) {
+                        if (matching("reconstruction", "native-reconstruction").length !== 1) { fail("Fitted and parent-in-place objects need separate native reconstruction validation."); }
+                        var manifest = built.placement, nodes = [], byId = {}, i, row;
+                        if (!manifest || !manifest.relationshipCoverageOnly || !manifest.nodes) { fail("Saved relationship coverage is missing."); }
+                        for (i = 0; i < manifest.nodes.length; i += 1) { row = { id: manifest.nodes[i].id, parentId: manifest.nodes[i].parentId, world: null }; nodes.push(row); byId["$" + row.id] = row; }
+                        // Preview describes relationships only. Native preflight must separately verify the reconstruction.
+                        return { rule: "native-reconstruction-requires-audit", nodes: nodes, byId: byId };
+                    }
+                    return SaveGuardDSONPlacement.compute(built.document, { selective: SaveGuardSelective, resolveAssetDocument: info.resolver.resolveAssetDocument });
+                },
+                buildSavedPreset: function (requestedKind, document, input) {
+                    live(); if (requestedKind !== kind || (kind !== "materials" && kind !== "render") || !input || input.context !== info.context || input.resolver !== info.resolver || input.mapping !== info.mapping ||
+                            document !== info.context.planningDocument || !input.request || JSON.stringify(input.request) !== JSON.stringify(info.request)) { fail("The preset builder context changed."); }
+                    if (!info.mapping || info.mapping.kind !== (kind === "render" ? "render-setting" : "node")) { fail("The preset builder row has an incompatible scope."); }
+                    function cancelled() { if (input.isCancelled && input.isCancelled() === true) { var e = Error("Action cancelled before preparing a preset."); e.code = "CANCELLED"; throw e; } }
+                    cancelled(); if (!verifySource()) { fail("The saved source or dependencies changed."); }
+                    if (selected === "render-extended") {
+                        var serialization = sourceEvidence.readSourceEvidence();
+                        if (!serialization || serialization.issuer !== "SaveGuardFullDUF" || serialization.schema !== 1 || serialization.fileVersion !== originalVersion ||
+                                serialization.renderApplicationBlocked !== false || serialization.requiresDuplicateInterpretation !== false ||
+                                Object.prototype.toString.call(serialization.duplicates) !== "[object Array]" || serialization.duplicates.length !== 0) {
+                            fail("Saved render serialization requires a verified interpretation before preset construction.");
+                        }
+                    }
+                    var target = kind === "materials" ? wrapper.inspectTarget(kind) : null;
+                    var options = { namespace: namespace(), existingIds: existingIds(),
+                        resolveExternal: function (file, dep) { cancelled(); return info.resolver.resolveExternal(file, dep); },
+                        readRecords: function (requests) { cancelled(); return info.context.provider.readRecords(requests); } };
+                    var built = kind === "materials" ? SaveGuardSelective.materialPreset(info.context.planningDocument, info.request.sourceId, target.descriptor, options) :
+                        SaveGuardSelective.renderPreset(info.context.planningDocument, options);
+                    cancelled(); if (!verifySource()) { fail("The saved source or dependencies changed."); }
+                    return { built: built, target: target };
+                },
+                close: function () { if (!localClosed) {
+                    // Release private payload/receipt references before their target and audit ports.
+                    localClosed = true; assemblyExpected=null;assemblyValidated=[];
+                    var i = opened.indexOf(wrapper); if (i >= 0) { opened.splice(i, 1); }
+                    var errors = [], receipt;
+                    while (receipts.length) { receipt = receipts.pop(); try { if (flow && flow.release(receipt)!==true) { errors.push("Prepared receipt cleanup returned false"); } } catch (e) { errors.push(String(e.message || e)); } }
+                    flow = null; stager = null;
+                    try { disposeExtensions(); } catch (e2) { errors.push(String(e2.message || e2)); }
+                    audit = null; reconstruction = null;
+                    if (errors.length) { fail("Prepared action cleanup failed: " + errors.join("; ")); }
+                } }
+            };
+            opened.push(wrapper); return wrapper;
+        }
+        return { capability: capability, flags: flags, namespace: namespace, existingIds: existingIds, createApplyHost: createApplyHost,
+            close: function () {
+                if (closed) { return; } closed = true;
+                var errors = [], action;
+                while (opened.length) { action = opened.pop(); try { action.close(); } catch (e) { errors.push(String(e.message || e)); } }
+                if (errors.length) { fail("Runtime action cleanup failed: " + errors.join("; ")); }
+            } };
+    }
+    function platform(app) {
+        if (!app || typeof app.platform !== "function") { return "unknown"; }
+        var value = Number(app.platform()), windows = Number(app.Windows), mac = Number(app.MacOSX);
+        if (isFinite(value) && isFinite(windows) && value === windows) { return "Windows"; }
+        if (isFinite(value) && isFinite(mac) && value === mac) { return "macOS"; }
+        return "unknown";
+    }
+    // Lazy disk load so Manager/Settings bundles need not embed ~1 MiB of acceptance profiles.
+    // Already-defined globals (tests/legacy monolith embeds) are reused without a second read.
+    function loadProfiles(projectRoot) {
+        if (typeof SaveGuardNativeProfiles !== "undefined" && SaveGuardNativeProfiles) { return SaveGuardNativeProfiles; }
+        if (!projectRoot) { fail("Native profiles project root is required."); }
+        var path = normal(projectRoot) + "/support/manager/SaveGuard Native Profiles.dsa", info = new DzFileInfo(path), size = Number(info.size()), file = null, text = "", trimmed, parsed;
+        if (!info.exists() || !info.isFile() || !info.isReadable()) { fail("Native profiles file is missing."); }
+        if (!(size > 0) || !isFinite(size) || size > 9007199254740991 || Math.floor(size) !== size) { fail("Native profiles file size is invalid."); }
+        try {
+            file = new DzFile(path);
+            if (!file.open(DzFile.ReadOnly)) { fail("Cannot open native profiles file."); }
+            var bytes = file.read(size);
+            if (!bytes || Number(bytes.length) !== size || (typeof file.error === "function" && file.error() !== DzFile.NoError) || !file.eof()) { fail("Incomplete native profiles read."); }
+            text = typeof bytes.convertToStringFromUtf8 === "function" ? bytes.convertToStringFromUtf8() : bytes.convertToString();
+        } finally { if (file && typeof file.close === "function") { file.close(); } }
+        if (typeof text !== "string") { fail("Native profiles text unavailable."); }
+        trimmed = String(text).replace(/^\uFEFF/, "").replace(/^\s*var\s+SaveGuardNativeProfiles\s*=\s*/, "").replace(/;\s*$/, "");
+        try { parsed = JSON.parse(trimmed); } catch (e) { fail("Native profiles JSON parse failed: " + String(e.message || e)); }
+        if (!parsed || typeof parsed !== "object" || Object.prototype.toString.call(parsed) === "[object Array]") { fail("Native profiles payload is invalid."); }
+        SaveGuardNativeProfiles = parsed;
+        return parsed;
+    }
+    return { create: create, platform: platform, hostSupported:hostSupported, portProfiles:portProfiles, nativeEvidenceHost:nativeEvidenceHost, loadProfiles: loadProfiles };
+}());

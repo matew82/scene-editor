@@ -1,0 +1,702 @@
+{
+  "modules": [
+    "DUF Chunk Reader.dsa",
+    "DUF Gzip Stream.dsa",
+    "SG Full DUF.dsa",
+    "SaveGuard Selective.dsa",
+    "SaveGuard Asset Resolver.dsa",
+    "SaveGuard DSON Placement.dsa",
+    "SaveGuard Rollback Flags.dsa",
+    "SaveGuard Merge Audit.dsa",
+    "SaveGuard Apply Host.dsa",
+    "SaveGuard Pose Target.dsa",
+    "SaveGuard Detail Adapter.dsa",
+    "SaveGuard Action Controller.dsa",
+    "SaveGuard Animation Guard.dsa",
+    "SaveGuard Figure Contract.dsa",
+    "SaveGuard Figure Native Ports.dsa",
+    "SaveGuard Saved Figure Audit.dsa",
+    "SaveGuard Figure Dependencies.dsa",
+    "SaveGuard Figure Load.dsa",
+    "SaveGuard Scene Inventory.dsa",
+    "SaveGuard Storage.dsa",
+    "SaveGuard Settings.dsa",
+    "SaveGuard Static Mesh Audit.dsa",
+    "SaveGuard Static Prop Audit.dsa",
+    "SaveGuard Native Runtime.dsa",
+    "SaveGuard Manager Model.dsa",
+    "SaveGuard Manager Catalog.dsa",
+    "SaveGuard Cache Snapshot.dsa",
+    "SaveGuard Gzip Structure.dsa",
+    "SaveGuard Native Source.dsa",
+    "SaveGuard Selected Context.dsa",
+    "SaveGuard List Scanner.dsa",
+    "SaveGuard List Stream.dsa",
+    "SaveGuard Fast Inspect.dsa",
+    "SaveGuard Last Error Report.dsa",
+    "SaveGuard Explicit Confirmation.dsa",
+    "SaveGuard Timeline.dsa",
+    "SaveGuard Static Pose Plan.dsa",
+    "SaveGuard Pose Preset.dsa",
+    "SaveGuard Pose Manager.dsa",
+    "SaveGuard Wearable Plan.dsa",
+    "SaveGuard Wearable Target.dsa",
+    "SaveGuard Wearable Manager.dsa",
+    "SaveGuard Materials.dsa",
+    "SaveGuard Materials Manager.dsa",
+    "SaveGuard Shape Plan.dsa",
+    "SaveGuard Shape Native.dsa",
+    "SaveGuard Shape Preset Plan.dsa",
+    "SaveGuard Shape Preset Run.dsa",
+    "SaveGuard Shape Preset Target.dsa",
+    "SaveGuard Shape Manager.dsa",
+    "SaveGuard Light Icons.dsa",
+    "SaveGuard Light Assemblies.dsa",
+    "SaveGuard Render Settings.dsa",
+    "SaveGuard Render Manager.dsa",
+    "SaveGuard Motion Cache Source.dsa",
+    "SaveGuard Wearable Cache Source.dsa",
+    "SaveGuard Derived Metadata.dsa",
+    "SaveGuard Camera Source Projection.dsa",
+    "SaveGuard Camera Source.dsa",
+    "SaveGuard Camera Plan.dsa",
+    "SaveGuard Camera Properties.dsa",
+    "SaveGuard Camera Parent Guard.dsa",
+    "SaveGuard Camera Restore.dsa",
+    "SaveGuard Camera Manager.dsa",
+    "SaveGuard Light Plan.dsa",
+    "SaveGuard Light Import.dsa",
+    "SaveGuard Light Profiles.dsa",
+    "SaveGuard Photometric Plan.dsa",
+    "SaveGuard Photometric Import.dsa",
+    "SaveGuard Parented Photometric Plan.dsa",
+    "SaveGuard Parented Photometric Import.dsa",
+    "SaveGuard Saved Light Values.dsa",
+    "SaveGuard Emissives.dsa",
+    "SaveGuard Minimal Native.dsa",
+    "SaveGuard Minimal Selector.dsa",
+    "SaveGuard Minimal Timeline.dsa",
+    "SaveGuard Shape Preset IO.dsa",
+    "SaveGuard Motion Actions.dsa",
+    "SaveGuard Inspection Cache.dsa",
+    "SaveGuard Load Cache.dsa",
+    "SaveGuard Light Manager.dsa",
+    "SaveGuard Camera Actions.dsa",
+    "SaveGuard Light Actions.dsa",
+    "Scene Editor Inspection Dialogs.dsa",
+    "Scene Editor Manager Runtime.dsa",
+    "Scene Editor Inspection Pane.dsa"
+  ],
+  "lazyResources": [
+    "SaveGuard Native Profiles.dsa"
+  ],
+  "source": "Current local SaveGuard 2/support; copied read-only",
+  "records": [
+    {
+      "name": "DUF Chunk Reader.dsa",
+      "sourceSHA256": "d98c54a177b8d2b0c5fe001fc3df90064fdc6f47e6e82af2d5e2171b24c46e9c",
+      "adapted": true,
+      "candidateSHA256": "d8eec2093e8d0708d260f6e14e8f8ce66438e708c1b017d038f1abb2da452f85"
+    },
+    {
+      "name": "DUF Gzip Stream.dsa",
+      "sourceSHA256": "efe34f0aff154231136ef2cc5fe44acf30a60a57403a2b908eb5c2717d90195c",
+      "adapted": true,
+      "candidateSHA256": "d9d2ff92859b2a80bd4047631eaa67f707bfbd7bead68742625d499d74557a23"
+    },
+    {
+      "name": "SG Full DUF.dsa",
+      "sourceSHA256": "f3290377d0f590219475aa83b3786ed47af38707fcd9197280c76a484e6772f6",
+      "adapted": true,
+      "candidateSHA256": "2423b2cbacf9c8e40c5a3a1497ebf5d4dcbc95306f7c3ed6546de3d17e815f1e"
+    },
+    {
+      "name": "SaveGuard Selective.dsa",
+      "sourceSHA256": "27c3be5d13010bbce3768c318ec9078f28b7e9d288471ec541b12945594eea30",
+      "adapted": true,
+      "candidateSHA256": "8525ce3691915e0f40ebfdb933454c93287df6f4cfb93f6a0cd207b961dbf08c"
+    },
+    {
+      "name": "SaveGuard Asset Resolver.dsa",
+      "sourceSHA256": "d74e32a8f3f19977f71ffc4728d9358414435918d9e0618c767a11205d1c894b",
+      "adapted": true,
+      "candidateSHA256": "b2699f7bba59069050e33dcc35276b45467fe660ecf2c02820a5ae9de8bee675",
+      "loadingFollowup": "Remove automatic content/time/count/depth limits while retaining explicit caller budgets, cancellation and integrity/cycle checks"
+    },
+    {
+      "name": "SaveGuard DSON Placement.dsa",
+      "sourceSHA256": "143a435c4cbb85dc42ee8493b5eed38652c108e107268a413c3ef620088de394",
+      "adapted": true,
+      "candidateSHA256": "930c74c61dd377459c2a0cb1e5a201cd858a19ecc22df57b887c2f40a7ee4c88"
+    },
+    {
+      "name": "SaveGuard Rollback Flags.dsa",
+      "sourceSHA256": "c4b92393c13c06fd3fd3ccb44cef899b41bf2c1dc3db21ddfcbabe253f6668dd",
+      "adapted": true,
+      "candidateSHA256": "2ccc09fa4a01babad0c3c04ca3deb67e32d43002f4d5f3863c5138f30804cb64"
+    },
+    {
+      "name": "SaveGuard Merge Audit.dsa",
+      "sourceSHA256": "e8cbaf0048820cb287e75a5a5d096049634918fc21328f6c74aa0991a9362523",
+      "adapted": true,
+      "candidateSHA256": "9020847143e1074947744fa1e90e7f875c49378387b117b9cb38acadf85be6bb",
+      "loadingFollowup": "Remove artificial scene/property/key/mesh size ceilings; retain native count, identity, source and topology integrity checks."
+    },
+    {
+      "name": "SaveGuard Apply Host.dsa",
+      "sourceSHA256": "5ecba65601a4650b81c95527594f09c0ccab04f0c2de1aaed8143104ccc6e70b",
+      "adapted": true,
+      "candidateSHA256": "23823a21a97c4a381a3b7ea6d6aefa87497bf5fc0793fb90c172a905369343ff"
+    },
+    {
+      "name": "SaveGuard Pose Target.dsa",
+      "sourceSHA256": "bf3836ff7d027dfbd941ee5dc8b44338ff476ac6de86a7ec0117511a995710bb",
+      "adapted": true,
+      "candidateSHA256": "b690554a13ab0248bd7c08be804b776148fba39d7d3ed68f39a834267790ecdb"
+    },
+    {
+      "name": "SaveGuard Detail Adapter.dsa",
+      "sourceSHA256": "b7df73b3fc930796f2a5b7d80aabdc393b9d533fd979ef1612ff5120a858ff13",
+      "adapted": true,
+      "candidateSHA256": "289a494bbef71b321209c7db125191034d8cb93e0600d0dfd3f2755d62746297"
+    },
+    {
+      "name": "SaveGuard Action Controller.dsa",
+      "sourceSHA256": "e92f8604891e9297a6e70d4b54151ba88f91e9bbfea59f29ff9307b381dd8ba2",
+      "adapted": true,
+      "candidateSHA256": "c16001a7122df9894dd54be7ec46bb28eeb8fcbb07cfd16b71148cfc23c85bfb"
+    },
+    {
+      "name": "SaveGuard Animation Guard.dsa",
+      "sourceSHA256": "12715193db7c479a1563c771ef37d36bc61e9416d3a2947d9f6b45ea49363c0c",
+      "adapted": true,
+      "candidateSHA256": "4b356276371c2c8f953c74616dc965712627237225a370c65f16d540d48724bc"
+    },
+    {
+      "name": "SaveGuard Figure Contract.dsa",
+      "sourceSHA256": "a3fbef075ed036a25bf57c385c500a01ebe5e40ff51045cd167e1bb28afd6a5d",
+      "adapted": false,
+      "candidateSHA256": "a3fbef075ed036a25bf57c385c500a01ebe5e40ff51045cd167e1bb28afd6a5d"
+    },
+    {
+      "name": "SaveGuard Figure Native Ports.dsa",
+      "sourceSHA256": "55224d5ea2d5fe429399ba43c8bc2ba9b9a143eed6c8dda5edf83f302f5c9c6e",
+      "adapted": true,
+      "candidateSHA256": "3aa33dc34904e659a2e4a6868c597a32088104fc68252291fcb53b43ae408d72"
+    },
+    {
+      "name": "SaveGuard Saved Figure Audit.dsa",
+      "sourceSHA256": "7224298526d0cc11253fbbb7b5da568817c640ba7e5a40f1a81e2b855e914456",
+      "adapted": true,
+      "candidateSHA256": "7872e2b976b9d1a2530008214f1051268c9874beb1b05d22f905363775b8b198",
+      "loadingFollowup": "Remove artificial scene/property/key/mesh size ceilings; retain native count, identity, source and topology integrity checks."
+    },
+    {
+      "name": "SaveGuard Figure Dependencies.dsa",
+      "sourceSHA256": "53cbc7ceb7cebdfefed60978da73d57e24a91b7294f33bada5d4fb9723e66203",
+      "adapted": true,
+      "candidateSHA256": "8e3b4a2320efd2f5efe45436c273eba80c01d4753977d9b41e3e23509496881e",
+      "loadingFollowup": "Remove automatic content/time/count/depth limits while retaining explicit caller budgets, cancellation and integrity/cycle checks"
+    },
+    {
+      "name": "SaveGuard Figure Load.dsa",
+      "sourceSHA256": "ae2a4f0ec6a35a5fe0fbbc4f1b93382549083952ff9829f3d8afc640cc2426e7",
+      "adapted": false,
+      "candidateSHA256": "ae2a4f0ec6a35a5fe0fbbc4f1b93382549083952ff9829f3d8afc640cc2426e7"
+    },
+    {
+      "name": "SaveGuard Scene Inventory.dsa",
+      "sourceSHA256": "38615a1d512afde2d9f6a680ba738607ebf59cd0dcc2e6ad4abdf55a25e4cc45",
+      "adapted": true,
+      "candidateSHA256": "b9355aad594fff33278f93ea4425ff18ad30d482762347c26ab2a638cae7809a"
+    },
+    {
+      "name": "SaveGuard Storage.dsa",
+      "sourceSHA256": "22076b531fd7aebe525427605fe590945c3009e784b8397e7dffd84c1f2f84b3",
+      "adapted": true,
+      "candidateSHA256": "e5e348616860bff412ba91daad41058b4172f8c63773cef0888df9e594c9fc77",
+      "loadingFollowup": "Remove automatic content/time/count/depth limits while retaining explicit caller budgets, cancellation and integrity/cycle checks"
+    },
+    {
+      "name": "SaveGuard Settings.dsa",
+      "sourceSHA256": "4ae0c0cca6cb49b61b5a08f09400ae6bcd07882fa08fd1a746378cdaea5e078f",
+      "adapted": true,
+      "candidateSHA256": "6b78d245cc16c631e4dbb281f60d9ea096fc522fca310923d1223a2eb374364e"
+    },
+    {
+      "name": "SaveGuard Static Mesh Audit.dsa",
+      "sourceSHA256": "eb722868b4ac88198671f05967e455285f826b64ea458101cbe5d1eea930dba5",
+      "adapted": true,
+      "candidateSHA256": "5a798935e2375bdabebe398f1aaf42bdba82384e505b9c2e853e0f632bbd9661",
+      "loadingFollowup": "Remove artificial scene/property/key/mesh size ceilings; retain native count, identity, source and topology integrity checks."
+    },
+    {
+      "name": "SaveGuard Static Prop Audit.dsa",
+      "sourceSHA256": "3a51bba44d4a27410190bba797d9541eb569371a6e11f5eb4ae12ed96da87d7b",
+      "adapted": true,
+      "candidateSHA256": "edcfa0899cc20b1983d02191f77d1913a30aedb57ed0e9f6b5ec1cd2b933dae0",
+      "loadingFollowup": "Remove artificial scene/property/key/mesh size ceilings; retain native count, identity, source and topology integrity checks."
+    },
+    {
+      "name": "SaveGuard Native Runtime.dsa",
+      "sourceSHA256": "a2aca9de593196081e5ea2c1c21a6d260d1be5f00a776cb7d2fca6ffe7ad11f5",
+      "adapted": true,
+      "candidateSHA256": "155a3d607c9f66c5798b1b60a6dfa92b66ec2c99a92ed7a52e1ee4c3f63d6ce0"
+    },
+    {
+      "name": "SaveGuard Manager Model.dsa",
+      "sourceSHA256": "eb8519cd90982c0fe6ef79f427e59ab7b87a515095055829f9fc6563047cceb3",
+      "adapted": true,
+      "candidateSHA256": "30b022da20d4cca0061a40da1c603540a7e32bac6e7fee39b966483fdcbc480b"
+    },
+    {
+      "name": "SaveGuard Manager Catalog.dsa",
+      "sourceSHA256": "6626420e97cebf41d18d20a4711a3ef27d77e78bd594f1b5f149606d0e142f48",
+      "adapted": true,
+      "candidateSHA256": "15c5d3a6a102430623072cf5ebcde9fba595e3f56a22b04f572071516e14887b"
+    },
+    {
+      "name": "SaveGuard Cache Snapshot.dsa",
+      "sourceSHA256": "fd8c965a9b91e81d4aeac389c68aa45bd17654b11873652a880b9bb64dca6057",
+      "adapted": true,
+      "candidateSHA256": "dc8225f93f03f9cc41e2e259231495b96bef15e9a452fa333f977e55ec43d4c6",
+      "loadingFollowup": "Remove automatic content/time/count/depth limits while retaining explicit caller budgets, cancellation and integrity/cycle checks"
+    },
+    {
+      "name": "SaveGuard Gzip Structure.dsa",
+      "sourceSHA256": "eae51bfb6735ecadbec1c073e80728aaf11681108353c2fc16687cc8d48864dc",
+      "adapted": true,
+      "candidateSHA256": "fc277313d1bf034757ad12500299dd038ea2033451e32a1cdd69d455aeda3bdd"
+    },
+    {
+      "name": "SaveGuard Native Source.dsa",
+      "sourceSHA256": "1e2d896545612e4121cca7e1013f424d23b0604e3d04231de700fe9bdccb736a",
+      "adapted": true,
+      "candidateSHA256": "1269070dd1d9795186eda552393379d3feca9736cc373f2f875a917b40fd6585",
+      "loadingFollowup": "Remove automatic content/time/count/depth limits while retaining explicit caller budgets, cancellation and integrity/cycle checks"
+    },
+    {
+      "name": "SaveGuard Selected Context.dsa",
+      "sourceSHA256": "1820524765124b224f056c0719aa0a8b8bbeabdc27c0ad4bc3651eb16785b934",
+      "adapted": true,
+      "candidateSHA256": "5e5a85daa754449826feb7cd705f77132c7b5e641abc7650ac6054947ac6d29b"
+    },
+    {
+      "name": "SaveGuard List Scanner.dsa",
+      "sourceSHA256": "72d0269dc9382ae3e24e8162eb700e159ce966365297c0c26447acee96d92abc",
+      "adapted": true,
+      "candidateSHA256": "91bba6e43213737459e0b5316b11c17daaeb3c701a6250e5d687b81d6d8a7d82"
+    },
+    {
+      "name": "SaveGuard List Stream.dsa",
+      "sourceSHA256": "9950e382cd06e9807a446a3452d3578f3b1a7cf796fbcb19dc1a0c47b2373f0c",
+      "adapted": true,
+      "candidateSHA256": "50fd927bad7cdc0467ed44c4876e13f5db29c48a5d12286cc1f6f5e98b570a59"
+    },
+    {
+      "name": "SaveGuard Fast Inspect.dsa",
+      "sourceSHA256": "b0429af10f91267ccf9da96eddac8a587cdba8c07039e020fc9a4ff644d3ad78",
+      "adapted": true,
+      "candidateSHA256": "f673c85ccc59f849d13c187244313c1956491d676539b45098ff07f22f0556b6"
+    },
+    {
+      "name": "SaveGuard Last Error Report.dsa",
+      "sourceSHA256": "b8dac5cce3dee5c3d9d7862faa702f8819bb092f284a18079314cee25d10ca38",
+      "adapted": false,
+      "candidateSHA256": "b8dac5cce3dee5c3d9d7862faa702f8819bb092f284a18079314cee25d10ca38"
+    },
+    {
+      "name": "SaveGuard Explicit Confirmation.dsa",
+      "sourceSHA256": "ee498b0c9258b3a9dd7ada06b6559d62c730b3a69d13efe97b5a2a6a7321b36a",
+      "adapted": true,
+      "candidateSHA256": "69a5481cf99295dad812ba8bc8547b56171c441db7784e98a77af9c15fc19646"
+    },
+    {
+      "name": "SaveGuard Timeline.dsa",
+      "sourceSHA256": "fffc30a38c0b998d8d48d12198959ccda7d276b0cdc81a0dee0d2c6f390fe1ad",
+      "adapted": true,
+      "candidateSHA256": "df049c4335cd7a5958502615bc36a9de3717735133855c0711e3918a170f2852"
+    },
+    {
+      "name": "SaveGuard Static Pose Plan.dsa",
+      "sourceSHA256": "705a93991be908d4e1c81997c388eaa8951447220685d986fc5b732e536993ee",
+      "adapted": false,
+      "candidateSHA256": "705a93991be908d4e1c81997c388eaa8951447220685d986fc5b732e536993ee"
+    },
+    {
+      "name": "SaveGuard Pose Preset.dsa",
+      "sourceSHA256": "0455c1b7e408c5d93fc04cafb6ee4f192ca010568167c5bea03fa3f7b1603ae4",
+      "adapted": true,
+      "candidateSHA256": "37474f0290d71fa99b23ebaba64e439b228bcb4d6b1af04ca8e188625f04fb5d",
+      "loadingFollowup": "Remove automatic content/time/count/depth limits while retaining explicit caller budgets, cancellation and integrity/cycle checks"
+    },
+    {
+      "name": "SaveGuard Pose Manager.dsa",
+      "sourceSHA256": "7ea0d747544343eb3079c7fbaf0f463b42ca523dad4e2acf4fb5012cf5fe92a9",
+      "adapted": false,
+      "candidateSHA256": "7ea0d747544343eb3079c7fbaf0f463b42ca523dad4e2acf4fb5012cf5fe92a9"
+    },
+    {
+      "name": "SaveGuard Wearable Plan.dsa",
+      "sourceSHA256": "9960dede51c9c320a4f11a9c06e8144766ef37e894bb7be0dbb5580f99850a98",
+      "adapted": false,
+      "candidateSHA256": "9960dede51c9c320a4f11a9c06e8144766ef37e894bb7be0dbb5580f99850a98"
+    },
+    {
+      "name": "SaveGuard Wearable Target.dsa",
+      "sourceSHA256": "53103a9acbd055b78e6bf7b6b93bd803c05da517227c94fe28b693375ec002b6",
+      "adapted": false,
+      "candidateSHA256": "53103a9acbd055b78e6bf7b6b93bd803c05da517227c94fe28b693375ec002b6"
+    },
+    {
+      "name": "SaveGuard Wearable Manager.dsa",
+      "sourceSHA256": "45ddbe39a77e5296d30758ba280aa37ee4f5577c88931cc48322c1897086ca29",
+      "adapted": true,
+      "candidateSHA256": "3bf74e9cb61e53c40fe893b6c04ffbc8a2ea916858d35544f34a3708536ae3f4",
+      "loadingFollowup": "Forward info.isCancelled into wearable dependency collection"
+    },
+    {
+      "name": "SaveGuard Materials.dsa",
+      "sourceSHA256": "c3bd0c63c846fa8f4214718fee4739fd7e615b5bf0d9c032fb5dc3ad567de414",
+      "adapted": false,
+      "candidateSHA256": "c3bd0c63c846fa8f4214718fee4739fd7e615b5bf0d9c032fb5dc3ad567de414"
+    },
+    {
+      "name": "SaveGuard Materials Manager.dsa",
+      "sourceSHA256": "ec59be232affff3b4e7ed67629d8a742eab4aec6dba00acaa4459f8f717a9a13",
+      "adapted": false,
+      "candidateSHA256": "ec59be232affff3b4e7ed67629d8a742eab4aec6dba00acaa4459f8f717a9a13"
+    },
+    {
+      "name": "SaveGuard Shape Plan.dsa",
+      "sourceSHA256": "0c2e2b6dd4446343714349178652f538842ee7db10f5a7f9d077f43b7d019891",
+      "adapted": false,
+      "candidateSHA256": "0c2e2b6dd4446343714349178652f538842ee7db10f5a7f9d077f43b7d019891"
+    },
+    {
+      "name": "SaveGuard Shape Native.dsa",
+      "sourceSHA256": "70e7a3cec79dbf1f556bb9e2162c7c78425eda04491c0f98e1c3c64070e3fee8",
+      "adapted": false,
+      "candidateSHA256": "70e7a3cec79dbf1f556bb9e2162c7c78425eda04491c0f98e1c3c64070e3fee8"
+    },
+    {
+      "name": "SaveGuard Shape Preset Plan.dsa",
+      "sourceSHA256": "f57c2b9482fbd650e980a330f4824d2b03a4a3691a657f90797b89041917e09e",
+      "adapted": true,
+      "candidateSHA256": "5735dda00da00eab35ea2e7a5c5f57421dbb07af6da1c453861a1376a1697581"
+    },
+    {
+      "name": "SaveGuard Shape Preset Run.dsa",
+      "sourceSHA256": "d93f5e0e536948169cfdc269b06911e57d8d9e6103f9e7bfc4fb08c224f824b8",
+      "adapted": false,
+      "candidateSHA256": "d93f5e0e536948169cfdc269b06911e57d8d9e6103f9e7bfc4fb08c224f824b8"
+    },
+    {
+      "name": "SaveGuard Shape Preset Target.dsa",
+      "sourceSHA256": "db70190c61071765578bb93a3512111e360da79ffa1c764f1d1e6245504baa40",
+      "adapted": false,
+      "candidateSHA256": "db70190c61071765578bb93a3512111e360da79ffa1c764f1d1e6245504baa40"
+    },
+    {
+      "name": "SaveGuard Shape Manager.dsa",
+      "sourceSHA256": "7cfe29d9361d921d019e9f22c7f5b2f8711c0ccb945b0cf51727c4cb10392151",
+      "adapted": false,
+      "candidateSHA256": "7cfe29d9361d921d019e9f22c7f5b2f8711c0ccb945b0cf51727c4cb10392151"
+    },
+    {
+      "name": "SaveGuard Light Icons.dsa",
+      "sourceSHA256": "b2427a759c20bccdf2a87ee0c7690203f782d7f4ec59dc2da38607ece130c2a4",
+      "adapted": true,
+      "candidateSHA256": "c89c2f1b673ac63d46d353227fb7de69f366673a414f808f9f8551fc876c53f1"
+    },
+    {
+      "name": "SaveGuard Light Assemblies.dsa",
+      "sourceSHA256": "261ef7b9d3c9c762b192016260ca324aef3ab45530d799840bb30204e18722a4",
+      "adapted": true,
+      "candidateSHA256": "56662d77a4a620821561e269ecb0ae90c1aea3dac0da47e77ab6de5235ee7300"
+    },
+    {
+      "name": "SaveGuard Render Settings.dsa",
+      "sourceSHA256": "6b34364efd78e434d61d1478f9682e1d095044f03b09c3a31406aee59170d1a9",
+      "adapted": true,
+      "candidateSHA256": "05000567dfa4d11db1b94930846cc5b20d0ad38badb0f08a6892d2f4f3ac16e1"
+    },
+    {
+      "name": "SaveGuard Render Manager.dsa",
+      "sourceSHA256": "94d95fa8a7083cc2bdc3344c7cfa26d24d9b7cc170f833ce8aec5a20df792935",
+      "adapted": true,
+      "candidateSHA256": "a321309f968f767d0711840f3e6777b7de016ed14740a6351964f3b2e342582d"
+    },
+    {
+      "name": "SaveGuard Motion Cache Source.dsa",
+      "sourceSHA256": "bb6ff3563cd9d887641fb69b220c5a1b4d20c58633187c40802046e6237285f0",
+      "adapted": true,
+      "candidateSHA256": "7f328034c8e6ebb6298fc1e089d2c0aed71d407f9e066caabc2e0a98bf20307c"
+    },
+    {
+      "name": "SaveGuard Wearable Cache Source.dsa",
+      "sourceSHA256": "4a85ffca24fc628035bff07fc22450c44ea3067830896d2efb1fba1e3ce0c5ed",
+      "adapted": true,
+      "candidateSHA256": "8eb3a2ca1989fee1119910867e2e193c635faef6fe565cdad8f3d43b16aabd1b"
+    },
+    {
+      "name": "SaveGuard Derived Metadata.dsa",
+      "sourceSHA256": "eafa482a6c6ff2753bffbd672c3ac92c8cc75ea4d372ef8322bdc4facb1d105c",
+      "adapted": true,
+      "candidateSHA256": "84c02e576bea0c4bef22c5401b7e2b48c2930c963d995ca84c91b8395a1389d8"
+    },
+    {
+      "name": "SaveGuard Camera Source Projection.dsa",
+      "sourceSHA256": "e143a68cbca8ed3a539fdd527b95ffef618ce2aed516d05176ac5f6ba45385c8",
+      "adapted": true,
+      "candidateSHA256": "9cbdb2a22ebd83406fb8828235150413bb995aaa28961ae6f96159fec97444fe"
+    },
+    {
+      "name": "SaveGuard Camera Source.dsa",
+      "sourceSHA256": "a2837d0de9c9357548f746f95ed55ba09ee40ff4c69c5934aa1b0b9c9393cb46",
+      "adapted": true,
+      "candidateSHA256": "f5ace2cc26b3dcb15f7fbab46af9bb4368fdd83c2a67bd2de0882f525dccf65c"
+    },
+    {
+      "name": "SaveGuard Camera Plan.dsa",
+      "sourceSHA256": "1c813e5e1dfdfa519b5829a043684dc139f00c3efcc19910033b3885622a4128",
+      "adapted": true,
+      "candidateSHA256": "9281bca621622f9f0f2c83c370bd37009b34193c3503c075e08d6f49e7baee3c"
+    },
+    {
+      "name": "SaveGuard Camera Properties.dsa",
+      "sourceSHA256": "ff4601ef79fccf9809b6191bc461ad064edcb95ffa9c8f2920cb965b844a212a",
+      "adapted": false,
+      "candidateSHA256": "ff4601ef79fccf9809b6191bc461ad064edcb95ffa9c8f2920cb965b844a212a"
+    },
+    {
+      "name": "SaveGuard Camera Parent Guard.dsa",
+      "sourceSHA256": "bc391e7277f235688c46ddea74cf4a5cedc6b1a8092c1bc6b638d3245e1dcf39",
+      "adapted": true,
+      "candidateSHA256": "60817cc8c7659543aa07564d88bec448b4968e1750e1f47cce4e02e041390d26"
+    },
+    {
+      "name": "SaveGuard Camera Restore.dsa",
+      "sourceSHA256": "f72dff518223133bf9de2d807a89785532581b1c2dba13918f2af71f3b7d0480",
+      "adapted": false,
+      "candidateSHA256": "f72dff518223133bf9de2d807a89785532581b1c2dba13918f2af71f3b7d0480"
+    },
+    {
+      "name": "SaveGuard Camera Manager.dsa",
+      "sourceSHA256": "5dbda5b9c042850e373648f82cd0772a80dc948e7621b5e0145b9801eab0e6fe",
+      "adapted": true,
+      "candidateSHA256": "d34dae6b60e0c6cbd8b7979d4c2dbe50b179ec4dda43bad9a5327433bfee3e2c"
+    },
+    {
+      "name": "SaveGuard Light Plan.dsa",
+      "sourceSHA256": "5236117f439951dee65ce1a6cc0eab8c8be05982e6c8c7ef340e6287f114a159",
+      "adapted": true,
+      "candidateSHA256": "31d790bf202633b5945660f7b8bf6be0d98249b93e96935adf47e5ed7ef06846"
+    },
+    {
+      "name": "SaveGuard Light Import.dsa",
+      "sourceSHA256": "3d52ce3cdfe478800f1e32e2cee615bf93b7099cfb5597749b7f3e6b45ec3675",
+      "adapted": false,
+      "candidateSHA256": "3d52ce3cdfe478800f1e32e2cee615bf93b7099cfb5597749b7f3e6b45ec3675"
+    },
+    {
+      "name": "SaveGuard Light Profiles.dsa",
+      "sourceSHA256": "3031f2fcc11e66611cacdfa43a2c4e369d106c24718fd9a8fe05e1a367d23f3e",
+      "adapted": true,
+      "candidateSHA256": "1d64274ffdf9012710505e098ec5960dc024be6779487aeee24972ae0a6b8dd2"
+    },
+    {
+      "name": "SaveGuard Photometric Plan.dsa",
+      "sourceSHA256": "733f1952db5511bf96a4a01fd6406e8a3518c4593c63692290d6e18490c86b3f",
+      "adapted": true,
+      "candidateSHA256": "d4209a71bd17cb36e8e0dcf802119df187e35ee39ab0637af8babedf870c2bb9"
+    },
+    {
+      "name": "SaveGuard Photometric Import.dsa",
+      "sourceSHA256": "a023a0896f2c637d0e3440c8f7ad4826ede5b06c969004fd4ea842946b2e1f7e",
+      "adapted": false,
+      "candidateSHA256": "a023a0896f2c637d0e3440c8f7ad4826ede5b06c969004fd4ea842946b2e1f7e"
+    },
+    {
+      "name": "SaveGuard Parented Photometric Plan.dsa",
+      "sourceSHA256": "d0b970bbc73696ce01114077e7c154cf4d9c0f694f4fe08ec81e5d134f816bf7",
+      "adapted": true,
+      "candidateSHA256": "f0cfd40ddc5febdb67ef466f65acfeae4cd0e4175a170a5ac2312a3c63c4bcad"
+    },
+    {
+      "name": "SaveGuard Parented Photometric Import.dsa",
+      "sourceSHA256": "d6d4f16036618b844d339cce629d0eaf20a478e61cf6e5242f232e3fb564d06d",
+      "adapted": false,
+      "candidateSHA256": "d6d4f16036618b844d339cce629d0eaf20a478e61cf6e5242f232e3fb564d06d"
+    },
+    {
+      "name": "SaveGuard Saved Light Values.dsa",
+      "sourceSHA256": "c0635c4dce7b6a0c7827df3fac75313f93a25061a746e05a84fff0dacecb153d",
+      "adapted": true,
+      "candidateSHA256": "403d652b87b60ff45b49d925eec0a3c61b4af2792039e84909281f45cf0e3ee1"
+    },
+    {
+      "name": "SaveGuard Emissives.dsa",
+      "sourceSHA256": "1552d930239b86eb3a33bde243e8d57ff75295aba3b1fc5ca80732ac84af52d5",
+      "adapted": false,
+      "candidateSHA256": "1552d930239b86eb3a33bde243e8d57ff75295aba3b1fc5ca80732ac84af52d5"
+    },
+    {
+      "name": "SaveGuard Minimal Native.dsa",
+      "sourceSHA256": "edcee2695a03b1e3c69df493f59923007e3c36aa1f1d0150e90d04c824e04b43",
+      "adapted": true,
+      "candidateSHA256": "1bcaec32c80712228559c3e35dc660113a8d07977b1cacd73839cc994d7961d0"
+    },
+    {
+      "name": "SaveGuard Minimal Selector.dsa",
+      "sourceSHA256": "8cb9460dbe4abeb0689802b32d423e8cc684208e46261a09125fef0154418858",
+      "adapted": true,
+      "candidateSHA256": "23616adb0800206bd0965bdc57b4df6305e9d051cfe41d8189a53312c46403a8"
+    },
+    {
+      "name": "SaveGuard Minimal Timeline.dsa",
+      "sourceSHA256": "a42803d501e144c069b540f828f54efd202517ecb73cdcd7e3caab030854d992",
+      "adapted": false,
+      "candidateSHA256": "a42803d501e144c069b540f828f54efd202517ecb73cdcd7e3caab030854d992"
+    },
+    {
+      "name": "SaveGuard Shape Preset IO.dsa",
+      "sourceSHA256": "a079e3612522877e0c6056c61de2b5ee3bdeb769d56628a6cbf263aa71197fe0",
+      "adapted": true,
+      "candidateSHA256": "af4af6ffd89c2f8e9c015091eebf531c5f1ee6b99dff4e5e5a43b1e9e5f6508e"
+    },
+    {
+      "name": "SaveGuard Motion Actions.dsa",
+      "sourceSHA256": "054b3faddf3a25b7593c7897756673520ae9c327c98cf36d3b340a5d4640c971",
+      "adapted": false,
+      "candidateSHA256": "054b3faddf3a25b7593c7897756673520ae9c327c98cf36d3b340a5d4640c971"
+    },
+    {
+      "name": "SaveGuard Inspection Cache.dsa",
+      "sourceSHA256": "07fb8525d6ab95e7242c1cebcd50711a2b9c1d30a68d8d3b9fe86976390da8fd",
+      "adapted": true,
+      "candidateSHA256": "9b05598cd9d211153ffc9953f446733b6bf30fea2e38dafa566d99dc9684d35d"
+    },
+    {
+      "name": "SaveGuard Load Cache.dsa",
+      "sourceSHA256": "b2df15535580408c30c0faccef47a4a2047b8d46cf727a3718fc1747fcd4eed3",
+      "adapted": true,
+      "candidateSHA256": "e28bf7bcd41986d832a00d3f91ebfa6aae403b2afa54870992e1046eeab66707",
+      "loadingFollowup": "Skip legacy oversized ready records; bound new identities; log hit/miss/write reasons"
+    },
+    {
+      "name": "SaveGuard Light Manager.dsa",
+      "sourceSHA256": "b6a3457ade6044ee4db69a6fec919ce5d0f015e451ba75f3858efdfe80dec660",
+      "adapted": true,
+      "candidateSHA256": "b10b73e1e640b65ded397acea425ae6301a32301ecf08a25331f17b9e8714dfd"
+    },
+    {
+      "name": "SaveGuard Camera Actions.dsa",
+      "sourceSHA256": "a9b189a6d07558f415f4d8da12226f4fd88ab3e9ffd78d8eb42c6823a31970fe",
+      "adapted": true,
+      "candidateSHA256": "6e4c871c03ef1682d7332dba22561f2b2074633ef5f56de746d51178349d599f"
+    },
+    {
+      "name": "SaveGuard Light Actions.dsa",
+      "sourceSHA256": "851e14f2602aaa7bd93eabf73cef77fac41bdff7d3a0f8e48d85e40e6898a9a9",
+      "adapted": true,
+      "candidateSHA256": "26f33fc1a1db8d84dd0d85e6ccaa0d9f26839d5d6713ad2a8c23e2fa7cd7cc80"
+    }
+  ],
+  "compatibility": {
+    "ES3": true,
+    "ES5": true,
+    "renames": [],
+    "policy": "AST-only ES3 reserved local identifiers renamed; reserved object keys quoted and member access changed to computed equivalent. Strings/comments unchanged.",
+    "adaptedSourceModules": [
+      "DUF Chunk Reader.dsa",
+      "DUF Gzip Stream.dsa",
+      "SG Full DUF.dsa",
+      "SaveGuard Selective.dsa",
+      "SaveGuard Asset Resolver.dsa",
+      "SaveGuard DSON Placement.dsa",
+      "SaveGuard Rollback Flags.dsa",
+      "SaveGuard Merge Audit.dsa",
+      "SaveGuard Apply Host.dsa",
+      "SaveGuard Pose Target.dsa",
+      "SaveGuard Detail Adapter.dsa",
+      "SaveGuard Action Controller.dsa",
+      "SaveGuard Animation Guard.dsa",
+      "SaveGuard Figure Native Ports.dsa",
+      "SaveGuard Saved Figure Audit.dsa",
+      "SaveGuard Figure Dependencies.dsa",
+      "SaveGuard Scene Inventory.dsa",
+      "SaveGuard Storage.dsa",
+      "SaveGuard Settings.dsa",
+      "SaveGuard Static Mesh Audit.dsa",
+      "SaveGuard Static Prop Audit.dsa",
+      "SaveGuard Native Runtime.dsa",
+      "SaveGuard Manager Model.dsa",
+      "SaveGuard Manager Catalog.dsa",
+      "SaveGuard Cache Snapshot.dsa",
+      "SaveGuard Gzip Structure.dsa",
+      "SaveGuard Selected Context.dsa",
+      "SaveGuard List Scanner.dsa",
+      "SaveGuard List Stream.dsa",
+      "SaveGuard Fast Inspect.dsa",
+      "SaveGuard Explicit Confirmation.dsa",
+      "SaveGuard Timeline.dsa",
+      "SaveGuard Wearable Manager.dsa",
+      "SaveGuard Shape Preset Plan.dsa",
+      "SaveGuard Light Icons.dsa",
+      "SaveGuard Light Assemblies.dsa",
+      "SaveGuard Render Settings.dsa",
+      "SaveGuard Render Manager.dsa",
+      "SaveGuard Motion Cache Source.dsa",
+      "SaveGuard Wearable Cache Source.dsa",
+      "SaveGuard Derived Metadata.dsa",
+      "SaveGuard Camera Source Projection.dsa",
+      "SaveGuard Camera Source.dsa",
+      "SaveGuard Camera Plan.dsa",
+      "SaveGuard Camera Manager.dsa",
+      "SaveGuard Light Plan.dsa",
+      "SaveGuard Light Profiles.dsa",
+      "SaveGuard Photometric Plan.dsa",
+      "SaveGuard Parented Photometric Plan.dsa",
+      "SaveGuard Saved Light Values.dsa",
+      "SaveGuard Minimal Native.dsa",
+      "SaveGuard Minimal Selector.dsa",
+      "SaveGuard Shape Preset IO.dsa",
+      "SaveGuard Inspection Cache.dsa",
+      "SaveGuard Light Manager.dsa",
+      "SaveGuard Camera Actions.dsa",
+      "SaveGuard Light Actions.dsa"
+    ],
+    "loadingBehavioralFixes": [
+      "SaveGuard Storage.dsa: persistent-cache publication API restored",
+      "SaveGuard Wearable Manager.dsa: dependency cancellation forwarded"
+    ]
+  },
+  "customModules": [
+    "Scene Editor Inspection Dialogs.dsa",
+    "Scene Editor Manager Runtime.dsa",
+    "Scene Editor Inspection Pane.dsa"
+  ],
+  "mutableSourceContract": {
+    "previewCache": "inspection-projection.json",
+    "sourceEvidence": "exact compressed/plain native byte signature in projection cache header; revalidated before inspection reuse and native actions",
+    "cacheFolder": "parent-created central owned folder per canonical working scene",
+    "preparedPayloadCache": "all by default; optional off; owned per-scene cache, exact working source evidence in identity, unchanged SaveGuard cache budgets and CTRL/deep-validation exclusions",
+    "sourceManifest": "synthetic code-owned working-file identity, never written beside DUF; no backup manifest requirement"
+  },
+  "interface": {
+    "runtime": "SceneEditorManagerRuntime.create({projectRoot,env,signature,cacheFolder,settings,onSuccess?})",
+    "inspect": "inspect(path,guard) returns active version/view/objects/searchObjects; previewInspect uses separate context, does not change active selection",
+    "pane": "SceneEditorInspectionPane.create(parent,bridge,{onEdit,onSuccess,onError,onBusy,iconPath},env)",
+    "paneMethods": [
+      "inspect",
+      "setInspection",
+      "selected",
+      "invalidate",
+      "isBusy",
+      "cancel",
+      "close"
+    ],
+    "figureDialog": "SceneEditorInspectionDialogs.openFigureManager(names,defaults,adapter)"
+  }
+}

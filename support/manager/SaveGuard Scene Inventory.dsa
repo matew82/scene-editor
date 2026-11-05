@@ -1,0 +1,35 @@
+var SaveGuardSceneInventory=(function(){
+    var reports=[];
+    function fail(message){throw Error(message);}
+    function countValid(value){return typeof value==="number"&&isFinite(value)&&value>=0&&value<=9007199254740991&&Math.floor(value)===value;}
+    function report(phase,count,start,extra){var row={phase:phase,nodes:count,milliseconds:new Date().getTime()-start};if(extra)row.uriReads=extra.uriReads;reports.push(row);if(reports.length>24)reports.shift();if(typeof print==="function")print("SaveGuard destination phase: "+JSON.stringify(row));}
+    function shape(kind,raw,expected,length){var row={phase:"native-list-shape",kind:kind,tag:Object.prototype.toString.call(raw),lengthType:typeof length,length:countValid(length)?length:null,expected:expected};reports.push(row);if(reports.length>24)reports.shift();if(typeof print==="function")print("SaveGuard destination list shape: "+JSON.stringify(row));return row;}
+    function sequence(raw,expected,kind){var length=raw&&raw.length,i,node,list=[];shape(kind,raw,expected,length);
+        if(!raw||typeof raw!=="object"||!countValid(length)||(expected!==null&&length!==expected))fail("Invalid native "+kind+" sequence shape/count; see list-shape evidence.");
+        for(i=0;i<length;i++){node=raw[i];if(!node||(typeof node!=="object"&&typeof node!=="function"))fail("Native "+kind+" enumeration returned a missing/invalid handle.");list.push(node);}
+        if(raw.length!==length)fail("Native "+kind+" sequence changed during enumeration.");
+        return list;
+    }
+    function nodes(scene){var started=new Date().getTime(),count=Number(scene.getNumNodes()),list=[],i;if(!countValid(count))fail("Invalid native scene node count.");
+        if(typeof scene.getNodeList==="function")list=sequence(scene.getNodeList(),count,"node");
+        else{for(i=0;i<count;i++)list.push(scene.getNode(i));}
+        if(Number(scene.getNumNodes())!==count)fail("Native node count changed during enumeration.");
+        for(i=0;i<list.length;i++)if(!list[i])fail("Native node enumeration returned null.");report("node-list",count,started);return list;
+    }
+    // DzUri.id is the native decoded identifier. Never coerce its native wrapper to String.
+    function assetUriId(uri){
+        if(uri===null||uri===undefined||uri==='')return '';
+        if(typeof uri==='string'){var parsed=SaveGuardSelective.parseURI(uri);return parsed.fragment||'';}
+        if(typeof uri!=='object'&&typeof uri!=='function')fail('Native asset URI has an invalid type.');
+        var id=uri.id;if(typeof id!=='string')fail('Native asset URI identifier is not a primitive string.');
+        return id;
+    }
+    function ids(scene,deep){var started=new Date().getTime(),list=nodes(scene),result=[],i,id,uri,parsed,reads=0;
+        for(i=0;i<list.length;i++){id=String(list[i].assetId||"");if(id)result.push(id);if(deep===true){uri=list[i].assetUri;reads++;if(uri){parsed=assetUriId(uri);if(parsed)result.push(parsed);}}}
+        report("existing-id-list",list.length,started,{uriReads:reads});return result;
+    }
+    function selected(scene){var list,i,result=[];if(typeof scene.getSelectedNodeList==="function")return sequence(scene.getSelectedNodeList(),null,"selection");
+        list=nodes(scene);for(i=0;i<list.length;i++)if(list[i].isSelected())result.push(list[i]);return result;
+    }
+    return {nodes:nodes,ids:ids,assetUriId:assetUriId,selected:selected,metrics:function(){return reports.slice(0);}};
+}());

@@ -1,0 +1,130 @@
+// Read-only content lookup and strict DSON asset document access. No scene APIs.
+var SaveGuardAssetResolver = (function () {
+    function own(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+    function array(v) { return Object.prototype.toString.call(v) === "[object Array]"; }
+    function fail(code, message) { var e = new Error(message); e.code = code; throw e; }
+    function create(env, options) {
+        options = options || {}; var content = env.App.getContentMgr(), reader = options.reader || SaveGuardFullDUF, domain = options.selective || SaveGuardSelective,
+            entries = {}, count = 0, parsedCount = 0, closed = false;
+        if (options.lowMemoryMode !== undefined && typeof options.lowMemoryMode !== "boolean") { fail("ASSET_MODE", "Asset lowMemoryMode must be an explicit boolean."); }
+        var lowMemoryMode = options.lowMemoryMode === true;
+        function cap(key) { var n = options[key]; if (n === undefined || n === null) { return null; } if (typeof n !== 'number' || !isFinite(n) || n < 1 || Math.floor(n) !== n) { fail('ASSET_LIMIT', key + ' must be a positive integer when explicitly configured'); } return n; }
+        var maxFiles = cap('maxFiles'), maxDocuments = cap('maxDocuments');
+        function guard() { if (closed) { fail("CLOSED", "Asset resolver is closed."); } if (options.isCancelled && options.isCancelled()) { fail("CANCELLED", "Asset resolution cancelled."); } }
+        function info(path) {
+            var f = new env.DzFileInfo(path); if (!f.exists() || !f.isFile() || !f.isReadable()) { fail("MISSING_EXTERNAL", "External file is not readable: " + path); }
+            var canonical = typeof f.canonicalFilePath === "function" ? String(f.canonicalFilePath()) : "";
+            if (!canonical) { fail("ASSET_PATH", "Canonical external file identity is unavailable."); }
+            return { path: canonical.replace(/\\/g, "/"), bytes: Number(f.size()), modified: String(f.lastModified()) };
+        }
+        function decode(file) { try { return decodeURIComponent(file); } catch (e) { fail("ASSET_URI", "Invalid escaped dependency file path."); } }
+        function encodedPath(path) { var p = path.split("/"), i; for (i = 0; i < p.length; i += 1) { p[i] = encodeURIComponent(p[i]); } return p.join("/"); }
+        function locate(file) {
+            guard(); if (typeof file !== "string" || !file || /[?#\x00-\x1f\\]/.test(file)) { fail("ASSET_URI", "Expected a DSON file path without fragment or query."); }
+            var decoded = decode(file), resolved, uri = file, base, relative;
+            if (/^\/[A-Za-z]:\//.test(decoded)) { resolved = decoded.substring(1); }
+            else if (/^[A-Za-z]:\//.test(decoded)) { fail("ASSET_URI", "Windows file dependencies require their DSON absolute URI form."); }
+            else if (file.charAt(0) === "/") { resolved = String(content.findFile(decoded)); }
+            else {
+                if (!options.sourceDocumentPath) { fail("RELATIVE_DEPENDENCY", "Source document path is required for a relative dependency."); }
+                base = String(options.sourceDocumentPath).replace(/\\/g, "/").replace(/\/[^/]*$/, ""); resolved = base + "/" + decoded;
+            }
+            if (!resolved) { fail("MISSING_EXTERNAL", "Content manager did not find: " + file); }
+            var result = info(resolved);
+            if (file.charAt(0) !== "/") {
+                if (typeof content.getRelativePath !== "function") { fail("RELATIVE_DEPENDENCY", "Content rebasing API is unavailable."); }
+                relative = String(content.getRelativePath(result.path, true)).replace(/\\/g, "/");
+                if (!relative || relative === result.path || /^[A-Za-z]:\//.test(relative) || /(?:^|\/)\.\.(?:\/|$)/.test(relative)) { fail("RELATIVE_DEPENDENCY", "Relative dependency is outside mapped content and cannot be safely rebased."); }
+                uri = "/" + encodedPath(relative.replace(/^\/+/, ""));
+                if (info(String(content.findFile(decode(uri)))).path !== result.path) { fail("AMBIGUOUS_EXTERNAL", "Rebased content URI resolves to a different file."); }
+            }
+            result.uri = uri; result.source = file; return result;
+        }
+        function entry(file) {
+            guard(); var k = "$" + file;
+            if (own(entries, k)) { return entries[k]; }
+            if (maxFiles!==null && count >= maxFiles) { fail("LIMIT_FILES", "External dependency metadata limit exceeded."); }
+            var e = locate(file); e.readResult = null; e.document = null; entries[k] = e; count += 1; return e;
+        }
+        function asset(file) {
+            var e = entry(file); guard(); if (!/\.(dsf|duf)$/i.test(e.path)) { fail("ASSET_TYPE", "Only actual DSF/DUF files can provide node definitions."); }
+            if (!e.readResult) {
+                if (typeof reader.readAsset !== "function") { fail("API", "Full reader readAsset entry point is required."); }
+                if (maxDocuments!==null && parsedCount >= maxDocuments) { fail("LIMIT_DOCUMENTS", "Parsed asset document limit exceeded."); }
+                var opts = {}, k, sourceOptions = options.readerOptions || {}, candidate = null;
+                for (k in sourceOptions) { if (own(sourceOptions, k)) { opts[k] = sourceOptions[k]; } }
+                opts.lowMemoryMode = lowMemoryMode; opts.deepValidation = options.deepValidation === true; opts.isCancelled = options.isCancelled; opts.onProgress = options.onProgress;
+                try {
+                    candidate = reader.readAsset(e.path, opts);
+                    if (!candidate || !candidate.provider) { fail("ASSET_READ", "A verified asset provider is required."); }
+                    if (!lowMemoryMode && !candidate.document) { fail("ASSET_READ", "Fast mode requires the complete asset document."); }
+                    e.document = lowMemoryMode ? domain.fromProvider(candidate.provider) : candidate.document;
+                    if (!e.document) { fail("ASSET_READ", "Asset planning document is unavailable."); }
+                    e.readResult = candidate; parsedCount += 1;
+                } catch (error) { if (candidate && candidate.provider) { candidate.provider.close(); } e.document = null; throw error; }
+            }
+            return { verified: true, document: e.document, path: e.path, uri: e.uri, readMetrics:e.readResult.metrics||null, sourceBytes:e.bytes, lowMemoryMode: lowMemoryMode, planningOnly: lowMemoryMode,
+                verificationScope: options.deepValidation === true ? "deep reader integrity and exact fragments" : "reader parsing, source metadata and exact referenced fragments",
+                verify: function () { guard(); return e.readResult.provider.verifySource(); },
+                readRecord: function (group, index) { guard(); return e.readResult.provider.readRecord(group, index); },
+                readRecords: function (requests) { guard(); return e.readResult.provider.readRecords(requests); } };
+        }
+        function fragment(file, id) {
+            var d = asset(file).document, hit = null, k, i, records;
+            for (k in d) { if (own(d, k) && /_library$/.test(k) && array(d[k])) {
+                records = d[k]; for (i = 0; i < records.length; i += 1) { if (records[i] && records[i].id === id) {
+                    if (hit) { fail("AMBIGUOUS_EXTERNAL", "Duplicate exact asset fragment: " + id); } hit = { group: k, index: i, value: records[i] };
+                } }
+            } }
+            if (!hit) { fail("MISSING_FRAGMENT", "Referenced asset fragment is absent: " + file + "#" + id); } return hit;
+        }
+        // A dependency visit owns this index only until its synchronous callback returns.
+        // No index survives to another visit or aliases a cache for another document.
+        function fragmentIndex(d, file) {
+            var byId = {}, k, i, records, record, id, bucket, scanned = 0;
+            for (k in d) { if (own(d, k) && /_library$/.test(k) && array(d[k])) {
+                records = d[k]; for (i = 0; i < records.length; i += 1) {
+                    if ((scanned++ & 255) === 0) { guard(); }
+                    record = records[i]; id = record && record.id; if (typeof id !== "string") { continue; }
+                    id = "$" + id; bucket = byId[id];
+                    if (bucket) { bucket.duplicate = true; }
+                    else { byId[id] = { group: k, index: i, value: record, duplicate: false }; }
+                }
+            } }
+            return function (id) {
+                guard(); var hit = typeof id === "string" ? byId["$" + id] : null;
+                if (typeof id !== "string") { return fragment(file, id); }
+                if (!hit) { fail("MISSING_FRAGMENT", "Referenced asset fragment is absent: " + file + "#" + id); }
+                if (hit.duplicate) { fail("AMBIGUOUS_EXTERNAL", "Duplicate exact asset fragment: " + id); }
+                return { group: hit.group, index: hit.index, value: hit.value };
+            };
+        }
+        function visitDependencyFragments(file, visit) {
+            var lookup = fragmentIndex(asset(file).document, file), active = true;
+            try { return visit(function (id) { guard(); if (!active) { fail("CLOSED", "Dependency fragment visit is closed."); } return lookup(id); }); }
+            finally { active = false; lookup = null; }
+        }
+        function resolveExternal(file, dependency) {
+            var e = entry(file), uris = dependency && dependency.uris || [], i, parsed, lookup = null;
+            for (i = 0; i < uris.length; i += 1) {
+                parsed = domain.parseURI(uris[i]);
+                if (parsed.kind === "unsafe" || parsed.file !== file) { fail("ASSET_URI", "Dependency URI does not address the checked file."); }
+                if (parsed.fragment) { if (!lookup) { lookup = fragmentIndex(asset(file).document, file); } lookup(parsed.fragment); }
+            }
+            return { exists: true, uri: e.uri, path: e.path, checkedFragments: uris.length, verificationScope: /\.(dsf|duf)$/i.test(e.path) ? "file + exact referenced fragments" : "readable file metadata" };
+        }
+        function verifyAll() {
+            guard(); var k, e, now;
+            for (k in entries) { if (own(entries, k)) {
+                e = entries[k]; now = locate(e.source);
+                if (now.path !== e.path || now.bytes !== e.bytes || now.modified !== e.modified || now.uri !== e.uri) { fail("ASSET_CHANGED", "External dependency changed: " + e.source); }
+                if (e.readResult && e.readResult.provider.verifySource() !== true) { fail("ASSET_CHANGED", "External asset document changed."); }
+            } } return true;
+        }
+        function verificationStats() { var out=[],k,e;for(k in entries)if(own(entries,k)){e=entries[k];if(e.readResult&&e.readResult.provider&&typeof e.readResult.provider.verificationStats==="function")out.push(e.readResult.provider.verificationStats());}return out; }
+        return { verificationStats: verificationStats, resolveExternal: resolveExternal, resolveAssetDocument: asset, resolveFragment: fragment, visitDependencyFragments: visitDependencyFragments, verifyAll: verifyAll,
+            stats: function () { return { files: count, documents: parsedCount, maxFiles: maxFiles, maxDocuments: maxDocuments, lowMemoryMode: lowMemoryMode, closed: closed }; },
+            close: function () { if (closed) { return; } closed = true; var k; for (k in entries) { if (own(entries, k) && entries[k].readResult) { entries[k].readResult.provider.close(); } } entries = {}; } };
+    }
+    return { create: create };
+}());

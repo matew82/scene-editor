@@ -1,0 +1,6 @@
+// Parent transforms and authored controls stay in the native dependency closure.
+var SaveGuardPhotometricParentBase=(function(){return {extract:function(doc,id,ns,force,options){return SaveGuardLightPlan.extract(doc,id,ns,force,options);}};}());
+var SaveGuardPhotometricParentPlan=(function(){
+ function extract(doc,id,ns,force,options){var p=SaveGuardPhotometricParentBase.extract(doc,id,ns,force,options),s=p.specs[p.selectedIndex];if(p.photometric!==true)throw Error('Photometric mode is required');p.expectedSourceChannels=0;for(var i=0;i<p.specs.length;i++)p.expectedSourceChannels+=p.specs[i].channels.length;if(p.specs.length>=2&&p.selectedIndex===p.specs.length-1&&(s.kind==='point'||s.kind==='spot'))p.profile=s.kind==='spot'?'static-parented-spot-rectangle-v1':'static-parented-point-rectangle-v1';else p.profile='native-photometric-closure-v2';return p;}
+ return {extract:extract};
+}());

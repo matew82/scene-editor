@@ -1,0 +1,66 @@
+// Pure DSON transform evaluator. Native build conformance is a separate audit gate.
+var SaveGuardDSONPlacement = (function () {
+    function own(o, k) { return !!o && Object.prototype.hasOwnProperty.call(o, k); }
+    function fail(message) { var e = new Error(message); e.code = "PLACEMENT_UNSUPPORTED"; throw e; }
+    function identity() { return [1,0,0,0,1,0,0,0,1]; }
+    function mul(a,b) { var o=[],r,c,k; for(r=0;r<3;r+=1){for(c=0;c<3;c+=1){o[r*3+c]=0;for(k=0;k<3;k+=1){o[r*3+c]+=a[r*3+k]*b[k*3+c];}}}return o; }
+    function vector(m,v) { return [m[0]*v[0]+m[1]*v[1]+m[2]*v[2],m[3]*v[0]+m[4]*v[1]+m[5]*v[2],m[6]*v[0]+m[7]*v[1]+m[8]*v[2]]; }
+    function transpose(m) {return [m[0],m[3],m[6],m[1],m[4],m[7],m[2],m[5],m[8]];}
+    function inverse(m) { var d=m[0]*(m[4]*m[8]-m[5]*m[7])-m[1]*(m[3]*m[8]-m[5]*m[6])+m[2]*(m[3]*m[7]-m[4]*m[6]);if(Math.abs(d)<1e-12){fail("Singular inherited scale.");}return [(m[4]*m[8]-m[5]*m[7])/d,(m[2]*m[7]-m[1]*m[8])/d,(m[1]*m[5]-m[2]*m[4])/d,(m[5]*m[6]-m[3]*m[8])/d,(m[0]*m[8]-m[2]*m[6])/d,(m[2]*m[3]-m[0]*m[5])/d,(m[3]*m[7]-m[4]*m[6])/d,(m[1]*m[6]-m[0]*m[7])/d,(m[0]*m[4]-m[1]*m[3])/d]; }
+    function rotation(v,order) {
+        if (!/^(XYZ|XZY|YXZ|YZX|ZXY|ZYX)$/.test(order)) {fail("Unsupported Euler rotation order.");}
+        var out=identity(),i,a,c,s,m,at;
+        for(i=0;i<3;i+=1){a=order.charAt(i);at=a==='X'?0:a==='Y'?1:2;c=Math.cos(v[at]*Math.PI/180);s=Math.sin(v[at]*Math.PI/180);
+            m=a==='X'?[1,0,0,0,c,-s,0,s,c]:a==='Y'?[c,0,s,0,1,0,-s,0,c]:[c,-s,0,s,c,0,0,0,1];out=mul(m,out);}
+        return out;
+    }
+    function channel(v) { var n=v&&typeof v==='object'?(own(v,'current_value')?v.current_value:v.value):v;if(typeof n!=='number'||!isFinite(n)){fail("Missing or nonnumeric transform channel.");}return n; }
+    function axes(chain,key,defaults) { var out=defaults.slice(0),i,j,a,v,idx;for(i=0;i<chain.length;i+=1){a=chain[i][key];if(a===undefined){continue;}if(Object.prototype.toString.call(a)!=='[object Array]'){fail("Malformed transform axes: "+key);}for(j=0;j<a.length;j+=1){v=a[j];idx=v&&v.id==='x'?0:v&&v.id==='y'?1:v&&v.id==='z'?2:-1;if(idx<0){fail("Unknown transform axis: "+key);}out[idx]=channel(v);}}return out; }
+    function field(chain,key,fallback) {for(var i=chain.length-1;i>=0;i-=1){if(own(chain[i],key)){return chain[i][key];}}return fallback;}
+    function compute(document,options) {
+        options=options||{};var domain=options.selective||SaveGuardSelective,nodes=document.scene&&document.scene.nodes||[],byId={},done={},visiting={},results=[],i;
+        for(i=0;i<nodes.length;i+=1){if(!nodes[i].id||own(byId,'$'+nodes[i].id)){fail("Missing or duplicate instance ID.");}byId['$'+nodes[i].id]=nodes[i];}
+        function definition(uri,doc,depth) {
+            var chain=[],seen={},file='',scopeId=['scene'],p,a,found,j,loaded;
+            while(true){
+                p=domain.parseURI(uri);
+                if(p.kind==='external'){
+                    if(!options.resolveAssetDocument)fail('External definition requires verified asset reader.');
+                    var nextFile=p.file;if(file&&nextFile.charAt(0)!=='/'){var parts=(file.substring(0,file.lastIndexOf('/')+1)+nextFile).split('/'),out=[];for(var pi=0;pi<parts.length;pi++){if(parts[pi]==='..'){if(!out.length)fail('Definition path escapes content root.');out.pop();}else if(parts[pi]&&parts[pi]!=='.')out.push(parts[pi]);}nextFile=(file.charAt(0)==='/'?'/':'')+out.join('/');}
+                    loaded=options.resolveAssetDocument(nextFile);if(!loaded||loaded.verified!==true||!loaded.document)fail('Unverified external definition.');
+                    doc=loaded.document;file=typeof loaded.uri==='string'&&loaded.uri?loaded.uri:nextFile;scopeId=['asset',typeof loaded.path==='string'&&loaded.path?loaded.path:nextFile];
+                }else if(p.kind!=='local')fail('Unsupported node definition URI.');
+                var identity=JSON.stringify([scopeId,p.fragment]);if(own(seen,identity))fail('Cyclic node definition inheritance.');seen[identity]=true;
+                a=doc.node_library||[];found=null;for(j=0;j<a.length;j++)if(a[j].id===p.fragment){if(found)fail('Ambiguous node definition.');found=a[j];}
+                if(!found)fail('Missing exact node definition: '+uri);chain.push(found);if(!found.source)break;uri=found.source;
+            }
+            chain.reverse();return chain;
+        }
+        function visit(id,depth) {
+            if(own(done,'$'+id))return done['$'+id];var stack=[],current=id;
+            while(!own(done,'$'+current)){
+                if(own(visiting,'$'+current))fail('Cyclic parent chain.');visiting['$'+current]=true;
+                var n=byId['$'+current];if(!n)fail('Parent is outside the staged node closure.');if(n.parent_in_place)fail('parent_in_place placement needs a separate native conformance profile.');if(n.conform_target)fail('Fitted/conformed placement needs a separate native conformance profile.');
+                var chain=definition(n.url,document,0);chain.push(n);var type=field(chain,'type','node'),order=field(chain,'rotation_order','XYZ');if(!/^(node|camera|light|figure|bone)$/.test(type))fail('Unsupported node type.');
+                var parentId='',p=n.parent?domain.parseURI(n.parent):null;if(p){if(p.kind!=='local'||p.query||p.nodePath)fail('Unsupported staged parent URI.');parentId=p.fragment;}
+                stack.push({id:current,n:n,chain:chain,type:type,order:order,parentId:parentId});if(!parentId)break;current=parentId;
+            }
+            var requested=id;while(stack.length){var frame=stack.pop();id=frame.id;n=frame.n;chain=frame.chain;type=frame.type;order=frame.order;parentId=frame.parentId;var parent=parentId?done['$'+parentId]:null;
+            var center=axes(chain,'center_point',[0,0,0]),orientation=rotation(axes(chain,'orientation',[0,0,0]),'XYZ'),orientInverse=transpose(orientation),
+                rot=rotation(axes(chain,'rotation',[0,0,0]),order),translation=axes(chain,'translation',[0,0,0]),scale=axes(chain,'scale',[1,1,1]),g=field(chain,'general_scale',1),general=channel(g),
+                inherit=field(chain,'inherits_scale',!(type==='bone'&&parent&&parent.type==='bone')),localScale=mul(mul(orientation,[scale[0]*general,0,0,0,scale[1]*general,0,0,0,scale[2]*general]),orientInverse),
+                globalRot=mul(parent?parent.rotation:identity(),mul(mul(orientation,rot),orientInverse)),globalScale=parent?parent.scale:identity();
+            if(typeof inherit!=='boolean'){fail("inherits_scale must be boolean.");}if(!inherit&&parent){globalScale=mul(globalScale,inverse(parent.localScale));}globalScale=mul(globalScale,localScale);
+            var localPosition=[center[0]+translation[0]-(parent?parent.center[0]:0),center[1]+translation[1]-(parent?parent.center[1]:0),center[2]+translation[2]-(parent?parent.center[2]:0)],
+                position=parent?vector(parent.basis,localPosition):localPosition,basis=mul(globalRot,globalScale),j;
+            if(parent){for(j=0;j<3;j+=1){position[j]+=parent.position[j];}}
+            var ref=domain.parseURI(n.url),out={id:id,parentId:parentId,type:type,definitionId:ref.fragment,definitionUri:n.url,center:center,rotation:globalRot,scale:globalScale,localScale:localScale,basis:basis,position:position,
+                world:[basis[0],basis[3],basis[6],basis[1],basis[4],basis[7],basis[2],basis[5],basis[8],position[0],position[1],position[2]],record:n,definitionChain:chain};
+                done['$'+id]=out;delete visiting['$'+id];
+            }return done['$'+requested];
+        }
+        for(i=0;i<nodes.length;i+=1){results.push(visit(nodes[i].id,0));}
+        return { nodes:results,byId:done,rule:'DSON-factorized-rotation-scale',nativeVerified:false };
+    }
+    return { compute:compute };
+}());

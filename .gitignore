@@ -1,0 +1,47 @@
+# Local preferences and private credentials (same policy as SaveGuard).
+/[Ss][Ee][Tt][Tt][Ii][Nn][Gg][Ss]/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12
+/.aws/
+/.codex/
+
+# Local diagnostics, test runs, rollback copies and generated test reports.
+# Bracket spelling intentionally ignores Diagnostics in every letter case.
+[Dd][Ii][Aa][Gg][Nn][Oo][Ss][Tt][Ii][Cc][Ss]/
+
+# Scene payloads, backup files, caches and transient action payloads.
+*.duf
+*.dsf
+*.partial
+*.tmp
+*.log
+*.zip
+*.bak
+*.orig
+*~
+[Cc][Aa][Cc][Hh][Ee]/
+camera-actions/
+light-actions/
+Scenes Copies/
+Restored Scenes/
+copies/
+restore/
+backups/
+runtime/
+
+# Generated tool output. Product DSA entry points and PNG artwork stay tracked.
+node_modules/
+__pycache__/
+*.py[cod]
+Thumbs.db
+.DS_Store
+
+# Preserve deliberate fixtures if a separate tests directory is added later.
+!tests/fixtures/**/*.duf
+!tests/fixtures/**/*.dsf
+/tests/*-results.json

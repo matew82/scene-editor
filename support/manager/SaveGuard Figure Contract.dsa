@@ -1,0 +1,43 @@
+var SaveGuardFigureContract=(function(){
+    function own(o,k){return !!o&&Object.prototype.hasOwnProperty.call(o,k);}
+    function array(v){return Object.prototype.toString.call(v)==="[object Array]";}
+    function fail(message){throw Error("Figure contract: "+message);}
+    function create(domain){
+        function local(uri){if(!uri)return "";var p=domain.parseURI(uri);if(p.kind!=="local"||p.query||p.nodePath)fail("Nonlocal instance relationship: "+uri);return p.fragment;}
+        function prepare(document,selectedId,ports){
+            if(!ports||typeof ports.resolveAssetDocument!=="function"||typeof ports.resolveExternal!=="function"||!array(ports.existingIds)||!ports.namespace)fail("Explicit source resolver and current ID inventory required.");
+            var plan=domain.plan(document,[selectedId],{fullData:true,resolveAssetDocument:ports.resolveAssetDocument});if(!plan.ready)fail(plan.errors.join("; "));
+            var built=domain.extract(document,plan,{namespace:ports.namespace,existingIds:ports.existingIds,resolveExternal:ports.resolveExternal});return fromBuilt(built,ports,plan);
+        }
+        function fromBuilt(built,ports,plan){
+            var doc=built.document,nodes=doc.scene.nodes||[],ids=[],byId={},i,j,n,r;plan=plan||built.summary;
+            if(!nodes.length)fail("Imported node list is empty.");
+            for(i=0;i<nodes.length;i++){n=nodes[i];if(!n.id||own(byId,"$"+n.id))fail("Missing/duplicate imported node identity.");ids.push(n.id);byId["$"+n.id]=n;}
+            var transforms=domain.transformSource(doc,ids,{resolveAssetDocument:ports.resolveAssetDocument});if(!transforms.ready)fail(transforms.errors.join("; "));var state={};for(i=0;i<transforms.nodes.length;i++)state["$"+transforms.nodes[i].id]=transforms.nodes[i];
+            var expected=[],expectedMap={},figures=0,bones=0,geometryOwners={},modifiers=[],surfaces=[];
+            for(i=0;i<nodes.length;i++){n=nodes[i];r=state["$"+n.id];if(!r||!/^(node|figure|bone)$/.test(r.type))fail("Unsupported descendant type: "+n.id+" / "+(r&&r.type));
+                if(n.parent&&n.parent_in_place)fail("Conflicting parent modes: "+n.id);var parent=local(n.parent||n.parent_in_place),fit=local(n.conform_target);if(parent&&!own(byId,"$"+parent)||fit&&!own(byId,"$"+fit))fail("Incomplete parent/follower closure: "+n.id);
+                var e={id:n.id,definitionId:domain.parseURI(n.url).fragment,type:r.type,parentId:parent,parentMode:n.parent_in_place?"parent_in_place":parent?"parent":"none",conformTargetId:fit,sourceState:r.state,geometryCount:(n.geometries||[]).length};expected.push(e);expectedMap["$"+n.id]=e;if(r.type==="figure")figures++;if(r.type==="bone")bones++;
+                for(j=0;j<(n.geometries||[]).length;j++){var g=n.geometries[j];if(!g.id||own(geometryOwners,"$"+g.id))fail("Ambiguous geometry instance");geometryOwners["$"+g.id]=n.id;}
+            }
+            if(!figures)fail("No figure in selected closure.");
+            for(i=0;i<expected.length;i++){e=expected[i];var at=e,seen={},skeleton="";while(at){if(own(seen,"$"+at.id))fail("Cyclic parent chain");seen["$"+at.id]=true;if(at.type==="figure"){skeleton=at.id;break;}at=expectedMap["$"+at.parentId];}e.skeletonId=e.type==="bone"?skeleton:"";if(e.type==="bone"&&!skeleton)fail("Bone has no imported skeleton: "+e.id);if(e.conformTargetId&&(e.type!=="figure"||expectedMap["$"+e.conformTargetId].type!=="figure"))fail("Unsupported follower relationship: "+e.id);}
+            var materials=doc.scene.materials||[];for(i=0;i<materials.length;i++){var m=materials[i],geometry=local(m.geometry),owner=geometryOwners["$"+geometry];if(!owner)fail("Material is not bound to an imported geometry: "+m.id);if(!array(m.groups)||!m.groups.length)fail("Material has no explicit surface groups: "+m.id);surfaces.push({id:m.id,nodeId:owner,geometryId:geometry,groups:m.groups.slice(0),url:m.url});}
+            var mods=doc.scene.modifiers||[];for(i=0;i<mods.length;i++){m=mods[i];var target=local(m.parent),ownerNode=byId["$"+target]?target:geometryOwners["$"+target];if(!ownerNode)fail("Modifier is not owned by the imported closure: "+m.id);var channel=m.channel||null,value=channel&&own(channel,"current_value")?channel.current_value:channel?channel.value:undefined;
+                if(value!==undefined&&!(typeof value==="number"&&isFinite(value))&&!(channel&&channel.type==="file"&&typeof value==="string")&&typeof value!=="boolean")fail("Unsupported modifier channel value: "+m.id);modifiers.push({id:m.id,nodeId:ownerNode,definitionId:domain.parseURI(m.url).fragment,url:m.url,channelId:channel&&channel.id||null,channelType:channel&&channel.type||null,passiveFileReference:!!channel&&channel.type==="file",value:value});}
+            return {plan:plan,built:built,nodes:expected,byId:expectedMap,modifiers:modifiers,surfaces:surfaces,counts:{nodes:expected.length,figures:figures,bones:bones,modifiers:modifiers.length,surfaceBindings:surfaces.length},nativeVerified:false,controlSemanticsVerified:false};
+        }
+        function verifyRelationships(contract,bindings,ports){
+            if(!ports||typeof ports.identityKey!=="function"||typeof ports.same!=="function"||typeof ports.nodeType!=="function"||typeof ports.assetId!=="function"||typeof ports.parent!=="function"||typeof ports.skeleton!=="function"||typeof ports.followTarget!=="function")fail("Imported relationship adapter required.");
+            var errors=[],handles={},i,j,e,n,actual,expected,count=0,k;for(k in bindings)if(own(bindings,k))count++;if(count!==contract.nodes.length)errors.push("Imported binding count differs");
+            for(i=0;i<contract.nodes.length;i++){e=contract.nodes[i];n=bindings["$"+e.id];if(!n){errors.push("Missing imported node "+e.id);continue;}var identity=ports.identityKey(n);if(typeof identity!=="string"&&typeof identity!=="number")fail("Missing native identity key");if(own(handles,"$"+identity))errors.push("Duplicate imported native identity "+e.id);handles["$"+identity]=n;
+                if(ports.assetId(n)!==e.definitionId||ports.nodeType(n)!==e.type)errors.push("Wrong imported definition/type "+e.id);actual=ports.parent(n);expected=e.parentId?bindings["$"+e.parentId]:null;if(actual||expected)if(!actual||!expected||!ports.same(actual,expected))errors.push("Wrong imported parent "+e.id);
+                if(e.type==="figure"){actual=ports.followTarget(n);expected=e.conformTargetId?bindings["$"+e.conformTargetId]:null;if(actual||expected)if(!actual||!expected||!ports.same(actual,expected))errors.push("Wrong imported fit target "+e.id);}
+                if(e.type==="bone"){actual=ports.skeleton(n);expected=bindings["$"+e.skeletonId];if(!actual||!expected||!ports.same(actual,expected))errors.push("Wrong imported skeleton "+e.id);}
+            }
+            return {ok:!errors.length,errors:errors,nativeVerified:false,coverage:"Imported identities, complete parent/fit/skeleton relationships only; not morph deformation, rest controls or materials"};
+        }
+        return {prepare:prepare,fromBuilt:fromBuilt,verifyRelationships:verifyRelationships};
+    }
+    return {create:create};
+}());

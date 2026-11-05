@@ -1,0 +1,20 @@
+// Bounded readback of the 117 channels actually present in the selected source.
+// No enumeration of native properties, controllers, materials or scene-wide keys.
+var SaveGuardSavedLightValues=(function(){
+ function need(v,m){if(!v)throw Error('Saved light values: '+m);}
+ function num(v){v=Number(v&&typeof v.valueOf==='function'?v.valueOf():v);need(isFinite(v),'Invalid number');return v;}
+ function equal(a,b){if(typeof a==='boolean')a=a?1:0;if(typeof b==='boolean')b=b?1:0;if(typeof a==='number'&&typeof b==='number')return Math.abs(a-b)<=0.00002*Math.max(1,Math.abs(a),Math.abs(b));if(Object.prototype.toString.call(a)==='[object Array]'&&Object.prototype.toString.call(b)==='[object Array]'){if(a.length!==b.length)return false;for(var i=0;i<a.length;i++)if(!equal(a[i],b[i]))return false;return true;}return a===b;}
+ function verify(plan,byName){var rows=[],types={'float':'DzFloatProperty','bool':'DzBoolProperty','enum':'DzEnumProperty','color':'DzColorProperty','string':'DzStringProperty','file':'DzFileProperty','numeric_node':'DzNumericNodeProperty'};
+  for(var i=0;i<plan.specs.length;i++){var spec=plan.specs[i],node=byName['$'+plan.document.scene.nodes[i].name];need(node,'Missing imported binding');need(spec.channels.length<=64,'Source channel budget exceeded');
+   for(var j=0;j<spec.channels.length;j++){var c=spec.channels[j],p=node.findProperty(c.id),wanted=Object.prototype.hasOwnProperty.call(c,'current_value')?c.current_value:c.value;need(p&&String(p.className())===types[c.type],'Missing/wrong property '+spec.id+'/'+c.id);var count=num(p.getNumKeys());need(count===0||(count===1&&num(p.getKeyTime(0))===0),'Animated control '+c.id);var actual,raw;
+    if(c.type==='numeric_node')need(!c.node&&p.getNode()===null,'Unexpected node dependency '+c.id);
+    if(c.type==='color'){var a=p.getColorValue(),b=p.getRawColorValue();actual=[num(a.red),num(a.green),num(a.blue)];raw=[num(b.red),num(b.green),num(b.blue)];wanted=[wanted[0]*255,wanted[1]*255,wanted[2]*255];}
+    else if(c.type==='string'||c.type==='file'){need(typeof wanted==='string','Invalid saved string');actual=p.getValue();raw=actual;need(typeof actual==='string','Unexpected native string');}
+    else{actual=num(p.getValue());raw=num(p.getRawValue());}
+    need(equal(actual,wanted)&&equal(raw,wanted),'Mismatch '+spec.id+'/'+c.id+' wanted '+JSON.stringify(wanted)+' raw '+JSON.stringify(raw)+' evaluated '+JSON.stringify(actual));rows.push({node:spec.id,id:c.id,type:c.type,expected:wanted,raw:raw,evaluated:actual,keys:count});
+   }
+  }
+  return {verified:true,channels:rows.length,rows:rows};
+ }
+ return {verify:verify};
+}());

@@ -1,0 +1,23 @@
+var SaveGuardPhotometricParentNew=(function(){
+ function need(v,m){if(!v)throw Error('Light import: '+m);}
+ function num(v){v=Number(v&&typeof v.valueOf==='function'?v.valueOf():v);need(isFinite(v),'Nonfinite native number');return v;}
+ function nativeCode(v){if(v!==null&&v!==undefined&&typeof v.valueOf==='function')v=v.valueOf();need(typeof v==='number'&&isFinite(v),'Native loader returned a nonnumeric result');return v;}
+ function run(e,plan,path,force,verify){
+  var s=e.Scene,io=e.App.getAssetIOMgr(),held=false,selected=[],primary=null,selectionCaptured=false,completed=false,start=new Date().getTime(),r={candidate:'native-light-output-v1',ok:false,status:'stopped',nativeVerified:false,deepValidation:false,mutationStarted:false,restorationClaimed:false,outputAudited:false};
+  function failure(error,field){var text=String(error.message||error);if(field)r[field]=text;if(!r.error)r.error=text;if(error.code==='CANCELLED')r.cancelled=true;}
+  function owned(){if(r.undoOwnershipLost||r.undoStateUnknown)throw Error('Owned Undo unavailable; selection retained');try{if(e.UndoStack.canPushItems()===true&&e.UndoStack.isInUndoRedo()===false)return;}catch(error){r.undoError=String(error);}held=false;r.undoOwnershipLost=true;r.undoStateUnknown=true;throw Error('Owned Undo unavailable; selection retained');}
+  function restoreSelection(){owned();var a=SaveGuardSceneInventory.selected(s),i;for(i=0;i<a.length;i++){owned();need(a[i].select(false)!==false,'Selection clear failed');}for(i=0;i<selected.length;i++){owned();need(selected[i].select(true)!==false,'Selection restore failed');}owned();need(s.setPrimarySelection(primary)!==false,'Selection restoration failed');r.selectionReturned=true;}
+  try{
+   r.build=String(e.App.longVersionString);need(SaveGuardNativeRuntime.hostSupported(e),'Light import requires the native host APIs');need(plan&&plan.specs.length>=2&&((plan.profile==='static-parented-point-rectangle-v1'&&plan.specs[plan.specs.length-1].type==='DzPointLight')||(plan.profile==='static-parented-spot-rectangle-v1'&&plan.specs[plan.specs.length-1].type==='DzSpotLight'))&&plan.document.scene.nodes.length===plan.specs.length&&typeof verify==='function'&&verify()===true,'Prepared light payload identity differs');
+   need(force!==true,'Forced output rollback unavailable');need(s.isLoading()===false&&io.isReadingOrWriting()===false&&e.UndoStack.canPushItems()===false&&e.UndoStack.isInUndoRedo()===false,'I/O or Undo busy');
+   var before=SaveGuardSceneInventory.nodes(s),ids={},i;for(i=0;i<before.length;i++){var n=before[i],id=num(n.elementID);need(id>=0&&Math.floor(id)===id&&!ids['$'+id],'Invalid or duplicate element identity');ids['$'+id]=true;need(String(n.getName()).indexOf(plan.namespace)!==0,'Namespace collision');need(String(n.assetId).indexOf(plan.namespace)!==0,'Asset namespace collision');}
+   selected=SaveGuardSceneInventory.selected(s);primary=s.getPrimarySelection();selectionCaptured=true;r.plannedNodes=plan.specs.length;r.preparationMilliseconds=new Date().getTime()-start;need(verify()===true,'Payload changed');r.undoBeginAttempted=true;e.beginUndo();held=true;need(e.UndoStack.canPushItems()===true,'Undo hold unavailable');r.mutationStarted=true;r.stage='native-import';r.nativeExecuted=true;r.nativeCode=nativeCode(io.doLoad(path,num(e.DzAssetIOMgr.MergeFile)));need(r.nativeCode===0,'Native import code '+r.nativeCode);owned();completed=true;
+  }catch(error){failure(error);if(r.undoBeginAttempted&&!held&&!r.mutationStarted)r.undoStateUnknown=true;}
+  finally{
+   if(selectionCaptured&&r.mutationStarted)try{restoreSelection();}catch(selectionError){failure(selectionError,'selectionError');}
+   if(held)try{if(e.UndoStack.canPushItems()!==true){held=false;r.undoOwnershipLost=true;throw Error('Owned Undo unavailable; no blind accept/cancel');}held=false;r.undoAcceptAttempted=true;e.acceptUndo(r.error?'SaveGuard light - failed attempt':'SaveGuard add lights');r.undoAccepted=true;need(e.UndoStack.canPushItems()===false,'Undo did not return to idle');}catch(undoError){r.undoStateUnknown=true;failure(undoError,'undoError');}
+  }
+  r.ok=completed&&!r.error&&r.undoAccepted===true;r.status=r.ok?'applied':r.undoOwnershipLost||r.undoStateUnknown?'recovery-required':r.cancelled&&!r.mutationStarted?'cancelled':r.mutationStarted?'failed-attempt':'stopped';r.message=r.ok?'Native light import completed.':r.error;r.milliseconds=new Date().getTime()-start;return r;
+ }
+ return {run:run};
+}());

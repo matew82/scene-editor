@@ -1,0 +1,93 @@
+var SaveGuardLightActions = (function () {
+    function wrap(base, root, env) {
+        var out = {}, key, current = null, checker = null, pending = null, light = null,
+            closed = false, busy = false, blocked = false;
+        for (key in base) { if (Object.prototype.hasOwnProperty.call(base, key)) { out[key] = base[key]; } }
+        // Share Host/Camera capability bag (do not snapshot). Lazy ensure fills flags in place.
+        out.capabilities = base.capabilities;
+        var supported = SaveGuardNativeRuntime.hostSupported(env);
+        function syncLightCapabilities() {
+            out.capabilities = base.capabilities;
+            out.capabilities.loadLight = supported;
+            return out.capabilities;
+        }
+        syncLightCapabilities();
+        out.ensureNativeCapabilities = function () {
+            if (typeof base.ensureNativeCapabilities === "function") { base.ensureNativeCapabilities(); }
+            return syncLightCapabilities();
+        };
+        function isLight(r) { return r && r.actionKey === 'loadLight'; }
+        function need(v, message) { if (!v) { throw Error(message); } }
+        function release() { pending = null; if (light) { light.close(); light = null; } }
+        function errorText(e) { return e && e.message ? String(e.message) : String(e); }
+        function signature(r) { return JSON.stringify([r.actionKey,r.versionId,r.manifestPath,r.rowId,r.rowKey,r.sourceId,r.rowType,r.inspectionToken,r.tabKey]); }
+        function validate(r) {
+            need(!closed && !blocked && supported && current, 'Light actions are unavailable; inspect a saved copy on a supported host.');
+            need(r && isLight(r) && r.tabKey === 'lights' && r.versionId === current.version.id && r.manifestPath === current.version.manifestPath && r.inspectionToken === current.token, 'Saved light selection changed; inspect again.');
+            var pin = current.rows['$' + r.rowKey];
+            need(pin && pin.id === r.rowId && pin.sourceId === r.sourceId && pin.type === r.rowType, 'Saved light row changed; select it again.');
+            need(typeof checker === 'function' && checker(r) === true, 'Light selection changed; select it again.');
+            var prefs = base.readSettings();
+            need(prefs.lowRamMode !== true, 'Light actions require Low RAM mode off; change settings and inspect again.');
+            need(base.isInspectionCurrent(current.version,current.token,prefs) === true, 'Saved copy or inspection settings changed; inspect again.');
+            return base.validateVersion(current.version);
+        }
+        out.inspectVersion = function (version, options) {
+            need(!busy, 'Wait for the current light action.'); release(); current = null;
+            var result = base.inspectVersion(version, options);
+            if (!result || result.error) { return result; }
+            var rows = result.tabs && result.tabs.lights || [], pins = {}, i, row;
+            for (i = 0; i < rows.length; i += 1) {
+                row = rows[i];
+                // Clone: inspector rows can also occur in All Objects and its identity cache.
+                var copy = {}; for (key in row) { if (Object.prototype.hasOwnProperty.call(row,key)) { copy[key] = row[key]; } }
+                copy.actionKeys = row.lightAssembly&&row.actionKeys&&row.actionKeys.indexOf('loadLightAssembly')>=0?['loadLightAssembly']:row.emissive&&row.actionKeys&&row.actionKeys.indexOf('loadObject')>=0?['loadObject']:[];
+                if (row.type === 'light' && !row.emissive && row.actionKeys && row.actionKeys.indexOf('loadLight') >= 0 && row.sourceId && row.rowKey) {
+                    need(!pins['$' + row.rowKey], 'Duplicate saved light row.');
+                    pins['$' + row.rowKey] = {id:String(row.id),sourceId:String(row.sourceId),type:row.type};
+                    copy.actionKeys = ['loadLight'];
+                }
+                rows[i] = copy;
+            }
+            current = {version:version,token:result.inspectionToken,rows:pins};
+            return result;
+        };
+        out.bindActionSelectionChecker = function (fn) {
+            release(); checker = fn; var unbind = base.bindActionSelectionChecker(fn);
+            return function () { if (checker === fn) { checker = null; release(); } unbind(); };
+        };
+        out.prepareAction = function (request) {
+            if (!isLight(request)) { return base.prepareAction.apply(base, arguments); }
+            need(!busy, 'Wait for the current light action.'); busy = true;
+            try {
+                release(); var version = validate(request);
+                light = SaveGuardLightManager.create(env, root + '/light-actions');
+                light.open(version.path,{version:current.version,request:request,mode:base.readSettings().loadCacheMode||"protected",deep:base.readSettings().deepValidation===true});
+                validate(request);
+                var receipt = {ok:true,request:request};
+                pending = {receipt:receipt,request:JSON.parse(JSON.stringify(request)),signature:signature(request)};
+                return receipt;
+            } catch (e) { release(); return {ok:false,error:errorText(e)}; }
+            finally { busy = false; }
+        };
+        out.runAction = function (receipt) {
+            if ((!pending || receipt !== pending.receipt) && !(receipt && isLight(receipt.request))) { return base.runAction(receipt); }
+            need(!busy, 'Wait for the current light action.'); busy = true;
+            try {
+                need(pending && receipt === pending.receipt && signature(receipt.request) === pending.signature, 'Light action receipt changed or expired.');
+                var request = pending.request; validate(request); pending = null;
+                var report = light.apply(request.sourceId), result = report.result;
+                if (typeof print === 'function') { print('SAVEGUARD_LIGHT_MANAGER_RESULT ' + JSON.stringify(report)); }
+                if (light.isBlocked() || result && result.status === 'recovery-required') { blocked = true; out.capabilities.loadLight = false; }
+                if (!result || result.ok !== true) { return {ok:false,error:errorText(report.error || result && result.error || 'Light action failed.') + (blocked ? result && result.outputAudited === false ? ' STOP: Undo ownership or completion is uncertain; inspect the scene before continuing.' : ' STOP: rollback could not be verified.' : result && result.rollback && result.rollback.verified ? ' Previous light state restored.' : ''),lightReport:report}; }
+                if(result.outputAudited === false)return {ok:true,message:'Native light import completed.',lightReport:report};
+                return {ok:true,message:'Added ' + result.nodeDelta + ' nodes (selected light and required parents).' + (result.savedValues && result.savedValues.unsupportedMetadata && result.savedValues.unsupportedMetadata.length ? ' DAZ4: ' + result.savedValues.unsupportedMetadata.length + ' absent zero Node Color display fields; supported channels verified.' : ''),lightReport:report};
+            } catch (e) { return {ok:false,error:errorText(e)}; }
+            finally { release(); busy = false; }
+        };
+        out.cancelAction = function (receipt) { if (pending && receipt === pending.receipt || receipt && isLight(receipt.request)) { release(); return {ok:true,cancelled:true}; } return base.cancelAction(receipt); };
+        out.close = function () { if (closed) { return; } closed = true; checker = null; current = null; release(); base.close(); };
+        return out;
+    }
+    return {wrap:wrap};
+}());

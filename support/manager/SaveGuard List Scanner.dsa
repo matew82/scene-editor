@@ -1,0 +1,337 @@
+// SaveGuard DUF Inspector 0.3.6. Pure JS metadata scanner; no DAZ scene APIs.
+var SaveGuardDUF = (function () {
+    // No product size/count/time ceilings. Explicit caller budgets remain opt-in.
+    var limits = { maxPhysicalBytes: Infinity, defaultExpandedBytes: Infinity,
+        maxBytes: Infinity, maxMillis: Infinity, maxDepth: Infinity,
+        maxTokens: Infinity, maxNodes: Infinity, maxString: Infinity, maxKeys: Infinity,
+        maxMetadataChars: Infinity, maxActiveKeyChars: Infinity,
+        maxWarnings: Infinity, maxHierarchyDepth: Infinity };
+    function fail(code, message) { var e = new Error(message); e.code = code; throw e; }
+    function own(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+    function dictKey(k) { return "$" + k; }
+    function str(o, k) { return o && typeof o[k] === "string" ? o[k] : ""; }
+    function array(o) { return Object.prototype.toString.call(o) === "[object Array]"; }
+
+    // Strict incremental UTF-8, including raw non-BMP characters. No platform encoding.
+    function utf8Reader(readByte, budget, clock, options) {
+        var bytes = 0, pending = "", start = clock();
+        function sceneEditorCompat_byte() {
+            if (bytes % 1024 === 0 && options.isCancelled && options.isCancelled()) {
+                fail("CANCELLED", "Inspection cancelled; partial scene counts were discarded.");
+            }
+            if (bytes % 65536 === 0 && options.onProgress) { options.onProgress(bytes); }
+            if (bytes % 1024 === 0 && clock() - start > budget.maxMillis) {
+                fail("LIMIT_TIME", "Inspection time limit reached; no partial scene counts are shown.");
+            }
+            var b = readByte();
+            if (b === -1) { return -1; }
+            if (typeof b !== "number" || b < 0 || b > 255 || Math.floor(b) !== b) {
+                fail("READ_ERROR", "Reader returned an invalid byte.");
+            }
+            bytes += 1;
+            if (bytes > budget.maxBytes) { fail("LIMIT_BYTES", "Expanded DUF exceeds the selected " + budget.maxBytes + " byte scan budget."); }
+            return b;
+        }
+        return { count: function () { return bytes; }, elapsed: function () { return clock() - start; },
+            next: function () {
+                if (pending) { var p = pending; pending = ""; return p; }
+                var b = sceneEditorCompat_byte(), cp, n, min, j, c;
+                if (b === -1) { return ""; }
+                if (b < 128) { return String.fromCharCode(b); }
+                if (b >= 194 && b <= 223) { cp = b & 31; n = 1; min = 128; }
+                else if (b >= 224 && b <= 239) { cp = b & 15; n = 2; min = 2048; }
+                else if (b >= 240 && b <= 244) { cp = b & 7; n = 3; min = 65536; }
+                else { fail("UTF8", "Invalid UTF-8 leading byte."); }
+                for (j = 0; j < n; j += 1) {
+                    c = sceneEditorCompat_byte();
+                    if (c < 128 || c > 191) { fail("UTF8", "Truncated or invalid UTF-8 sequence."); }
+                    cp = cp * 64 + (c & 63);
+                }
+                if (cp < min || cp > 1114111 || (cp >= 55296 && cp <= 57343)) {
+                    fail("UTF8", "Invalid UTF-8 code point.");
+                }
+                if (cp > 65535) {
+                    cp -= 65536; pending = String.fromCharCode(56320 + (cp & 1023));
+                    return String.fromCharCode(55296 + (cp >> 10));
+                }
+                return String.fromCharCode(cp);
+            } };
+    }
+
+    // Full grammar by default; structureOnly lexically skips unused payload grammar.
+    // Both retain selected metadata only and never materialize a complete JSON tree.
+    function scan(readByte, options) {
+        var b = {}, k;
+        for (k in limits) { if (own(limits, k)) { b[k] = limits[k]; } }
+        b.maxBytes = limits.defaultExpandedBytes;
+        options = options || {};
+        // Only explicit caller budgets constrain a scan; defaults impose no product cutoff.
+        for (k in b) { if (own(options, k)) { b[k] = Math.min(limits[k], options[k]); } }
+        var clock = options.clock || function () { return new Date().getTime(); };
+        var r = options.readChunk ? SaveGuardDUFChunkReader.create(options.readChunk, b, clock, options) : utf8Reader(readByte, b, clock, options);
+        var structureOnly = !!options.structureOnly, bulkStructureSkip = structureOnly && typeof r.skipValue === "function";
+        var ch = r.next(), tokens = 0, retained = 0, activeKeyChars = 0, skippedDuplicateKeys = 0;
+        if (ch === "\uFEFF") { ch = r.next(); }
+        function error(message) { fail("JSON", message + " (near expanded byte " + r.count() + ")."); }
+        function next() { ch = r.next(); }
+        function ws() {
+            while (ch === " " || ch === "\t" || ch === "\r" || ch === "\n") {
+                if (r.whitespace) { r.whitespace(); } next();
+            }
+        }
+        function take(c) { if (ch !== c) { error("Expected " + c); } next(); }
+        function string(keep, charge) {
+            take('"'); var s = "", c, h, i, value;
+            while (ch !== '"') {
+                if (!ch || ch.charCodeAt(0) < 32) { error("Unterminated string or control character"); }
+                if (r.stringRun && ch !== "\\") {
+                    var piece = r.stringRun();
+                    if (piece) {
+                        if (keep) {
+                            if (charge) { retained += piece.length; }
+                            if (s.length + piece.length > b.maxString || retained > b.maxMetadataChars) { fail("LIMIT_METADATA", "Metadata string/storage limit reached; counts withheld."); }
+                            s += piece;
+                        }
+                        next(); continue;
+                    }
+                }
+                c = ch; next();
+                if (c === "\\") {
+                    c = ch; next();
+                    if (c === "u") {
+                        h = "";
+                        for (i = 0; i < 4; i += 1) {
+                            if (!/[0-9a-fA-F]/.test(ch) || !ch) { error("Invalid Unicode escape"); }
+                            h += ch; next();
+                        }
+                        c = String.fromCharCode(parseInt(h, 16));
+                    } else {
+                        value = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
+                        if (!own(value, c)) { error("Invalid string escape"); } c = value[c];
+                    }
+                }
+                if (keep) {
+                    s += c; if (charge) { retained += 1; }
+                    if (s.length > b.maxString || retained > b.maxMetadataChars) {
+                        fail("LIMIT_METADATA", "Metadata string/storage limit reached; counts withheld.");
+                    }
+                }
+            }
+            next(); return keep ? s : null;
+        }
+        function number(keep) {
+            if (r.number) {
+                var token = r.number(), numeric = Number(token); next();
+                if (!isFinite(numeric)) { error("Non-finite number"); }
+                return keep ? numeric : null;
+            }
+            var s = "", count = 0;
+            function digit() { return ch >= "0" && ch <= "9" && ch !== ""; }
+            function add() { count += 1; s += ch; next(); }
+            if (ch === "-") { add(); }
+            if (ch === "0") { add(); if (digit()) { error("Leading zero"); } }
+            else { if (!(ch >= "1" && ch <= "9")) { error("Invalid number"); } while (digit()) { add(); } }
+            if (ch === ".") { add(); if (!digit()) { error("Missing fraction"); } while (digit()) { add(); } }
+            if (ch === "e" || ch === "E") {
+                add(); if (ch === "+" || ch === "-") { add(); }
+                if (!digit()) { error("Missing exponent"); } while (digit()) { add(); }
+            }
+            var n = Number(s);
+            if (!isFinite(n)) { error("Non-finite number"); }
+            return keep ? n : null;
+        }
+        function childMode(mode, key) {
+            if (mode === "root") {
+                if (key === "scene") { return "scene"; }
+                if (key === "node_library") { return "nodes"; }
+                if (key === "asset_info") { return "asset"; }
+                if (key === "file_version") { return "scalar"; }
+            }
+            if (mode === "scene") {
+                if (key === "nodes") { return "nodes"; }
+                if (!structureOnly && (key === "materials" || key === "modifiers" || key === "animations")) { return "count"; }
+                if (key === "current_camera") { return "scalar"; }
+            }
+            if (mode === "node" && /^(id|name|label|url|type|parent|parent_in_place|conform_target|source)$/.test(key)) { return "scalar"; }
+            if (mode === "node" && /^(directional|spot|point)$/.test(key)) { return "presence"; }
+            if (mode === "node" && key === "geometries") { return "count"; }
+            if (mode === "node" && key === "extra") { return "nodeExtras"; }
+            if (mode === "nodeExtra" && key === "type") { return "scalar"; }
+            if (mode === "node" && key === "preview") { return "preview"; }
+            if (mode === "preview" && key === "type") { return "scalar"; }
+            if (mode === "asset" && /^(id|type|revision|modified)$/.test(key)) { return "scalar"; }
+            return "skip";
+        }
+        function value(mode, depth) {
+            tokens += 1;
+            if (tokens > b.maxTokens) { fail("LIMIT_TOKENS", "JSON token limit reached; counts withheld."); }
+            if (depth > b.maxDepth) { fail("LIMIT_DEPTH", "JSON nesting limit reached; counts withheld."); }
+            ws(); var keep = mode !== "skip", result, key, seen, m, n, literal, j, objectKeyChars = 0;
+            if (mode === "presence") { var isObject = ch === "{"; value("skip", depth); return isObject ? {} : null; }
+            if (mode === "skip" && bulkStructureSkip) { r.skipValue(depth); next(); return null; }
+            if (ch === "{") {
+                if (mode === "nodes" || mode === "count" || mode === "scalar") { error("Unexpected object in metadata field"); }
+                result = keep ? {} : null; seen = {}; n = 0; next(); ws();
+                if (ch === "}") { next(); return result; }
+                while (true) {
+                    // Keys are transient scanner state; do not charge them forever as retained output.
+                    ws(); key = string(true, false); n += 1;
+                    if (n > b.maxKeys) { fail("LIMIT_KEYS", "Object key limit reached."); }
+                    m = childMode(mode, key);
+                    if (own(seen, dictKey(key))) {
+                        if (m !== "skip") { error("Duplicate inspected metadata key " + key); }
+                        skippedDuplicateKeys += 1;
+                    } else {
+                        objectKeyChars += key.length; activeKeyChars += key.length;
+                        if (activeKeyChars > b.maxActiveKeyChars) { fail("LIMIT_KEY_MEMORY", "Active JSON key storage limit reached; counts withheld."); }
+                    }
+                    seen[dictKey(key)] = true; ws(); take(":");
+                    var v = value(m, depth + 1);
+                    if (m !== "skip") { result[key] = v; }
+                    ws(); if (ch === "}") { next(); activeKeyChars -= objectKeyChars; return result; } take(",");
+                }
+            }
+            if (ch === "[") {
+                if (mode !== "skip" && mode !== "nodes" && mode !== "count" && mode !== "nodeExtras") { error("Unexpected array in metadata field"); }
+                result = mode === "nodes" || mode === "nodeExtras" ? [] : null; n = 0; next(); ws();
+                if (ch === "]") { next(); return mode === "count" ? 0 : result; }
+                while (true) {
+                    ws(); var run = null;
+                    if (mode !== "nodes" && r.numericArrayRun && ch === "[") { run = r.numericArrayRun(b.maxDepth - depth); }
+                    if (mode !== "nodes" && r.numberRun && depth + 1 <= b.maxDepth && (ch === "-" || ch >= "0" && ch <= "9" && ch)) { run = r.numberRun(); }
+                    if (run) {
+                        tokens += run.tokens || run.values; n += run.values;
+                        if (tokens > b.maxTokens) { fail("LIMIT_TOKENS", "JSON token limit reached; counts withheld."); }
+                        next();
+                    } else {
+                        n += 1;
+                        if (mode === "nodes" && n > b.maxNodes) { fail("LIMIT_NODES", "Node row limit reached; counts withheld."); }
+                        var item = value(mode === "nodes" ? "node" : mode === "nodeExtras" ? "nodeExtra" : "skip", depth + 1);
+                        if (mode === "nodes" || mode === "nodeExtras") {
+                            if (!item || typeof item !== "object" || array(item)) { error("Node entry must be an object"); }
+                            if(mode === "nodes" || /^studio\/node\/(environment|tone_mapper)$/.test(item.type||""))result.push(item);
+                        }
+                    }
+                    ws(); if (ch === "]") { next(); return mode === "count" ? n : result; } take(",");
+                }
+            }
+            if (mode === "root" || mode === "scene" || mode === "asset" || mode === "nodes" || mode === "count" || mode === "node") { error("Unexpected metadata value"); }
+            if (ch === '"') { return string(keep, keep); }
+            if (ch === "-" || (ch >= "0" && ch <= "9" && ch)) { return number(keep); }
+            literal = ch === "t" ? "true" : ch === "f" ? "false" : ch === "n" ? "null" : "";
+            if (!literal) { error("Invalid JSON value"); }
+            for (j = 0; j < literal.length; j += 1) { take(literal.charAt(j)); }
+            return keep ? (literal === "true" ? true : literal === "false" ? false : null) : null;
+        }
+        var doc = value("root", 0); ws();
+        if (ch) { error("Trailing content"); }
+        return { document: doc, bytesRead: r.count(), elapsedMillis: r.elapsed(), tokens: tokens,
+            metadataChars: retained, skippedDuplicateKeys: skippedDuplicateKeys,
+            mode: structureOnly ? "bounded-structure-only-projection" : "bounded-metadata-projection", fullDataRetained: false,
+            structureOnly: structureOnly, fullJSONValidated: !bulkStructureSkip, tokensScope: bulkStructureSkip ? "inspected-values-and-skipped-boundaries-only" : "all-values",
+            readerStats: r.stats ? r.stats() : null };
+    }
+
+    // Resolve only exact local fragments (and the spec's matching id:#id shorthand).
+    // No disk resolution, label heuristics, name-scheme or property-path guessing.
+    function localReference(uri) {
+        if (typeof uri !== "string" || !uri) { return { kind: "none", id: "" }; }
+        var h = uri.indexOf("#");
+        if (h < 0 || uri.indexOf("#", h + 1) >= 0 || uri.indexOf("?") >= 0) { return { kind: "unsupported", id: "" }; }
+        var prefix = uri.substring(0, h), id;
+        try { id = decodeURIComponent(uri.substring(h + 1)); }
+        catch (e) { return { kind: "malformed", id: "" }; }
+        if (!id) { return { kind: "malformed", id: "" }; }
+        if (!prefix || prefix === id + ":") { return { kind: "local", id: id }; }
+        return { kind: "external-or-complex", id: id };
+    }
+
+    function index(scanned) {
+        var doc = scanned.document, scene = doc.scene, defs = doc.node_library || [],
+            nodes = scene ? scene.nodes || [] : [], rows = [], defMap = {}, nodeMap = {},
+            warnings = [], warningCount = 0, external = {}, counts = { figure: 0, camera: 0,
+                light: 0, bone: 0, node: 0, unknown: 0, propCandidates: 0 }, figures = [], i;
+        function warn(message) { warningCount += 1; if (warnings.length < limits.maxWarnings) { warnings.push(message); } }
+        if (scanned.skippedDuplicateKeys) { warn("Skipped application/payload data contains " + scanned.skippedDuplicateKeys + " duplicate JSON keys; no inspected metadata value was chosen from those keys."); }
+        function add(map, id, v) {
+            if (!id) { return; } var key = dictKey(id);
+            if (own(map, key)) { map[key] = null; warn("Duplicate node ID: " + id + "; reference is ambiguous."); }
+            else { map[key] = v; }
+        }
+        for (i = 0; i < defs.length; i += 1) { add(defMap, str(defs[i], "id"), defs[i]); }
+        for (i = 0; i < nodes.length; i += 1) { add(nodeMap, str(nodes[i], "id"), i); }
+        for (var nodeKey in nodeMap) {
+            if (own(nodeMap, nodeKey) && own(defMap, nodeKey)) { warn("Node ID reused between library and scene: " + nodeKey.substring(1)); }
+        }
+        for (i = 0; i < nodes.length; i += 1) {
+            var n = nodes[i], id = str(n, "id"), ref = localReference(str(n, "url")), def = null,
+                type = "unknown", typeSource = "unresolved", key = dictKey(ref.id);
+            if (ref.kind === "local") {
+                if (own(defMap, key) && defMap[key] && !own(nodeMap, key)) {
+                    def = defMap[key]; type = str(def, "type") || "node"; typeSource = "local-node-library";
+                    if (!str(def, "type") && str(def, "source")) {
+                        type = "unknown"; typeSource = "derived-source-not-resolved";
+                        warn("Derived node definition has no explicit type: " + str(def, "id") + ".");
+                    }
+                } else { warn("Missing/ambiguous local node definition for row " + i + ": " + str(n, "url")); }
+            } else if (ref.kind === "external-or-complex") {
+                external[dictKey(str(n, "url"))] = true; typeSource = "external-dependency-not-read";
+            } else { warn("Missing/malformed/unsupported node URL on row " + i + "."); }
+            if (str(n, "type")) { warn("Instance type field ignored on row " + i + "; DSON type belongs to the definition."); }
+            if (!id) { warn("Missing instance ID on row " + i + "."); }
+            if (id && nodeMap[dictKey(id)] === null) { type = "unknown"; typeSource = "duplicate-instance-id"; }
+            var category = own(counts, type) && /^(figure|camera|light|bone|node)$/.test(type) ? type : "unknown";
+            if (category === "unknown" && type !== "unknown") { warn("Unrecognized definition type: " + type); }
+            counts[category] += 1;
+            var label = str(n, "label") || str(def, "label") || str(n, "name") || str(def, "name") || id || "[unnamed row " + i + "]";
+            var geometryCount = typeof n.geometries === "number" ? n.geometries : 0;
+            if (category === "node" && geometryCount > 0) { counts.propCandidates += 1; }
+            if (category === "figure") { figures.push(label); }
+            if (str(n, "parent") && str(n, "parent_in_place")) { warn("Both parent fields present on row " + i + "; hierarchy attachment withheld."); }
+            rows.push({ rowIndex: i, id: id, label: label, type: type, category: category,
+                typeSource: typeSource, previewType: str(n.preview, "type"), url: str(n, "url"), parent: str(n, "parent") || str(n, "parent_in_place"),
+                parentMode: str(n, "parent") ? "parent" : str(n, "parent_in_place") ? "parent_in_place" : "none",
+                conformTarget: str(n, "conform_target"), geometryCount: geometryCount,
+                parentIndex: -1, parentStatus: "root", children: [], definitionId: def ? str(def, "id") : "",
+                sourceAddress: "scene.nodes[" + i + "]", extractionSupported: false });
+        }
+        for (i = 0; i < rows.length; i += 1) {
+            var row = rows[i], p = localReference(row.parent), parentIndex = nodeMap[dictKey(p.id)];
+            if (!row.parent) { continue; }
+            if (str(nodes[i], "parent") && str(nodes[i], "parent_in_place")) { row.parentStatus = "conflicting-parent-fields"; continue; }
+            if (p.kind !== "local") { row.parentStatus = "unresolved-" + p.kind; warn("Unresolved parent on row " + i + "."); }
+            else if (!own(nodeMap, dictKey(p.id)) || parentIndex === null) { row.parentStatus = "missing-or-ambiguous"; warn("Missing/ambiguous parent for row " + i + ": " + row.parent); }
+            else { row.parentIndex = parentIndex; row.parentStatus = "resolved-local";
+                if (parentIndex >= i) { warn("Parent appears after child (or self): row " + i + "."); }
+            }
+        }
+        // Bounded parent walk: break unsafe view links, preserve raw URI and report why.
+        for (i = 0; i < rows.length; i += 1) {
+            var seen = {}, at = i, steps = 0;
+            while (at >= 0) {
+                if (own(seen, dictKey(at)) || steps > limits.maxHierarchyDepth) {
+                    rows[i].parentIndex = -1; rows[i].parentStatus = steps > limits.maxHierarchyDepth ? "depth-limit" : "cycle-broken-for-view";
+                    warn("Cycle/depth limit in hierarchy at row " + i + "; raw parent retained."); break;
+                }
+                seen[dictKey(at)] = true; steps += 1; at = rows[at].parentIndex;
+            }
+        }
+        var roots = [];
+        for (i = 0; i < rows.length; i += 1) {
+            if (rows[i].parentIndex >= 0) { rows[rows[i].parentIndex].children.push(i); } else { roots.push(i); }
+        }
+        var externalCount = 0;
+        for (var ek in external) { if (own(external, ek)) { externalCount += 1; } }
+        if (!scene) { warn("No scene object: this file does not enumerate scene instances."); }
+        return { schemaVersion: 1, completeBoundedScan: true, scenePresent: !!scene,
+            fileVersion: doc.file_version || null, assetInfo: doc.asset_info || {}, counts: counts,
+            figureLabels: figures, rows: rows, roots: roots, warnings: warnings, warningCount: warningCount,
+            unresolvedSourceAddresses: externalCount, dependenciesCheckedOnDisk: false,
+            sceneMaterials: scanned.structureOnly ? null : scene && scene.materials || 0, sceneModifiers: scanned.structureOnly ? null : scene && scene.modifiers || 0,
+            animationEntries: scanned.structureOnly ? null : scene && scene.animations || 0, currentCamera: str(scene, "current_camera"),
+            structureOnly: !!scanned.structureOnly, fullJSONValidated: scanned.fullJSONValidated !== false,
+            bytesRead: scanned.bytesRead, elapsedMillis: scanned.elapsedMillis,
+            extractionSupported: false, scope: "explicit-scene-node-instances-only" };
+    }
+    return { limits: limits, scan: scan, index: index, localReference: localReference };
+}());

@@ -1,0 +1,120 @@
+// Static authored shaping inputs. No import, ERC evaluation, or native writes here.
+var SaveGuardShapePlan=(function(){
+ function need(v,m){if(!v)throw Error("Shape: "+m);}
+ function own(o,k){return !!o&&Object.prototype.hasOwnProperty.call(o,k);}
+ function array(v){return Object.prototype.toString.call(v)==="[object Array]";}
+ function finite(v){need(typeof v==="number"&&isFinite(v),"Invalid numeric channel");return v;}
+ function uri(v){v=decodeURIComponent(String(v||"")).replace(/^\/data\/DAZ 3D\/Genesis (8|9)\//,"/data/Daz 3D/Genesis $1/");need(/^\/[^?#]+\.(dsf|duf)#[^?#]+$/i.test(v)&&!/(^|\/)\.\.(\/|$)/.test(v)&&v.indexOf("\\")<0,"External asset identity required: "+v);return v;}
+ function local(v){need(typeof v==="string"&&/^#[^?#]+$/.test(v),"Expected local instance reference");return decodeURIComponent(v.substring(1));}
+ function one(rows,id){need(array(rows),"Definition list unavailable");var found=null;for(var i=0;i<rows.length;i++)if(rows[i].id===id){need(!found,"Duplicate definition: "+id);found=rows[i];}need(found,"Missing definition: "+id);return found;}
+ function localMorph(d,geometryUri,guard){
+  need(uri(d.parent)===geometryUri,"Local morph belongs to a different geometry");
+  need(!d.formulas&&(!d.extra||array(d.extra)&&d.extra.length===0),"Local morph formulas or extensions are unsupported");
+  var morph=d.morph,keys=[],k,i,j,seen={},values=[];
+  need(morph&&typeof morph==="object","Local shape needs verifiable vertex deltas");
+  for(k in morph)if(own(morph,k))need(k==="vertex_count"||k==="deltas","Unsupported local morph data: "+k);
+  var count=finite(morph.vertex_count),deltas=morph.deltas;
+  need(count>0&&Math.floor(count)===count&&deltas&&array(deltas.values)&&deltas.count===deltas.values.length,"Invalid local morph counts");
+  for(k in deltas)if(own(deltas,k))need(k==="count"||k==="values","Unsupported local delta data");
+  for(i=0;i<deltas.values.length;i++){
+   if(guard)guard();var row=deltas.values[i];need(array(row)&&row.length===4,"Invalid local morph delta");
+   var index=finite(row[0]);need(index>=0&&index<count&&Math.floor(index)===index&&!seen["$"+index],"Invalid or duplicate local morph vertex");
+   seen["$"+index]=true;var copy=[index];for(j=1;j<4;j++)copy.push(finite(row[j]));values.push(copy);
+  }
+  values.sort(function(a,b){return a[0]-b[0];});return {vertexCount:count,values:values};
+ }
+ function definitions(doc,resolve,cancelled){
+  var cache={},files=[];
+  function guard(){if(cancelled&&cancelled()===true){var e=Error("Shape cancelled");e.code="CANCELLED";throw e;}}
+  function get(ref,section){
+   var chain=[],seen={},current=ref,base={},k,j;
+   while(current){
+    guard();var token=section+"|"+current;need(!seen["$"+token],"Definition inheritance cycle");seen["$"+token]=true;
+    if(cache["$"+token]){base=cache["$"+token];break;}
+    var record,canonical=current,asset=doc;
+    if(current.charAt(0)==="#")record=one(doc[section]||[],local(current));
+    else{canonical=uri(current);var split=canonical.indexOf("#"),file=canonical.substring(0,split),result=resolve(file);
+     need(result&&result.verified===true&&result.document,"Unverified definition "+file);if(files.indexOf(file)<0)files.push(file);
+     asset=result.document;record=one(asset[section]||[],canonical.substring(split+1));}
+    chain.push({token:token,record:record});current=record.url||null;
+    if(current&&current.charAt(0)==="#"&&asset!==doc)current=canonical.substring(0,canonical.indexOf("#"))+current;
+   }
+   for(j=chain.length-1;j>=0;j--){var next={},r=chain[j].record;for(k in base)if(own(base,k))next[k]=base[k];for(k in r)if(own(r,k)&&k!=="url")next[k]=r[k];
+    if(base.channel||r.channel){next.channel={};var oldChannel=base.channel||{},newChannel=r.channel||{};for(k in oldChannel)if(own(oldChannel,k))next.channel[k]=oldChannel[k];for(k in newChannel)if(own(newChannel,k))next.channel[k]=newChannel[k];}
+    if(base.presentation||r.presentation){next.presentation={};var bp=base.presentation||{},rp=r.presentation||{};for(k in bp)if(own(bp,k))next.presentation[k]=bp[k];for(k in rp)if(own(rp,k))next.presentation[k]=rp[k];}
+    base=next;cache["$"+chain[j].token]=base;
+   }return base;
+  }return {get:get,files:files,guard:guard};
+ }
+ function compile(doc,id,resolve,cancelled){
+  need(doc&&doc.scene&&array(doc.scene.nodes)&&array(doc.scene.modifiers||[]),"Malformed saved scene");
+  var node=one(doc.scene.nodes,id),sourceUri=uri(node.url),defs=definitions(doc,resolve,cancelled),base=defs.get(sourceUri,"node_library");
+  need(base.type==="figure"&&(!node.type||node.type==="figure"),"Choose a saved figure or rigged wearable");
+  var geometries=node.geometries||base.geometries,owners={},records={},ids={},rows=[],excluded=[],mods=doc.scene.modifiers||[],i,m,ref,d,ch,value;
+  need(array(geometries)&&geometries.length===1&&geometries[0].id,"Exactly one saved own geometry is required");
+  var geometryUri=uri(geometries[0].url);owners["$"+id]=true;owners["$"+geometries[0].id]=true;
+  for(i=0;i<mods.length;i++){
+   defs.guard();m=mods[i];if(!m||typeof m.parent!=="string"||m.parent.charAt(0)!=="#")continue;
+   if(!owners["$"+local(m.parent)])continue;
+   need(typeof m.id==="string"&&m.id&&!ids["$"+m.id],"Duplicate modifier instance");ids["$"+m.id]=true;
+   if(!m.url)continue;d=defs.get(m.url,"modifier_library");
+   if(!d.presentation||d.presentation.type!=="Modifier/Shape"){excluded.push(m.id);continue;}
+   need(!own(m,"formulas")&&!own(m,"morph")&&(!m.extra||array(m.extra)&&m.extra.length===0),"Saved shaping definition overrides require separate support");
+   var isLocal=m.url.charAt(0)==="#",localData=isLocal?localMorph(d,geometryUri,defs.guard):null;
+   ref=isLocal?"#"+local(m.url):uri(m.url);need(!records["$"+ref],"Duplicate shaping asset instance");
+   ch={};var k,definedChannel=d.channel||{},savedChannel=m.channel||{};for(k in definedChannel)if(own(definedChannel,k))ch[k]=definedChannel[k];for(k in savedChannel)if(own(savedChannel,k))ch[k]=savedChannel[k];
+   need(ch.type==="float"&&ch.id==="value","Unsupported shaping channel");
+   need(!ch.keys&&!ch.keyframes,"Inline animated shaping is unsupported");
+   var defaultValue=finite(own(m.channel,"value")?m.channel.value:d.channel.value);
+   value=finite(own(m.channel,"current_value")?m.channel.current_value:isLocal&&own(d.channel,"current_value")?d.channel.current_value:defaultValue);
+   var row={id:m.id,uri:ref,value:value,defaultValue:defaultValue,definition:d,localMorph:localData,explicit:own(m.channel,"current_value")||isLocal&&own(d.channel,"current_value")};
+   records["$"+ref]=row;rows.push(row);
+  }
+  // Only modifier-value animation is relevant; ambiguous channels are rejected.
+  var tracks=doc.scene.animations||[],trackSeen={};need(array(tracks),"Malformed animation array");
+  for(i=0;i<tracks.length;i++){
+   defs.guard();var t=tracks[i],u=decodeURIComponent(String(t.url||""));
+   if(u.indexOf("?value")<0)continue;
+   need(!/name:\/\//.test(u),"Name-addressed shaping animation is ambiguous");
+   u=u.replace(/^id:\//,"");
+   var hash=u.indexOf("#"),query=u.indexOf("?"),prefix=u.substring(0,hash),fragment=u.substring(hash+1,query),colon=prefix.indexOf(":"),anchor=colon>=0?prefix.substring(0,colon):"",file=colon>=0?prefix.substring(colon+1):prefix;
+   // A track explicitly scoped to another saved node cannot affect this figure.
+   // Do not interpret or widen that other node's channel/key formats.
+   var otherNode=false;
+   if(anchor&&anchor.indexOf("/")<0&&anchor!==id)for(var ni=0;ni<doc.scene.nodes.length;ni++)if(doc.scene.nodes[ni].id===anchor)otherNode=true;
+   if(otherNode)continue;
+   need(hash>=0&&query>hash&&u.substring(query)==="?value"&&u.indexOf("#",hash+1)<0,"Unsupported shaping animation reference");
+   var candidates=[],matched=null;
+   for(var mi=0;mi<mods.length;mi++){
+    var candidate=mods[mi],matches=!file?candidate.id===fragment:candidate.url&&candidate.url.charAt(0)==="/"&&uri(candidate.url)===uri(file+"#"+fragment);
+    if(matches&&anchor){var path=anchor.split("/"),last="";for(var ai=0;ai<path.length;ai++)if(path[ai])last=path[ai];matches=last===candidate.id||candidate.parent&&local(candidate.parent)===last;}
+    if(matches)candidates.push(candidate);
+   }
+   need(candidates.length===1,"Missing or ambiguous shaping animation owner");
+   var owner=candidates[0];if(!owner.parent||!owners["$"+local(owner.parent)])continue;
+   for(var ri=0;ri<rows.length;ri++)if(rows[ri].id===owner.id)matched=rows[ri];
+   if(!matched)continue;
+   need(!trackSeen["$"+matched.uri],"Duplicate shape animation");trackSeen["$"+matched.uri]=true;
+   need(array(t.keys)&&t.keys.length===1&&t.keys[0].length===2&&t.keys[0][0]===0&&finite(t.keys[0][1])===matched.value,"Animated shaping is unsupported; sole matching frame-0 key required");
+  }
+  return {ready:true,errors:[],warnings:["Saved shaping values are applied to compatible existing controls. Pose and materials are retained.","Embedded morphs require matching geometry and vertex deltas; missing morphs are not created."],sourceId:id,sourceUri:sourceUri,geometryUri:geometryUri,rows:rows,records:records,excluded:excluded,definitionFiles:defs.files,
+   definition:function(ref){return defs.get(uri(ref),"modifier_library");}};
+ }
+ // Destination-only installed shaping controls use resolved definition defaults, never a blanket zero.
+ function match(plan,targets,cancelled){
+  var seen={},assignments=[],skipped=[],i,t,d,s,def,value;
+  for(i=0;i<targets.length;i++){
+   if(cancelled&&cancelled()===true)throw Error("Shape cancelled");
+   t=targets[i];var ref=t.localRow?t.localRow.uri:uri(t.uri);need(!seen["$"+ref],"Duplicate destination modifier identity");seen["$"+ref]=true;
+   if(t.localRow){need(plan.records["$"+ref]===t.localRow&&t.localRow.localMorph,"Unverified local shape mapping");d=t.localRow.definition;}else d=plan.definition(ref);if(!d.presentation||d.presentation.type!=="Modifier/Shape")continue;
+   need(d.channel&&d.channel.id==="value"&&d.channel.type==="float","Unsupported target shaping definition");
+   s=plan.records["$"+ref];def=s?s.defaultValue:finite(d.channel.value);value=s?s.value:def;
+   if(t.driven){if(typeof t.raw==="number"&&Math.abs(t.raw-value)<=0.000001){if(s&&value!==def)need(t.rawKeyWritable===true,"Authored driven shape requires a verified existing frame-0 raw key: "+ref);skipped.push(ref);continue;}need(t.rawKeyWritable===true,"Changed driven shape requires a verified existing frame-0 raw key: "+ref);}
+   assignments.push({target:t,uri:ref,value:value,defaultValue:def,reset:!s});
+  }
+  for(i=0;i<plan.rows.length;i++)need(seen["$"+plan.rows[i].uri],"Missing compatible saved shape: "+plan.rows[i].id);
+  need(assignments.length,"No independent compatible shaping inputs");
+  return {assignments:assignments,skippedDriven:skipped};
+ }
+ return {compile:compile,match:match,uri:uri,definitions:definitions,localMorph:localMorph};
+}());

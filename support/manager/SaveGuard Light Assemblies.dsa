@@ -1,0 +1,28 @@
+// Metadata-only presentation. Unknown emission remains diagnostic, never actionable.
+var SaveGuardLightAssemblies=(function(){
+ function own(o,k){return !!o&&Object.prototype.hasOwnProperty.call(o,k);}
+ function id(s){if(typeof s!=='string'||s.charAt(0)!=='#')return null;try{return decodeURIComponent(s.substring(1));}catch(e){return null;}}
+ function clone(o){var c={};for(var k in o)if(own(o,k))c[k]=o[k];return c;}
+ function parent(o){if(o.parent&&o.parent_in_place)throw Error('Light assembly: Ambiguous parent and parent_in_place');return id(o.parent||o.parent_in_place);}
+ function rows(objects,emission){
+  var by={},children={},chosen={},owners={},i,p,key,e,confirmed={},unknown=0;
+  for(i=0;i<objects.length;i++){p=objects[i];key='$'+p.id;by[key]=own(by,key)?null:p;var parentId=parent(p);if(parentId)(children['$'+parentId]||(children['$'+parentId]=[])).push(p.id);}
+  var es=emission&&emission.objects||[];for(i=0;i<es.length;i++){e=es[i];if(e.nonzero>0)confirmed['$'+e.id]=e;else unknown++;}
+  // A single outer light owns its complete subtree; nested lights cannot be loaded twice.
+  for(i=0;i<objects.length;i++){p=objects[i];if(p.type!=='light')continue;var at=parent(p),seen={},outer=false;while(at&&!seen['$'+at]){seen['$'+at]=true;var a=by['$'+at];if(!a)break;if(a.type==='light'){outer=true;break;}at=parent(a);}if(outer)continue;
+   var queue=[p.id],q=0,visited={},assembly=!!(children['$'+p.id]&&children['$'+p.id].length);while(q<queue.length){var current=queue[q++];if(visited['$'+current])continue;visited['$'+current]=true;var source=by['$'+current];if(!source)continue;var r=clone(source);owners['$'+current]=p.id;if(current===p.id){r.lightAssembly=assembly;r.actionKeys=r.selectable?[assembly?'loadLightAssembly':'loadLight']:[];if(assembly)r.displayType='Light assembly';}else{r.iconEmission=!!confirmed['$'+current];if(r.iconEmission){var emission=confirmed['$'+current];r.emissionSurfaces=(emission.confirmedSurfaces||emission.surfaces).slice(0);}r.contextOnly=true;r.selectable=false;r.actionKeys=[];r.displayType=r.iconEmission?'Emission':source.displayType+' (assembly child)';}chosen['$'+current]=r;var kids=children['$'+current]||[];for(var j=0;j<kids.length;j++)queue.push(kids[j]);}
+  }
+  for(i=0;i<objects.length;i++){p=objects[i];e=confirmed['$'+p.id];if(!e||chosen['$'+p.id])continue;var r=clone(p);r.emissive=true;r.emissionStatus='candidate';r.emissionSurfaces=(e.confirmedSurfaces||e.surfaces).slice(0);r.displayType='Emission';r.actionKeys=p.selectable?['loadObject']:[];chosen['$'+p.id]=r;var at=parent(p),seen={};while(at&&!seen['$'+at]){seen['$'+at]=true;var a=by['$'+at];if(!a)break;if(!chosen['$'+at]){var c=clone(a);c.contextOnly=true;c.selectable=false;c.actionKeys=[];c.displayType='Ancestor';chosen['$'+at]=c;}at=parent(a);}}
+  var out=[];for(i=0;i<objects.length;i++)if(chosen['$'+objects[i].id])out.push(chosen['$'+objects[i].id]);return {rows:out,unconfirmed:unknown};
+ }
+ function scope(doc,root,options){
+  options=options||{};function need(v,m){if(!v)throw Error('Light assembly: '+m);}
+  var info=SaveGuardLightPlan.describe(doc,root,options);need(info.type==='light','Selected assembly root must be an exact light');
+  var nodes=doc.scene&&doc.scene.nodes||[],children=0,i;for(i=0;i<nodes.length;i++)if(parent(nodes[i])===root)children++;need(children>0,'Root has no descendants');
+  var plan=SaveGuardSelective.plan(doc,[root],{fullData:true,preserveAnimation:true,isCancelled:options.isCancelled,resolveAssetDocument:options.resolveAssetDocument});need(plan.ready,(plan.errors||[]).join('; '));var owned={};for(i=0;i<plan.nodeIds.length;i++)owned['$'+plan.nodeIds[i]]=true;
+  for(i=0;i<nodes.length;i++)need(owned['$'+nodes[i].id],'Dependency outside selected subtree and required references: '+nodes[i].id);
+  return true;
+ }
+
+ return {rows:rows,scope:scope};
+}());

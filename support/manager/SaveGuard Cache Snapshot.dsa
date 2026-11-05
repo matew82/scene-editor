@@ -1,0 +1,37 @@
+// Exact JSON-cache equality after descriptor validation. No getters/toJSON are invoked.
+// This is not a source-file hash and is only used for native-JSON selected caches.
+var SaveGuardCacheSnapshot=(function(){
+    function fail(message){throw Error("Cache snapshot: "+message);}
+    function capture(root,options){
+        options=options||{};var ancestors=[],negativeZero=[],count=0;
+        if(typeof Object.getOwnPropertyNames!=="function"||typeof Object.getOwnPropertyDescriptor!=="function"||typeof Object.getPrototypeOf!=="function")fail("ES5 reflection unavailable");
+        var objectPrototype=Object.getPrototypeOf({}),arrayPrototype=Object.getPrototypeOf([]);
+        function guard(){if(options.isCancelled&&options.isCancelled()){var error=Error("Cache snapshot: cancelled");error.code="CANCELLED";throw error;}}
+        function prototype(value,isArray){var actual=Object.getPrototypeOf(value),expected=isArray?arrayPrototype:objectPrototype,d;
+            if(actual!==expected){if(!actual)fail("custom prototype");d=Object.getOwnPropertyDescriptor(actual,"constructor");if(!d||typeof d.value!=="function"||Function.prototype.toString.call(d.value)!==Function.prototype.toString.call(isArray?Array:Object)||JSON.stringify(Object.getOwnPropertyNames(actual))!==JSON.stringify(Object.getOwnPropertyNames(expected)))fail("custom prototype");}
+            for(var p=actual;p;p=Object.getPrototypeOf(p))if(Object.getOwnPropertyDescriptor(p,"toJSON"))fail("inherited toJSON is unsupported");
+        }
+        function visit(rootValue){
+            var stack=[{value:rootValue,names:null,index:0}],frame,v,type,i,name,d,isArray;
+            while(stack.length){frame=stack[stack.length-1];v=frame.value;
+                if(frame.names===null){if((++count&1023)===0)guard();type=typeof v;
+                    if(v===null||type==="boolean"||type==="string"){stack.pop();continue;}
+                    if(type==="number"){if(!isFinite(v))fail("non-finite number");if(v===0&&1/v<0)negativeZero.push(count);stack.pop();continue;}
+                    if(type!=="object")fail("non-JSON value");isArray=Object.prototype.toString.call(v)==="[object Array]";prototype(v,isArray);
+                    for(i=0;i<ancestors.length;i++)if(ancestors[i]===v)fail("cycle");ancestors.push(v);frame.names=Object.getOwnPropertyNames(v);frame.isArray=isArray;
+                    if(isArray&&frame.names.length!==v.length+1)fail("sparse/extended array");
+                }
+                if(frame.index===frame.names.length){ancestors.pop();stack.pop();continue;}
+                name=frame.names[frame.index++];d=Object.getOwnPropertyDescriptor(v,name);isArray=frame.isArray;
+                if(!d||!Object.prototype.hasOwnProperty.call(d,"value")||Object.prototype.hasOwnProperty.call(d,"get")||Object.prototype.hasOwnProperty.call(d,"set"))fail("Accessor or disappearing property");
+                if(isArray&&name==="length"){if(d.enumerable||d.configurable||!d.writable)fail("array length attributes changed");continue;}
+                if(!d.enumerable||!d.configurable||!d.writable)fail("property attributes changed");
+                if(isArray&&(!/^(0|[1-9][0-9]*)$/.test(name)||Number(name)>=v.length))fail("array index changed");
+                stack.push({value:d.value,names:null,index:0});
+            }
+        }
+        // Do not pump events between reflection validation and native serialization.
+        guard();visit(root,0);guard();return JSON.stringify(root)+"\nnegative-zero:"+negativeZero.join(",");
+    }
+    return {capture:capture};
+}());

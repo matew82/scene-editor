@@ -1,0 +1,71 @@
+// Input planning only; never called after native load.
+var SaveGuardShapePresetTarget=(function(){
+ function text(v){return v&&typeof v.toString==="function"?String(v.toString()):String(v||"");}
+ function need(v,m){if(!v)throw Error("Shape preset target: "+m);}
+ function create(env,compiled,doc,cancelled){
+  function guard(){if(cancelled&&cancelled())throw Error("Shape cancelled before load");}
+  var t=SaveGuardShapeNative.target(env),localChecks=[],rows=[],checks=[],warnings=[],all={},saved={},bound=[],mods=[],imports=[],i,j;
+  need(env.pointersAreEqual(t.selection,t.node),"Select the figure itself for native preset loading (not a bone)");
+  need(t.uri===compiled.sourceUri&&t.geometryUri===compiled.geometryUri,"Saved and target base/geometry differ");
+  function add(name,p,owner,uri){if(!all["$"+name])all["$"+name]=[];all["$"+name].push({name:name,p:p,owner:owner,uri:uri});}
+  for(i=0;i<t.object.getNumModifiers();i++){guard();var m=t.object.getModifier(i),v=typeof m.getValueControl==="function"?m.getValueControl():null;if(v){var h={name:String(m.getName()),p:v,owner:m,uri:text(m.assetUri)};mods.push(h);add(h.name,v,m,h.uri);}}
+  var props=t.node.getPropertyList();for(i=0;i<props.length;i++)add(String(props[i].getName()),props[i],t.node,text(props[i].assetSource||props[i].assetUri||""));
+  function unique(name){var a=all["$"+name]||[];need(a.length===1,"Missing/ambiguous channel "+name);return a[0];}
+  function bind(h,row){if(!row.exactURI)need(env.pointersAreEqual(unique(h.name).p,h.p),"Ambiguous preset selector "+h.name);else h.exact=true;var p=h.p;need(p.inherits("DzFloatProperty")&&!p.isAlias()&&!p.isLocked()&&!p.isLinked()&&!p.isMaster()&&!p.isEditing(),"Unsupported input "+h.name);need(env.pointersAreEqual(p.getOwner(),h.owner),"Input ownership mismatch");var state=SaveGuardShapeNative.state(p);need(state.keys.length===0||state.keys.length===1&&state.keys[0].time===0,"Animated input "+h.name);if(p.getNumControllers()===0&&typeof p.isClamped==="function"&&p.isClamped())need(row.value>=Number(p.getMin())&&row.value<=Number(p.getMax()),"Value outside channel range");checks.push({h:h,state:JSON.stringify(state)});bound.push(p);rows.push(row);}
+  var instances=doc.scene.modifiers||[];
+  function exactMatches(uri){var found=[];for(var mi=0;mi<mods.length;mi++){var value;try{value=SaveGuardShapePlan.uri(mods[mi].uri);}catch(ignore){continue;}if(value===uri)found.push(mods[mi]);}return found;}
+  for(i=0;i<compiled.rows.length;i++){guard();var r=compiled.rows[i],inst=null;for(j=0;j<instances.length;j++)if(instances[j].id===r.id){need(!inst,"Duplicate source instance");inst=instances[j];}need(inst,"Missing source instance");var name=String(inst.name||r.definition.name||r.definition.id),h;
+   need(!saved["$"+name],"Duplicate source name");saved["$"+name]=true;
+   if(r.localMorph){h=unique(name);need(!env.pointersAreEqual(h.owner,t.node)&&h.owner.inherits("DzMorph"),"Embedded local source requires existing uniquely mapped morph: "+name);need(SaveGuardShapeNative.sameMorph(r.localMorph,SaveGuardShapeNative.morphData(h.owner,guard)),"Embedded local morph payload differs; native external URI cannot represent this override: "+name);need(Number(t.geometry.getNumVertices())===r.localMorph.vertexCount,"Local geometry count differs");localChecks.push({owner:h.owner,data:r.localMorph});bind(h,{name:name,sourceURI:r.uri,value:r.value,defaultValue:r.defaultValue,reset:false});}
+   else{var matches=exactMatches(r.uri);for(var ni=0;ni<props.length;ni++){var nh={name:String(props[ni].getName()),p:props[ni],owner:t.node,uri:text(props[ni].assetSource||props[ni].assetUri||"")};try{if(ref(nh)===r.uri)matches.push(nh);}catch(ignoreNodeURI){}}need(matches.length<=1,"Duplicate canonical target asset: "+r.uri);
+    if(matches.length){h=matches[0];bind(h,{name:name,sourceURI:r.uri,exactURI:env.pointersAreEqual(h.owner,t.node)?null:r.uri,value:r.value,defaultValue:r.defaultValue,reset:false});}
+    else{need(r.uri.charAt(0)==="/","Missing embedded input cannot be imported by external URI");imports.push(r.uri);rows.push({name:name,sourceURI:r.uri,exactURI:r.uri,value:r.value,defaultValue:r.defaultValue,reset:false,importAsset:true});warnings.push("Native exact-URI asset import requested (runtime unverified): "+r.uri);}
+   }
+  }
+  // Discover shape ownership from explicit runtime presentation/asset metadata; never evaluate ERC.
+  function ref(h){var u=String(h.uri||"");u=u.replace(/\?value(?:\/value)?$/," ").replace(/ $/,"");return SaveGuardShapePlan.uri(u);}
+  function role(h){var pr=typeof h.p.getPresentation==="function"?h.p.getPresentation():null;return pr?String(pr.type):null;}
+  function structural(h){return env.pointersAreEqual(h.owner,t.node)&&(/^(X|Y|Z)(Translate|Rotate|Scale)$/.test(h.name)||h.name==="Scale"||h.name==="Bone Fill Opacity"||h.name==="Bone Edge Opacity");}
+  var extra=mods.slice(0);for(i=0;i<props.length;i++){var h={name:String(props[i].getName()),p:props[i],owner:t.node,uri:text(props[i].assetSource||props[i].assetUri||"")};if(h.p.inherits("DzFloatProperty")&&!h.p.isAlias())extra.push(h);}
+  // Explicit studio_node_channels shaping overrides are source authored values too.
+  var sourceNode=null;for(i=0;i<doc.scene.nodes.length;i++)if(doc.scene.nodes[i].id===compiled.sourceId)sourceNode=doc.scene.nodes[i];need(sourceNode,"Selected source node missing");
+  var nodeExtras=sourceNode.extra||[];
+  for(i=0;i<nodeExtras.length;i++)if(nodeExtras[i].type==="studio_node_channels"){
+   var channels=nodeExtras[i].channels||[];
+   for(j=0;j<channels.length;j++){var c=channels[j].channel;need(c&&typeof c.id==="string","Malformed source node channel");if(structural({name:c.id,owner:t.node}))continue;var matches=all["$"+c.id]||[];
+    need(matches.length===1,"Missing/ambiguous source node channel classification: "+c.id);
+    var h=matches[0],kind=role(h);if(structural(h))continue;
+    if(kind!=="Modifier/Shape"){if(kind)continue;need(typeof h.p.rawValueIsDefinitionValue==="function"&&h.p.rawValueIsDefinitionValue()===true,"Unknown source node channel role: "+c.id);continue;}
+    need(!saved["$"+c.id],"Duplicate saved shaping selector: "+c.id);need(c.type==="float"&&!c.keys&&!c.keyframes,"Unsupported source node shaping channel");
+    var v=Object.prototype.hasOwnProperty.call(c,"current_value")?c.current_value:c.value;need(typeof v==="number"&&isFinite(v),"Source node shaping value missing: "+c.id);saved["$"+c.id]=true;bind(h,{name:c.id,sourceURI:ref(h),value:v,reset:false});
+   }
+  }
+  for(i=0;i<extra.length;i++){guard();var h=extra[i],p=h.p;if(bound.indexOf(p)>=0||structural(h)||!p.inherits("DzFloatProperty")||p.isAlias())continue;
+   var kind=role(h);if(kind&&kind!=="Modifier/Shape")continue;
+   // Native definition-equality is a proof that no reset is needed, not an assumption default=0.
+   if(typeof p.rawValueIsDefinitionValue==="function"&&p.rawValueIsDefinitionValue()===true){var defaultState=SaveGuardShapeNative.state(p),ks=defaultState.keys;need(ks.length===0||ks.length===1&&ks[0].time===0,"Animated default shaping candidate: "+h.name);checks.push({h:h,state:JSON.stringify(defaultState),atDefinition:true});continue;}
+   var definition,uri;try{uri=ref(h);definition=compiled.definition(uri);}catch(e){throw Error("Complete shape input blocked: missing authored definition for "+h.name+" ["+h.uri+"]: "+String(e));}
+   need(definition.presentation&&definition.presentation.type,"Unknown extra channel role: "+h.name);if(definition.presentation.type!=="Modifier/Shape"){need(kind!=="Modifier/Shape","Conflicting shape role: "+h.name);continue;}
+   need(definition.channel&&definition.channel.id==="value"&&definition.channel.type==="float"&&typeof definition.channel.value==="number"&&isFinite(definition.channel.value),"Missing authored shape default: "+h.name);
+   // Write the raw authored default even for a driven offset. DAZ owns all formulas/evaluation.
+   need(!p.getAutoFollowTargetUri||!text(p.getAutoFollowTargetUri()),"Auto-follow raw reset needs explicit source mapping: "+h.name);
+   if(Number(p.getRawValue())===definition.channel.value){checks.push({h:h,state:JSON.stringify(SaveGuardShapeNative.state(p))});continue;}
+   bind(h,{name:h.name,sourceURI:uri,exactURI:env.pointersAreEqual(h.owner,t.node)?null:uri,value:definition.channel.value,defaultValue:definition.channel.value,reset:true});
+  }
+  warnings.unshift("Complete supported shaping inputs are planned before loading; missing/default/identity ambiguities block the loader. DAZ result is not audited.");
+  var modifierCount=t.object.getNumModifiers(),propertyCount=props.length;
+  var preset={sourceURI:compiled.sourceUri,geometryURI:compiled.geometryUri,rows:rows};
+  function verify(){guard();for(var li=0;li<localChecks.length;li++){var lc=localChecks[li];if(lc.empty)need(lc.owner.getDeltas()&&Number(lc.owner.getDeltas().getNumDeltas())===0,"Empty mapped morph changed before load");else need(SaveGuardShapeNative.sameMorph(lc.data,SaveGuardShapeNative.morphData(lc.owner,guard)),"Local/mapped morph changed before load");}var now=SaveGuardShapeNative.target(env);need(env.pointersAreEqual(now.node,t.node)&&env.pointersAreEqual(now.selection,t.selection)&&env.pointersAreEqual(now.object,t.object)&&env.pointersAreEqual(now.shape,t.shape)&&now.uri===t.uri&&now.geometryUri===t.geometryUri,"Target changed before load");
+   need(now.object.getNumModifiers()===modifierCount&&now.node.getPropertyList().length===propertyCount,"Target control inventory changed before load");
+   // Re-enumerate names before loading so a newly added collision cannot redirect name://.
+   var names={},o=now.object;function countName(n,p){if(!names["$"+n])names["$"+n]=[];names["$"+n].push(p);}
+   for(var mi=0;mi<o.getNumModifiers();mi++){var mod=o.getModifier(mi);if(typeof mod.getValueControl==="function"&&mod.getValueControl())countName(String(mod.getName()),mod.getValueControl());}
+   var currentURIs={};for(var ui=0;ui<o.getNumModifiers();ui++){var um=o.getModifier(ui),uu;try{uu=SaveGuardShapePlan.uri(text(um.assetUri));}catch(ignoreURI){continue;}if(!currentURIs["$"+uu])currentURIs["$"+uu]=[];currentURIs["$"+uu].push(um);}
+   for(var ii=0;ii<imports.length;ii++)need(!currentURIs["$"+imports[ii]],"Import asset appeared before load");
+   for(var ei=0;ei<checks.length;ei++)if(checks[ei].h.exact){var ex=currentURIs["$"+SaveGuardShapePlan.uri(checks[ei].h.uri)];need(ex&&ex.length===1&&env.pointersAreEqual(ex[0],checks[ei].h.owner),"Canonical asset binding changed before load");}
+   var ps=now.node.getPropertyList();for(var pi=0;pi<ps.length;pi++)countName(String(ps[pi].getName()),ps[pi]);
+   for(var ci=0;ci<checks.length;ci++){var c=checks[ci],p=c.h.p;if(c.neutral)need(p.getNumControllers()===0&&p.getNumSlaveControllers()===0&&(!p.getAutoFollowTargetUri||!text(p.getAutoFollowTargetUri())),"Neutral input acquired a dependency before load");if(c.atDefinition)need(p.rawValueIsDefinitionValue()===true,"Definition-equal input changed before load");need((c.h.exact||names["$"+c.h.name]&&names["$"+c.h.name].length===1&&env.pointersAreEqual(names["$"+c.h.name][0],p))&&env.pointersAreEqual(p.getOwner(),c.h.owner)&&!p.isLocked()&&!p.isLinked()&&!p.isMaster()&&!p.isEditing()&&JSON.stringify(SaveGuardShapeNative.state(p))===c.state,"Input changed before load: "+c.h.name);}return true;}
+  return {plan:preset,check:verify,warnings:warnings};
+ }
+ return {create:create};
+}());

@@ -1,0 +1,55 @@
+// Explicit button consent. No file, scene, settings or destructive operations.
+var SaveGuardExplicitConfirmation = (function () {
+    function show(title, text, actionText, diagnosticHook) {
+        var dialog = new DzDialog(), layout = new DzVBoxLayout(dialog), label = new DzLabel(dialog),
+            row = new DzWidget(dialog), buttons = new DzHBoxLayout(row), cancel = new DzPushButton(row), action = new DzPushButton(row),
+            active = true, consent = false, actionClicked = false, cancelClicked = false, error = "", connected = [], closeValue, execValue;
+        dialog.caption = title;
+        dialog.sizeGripEnabled = false;
+        layout.margin = 12; layout.spacing = 10;
+        label.wordWrap = true; label.text = text; label.setFixedWidth(456);
+        layout.addWidget(label);
+        buttons.margin = 0; buttons.spacing = 10; buttons.addStretch(1);
+        cancel.text = "Cancel"; action.text = actionText;
+        cancel.setFixedSize(100, 32); action.setFixedSize(100, 32);
+        action.autoDefault = false; action["default"] = false; action.autoRepeat = false;
+        cancel.autoDefault = false; cancel["default"] = true;
+        buttons.addWidget(cancel); buttons.addWidget(action); layout.addWidget(row);
+        dialog.setRejectButton(cancel);
+        dialog.setFixedWidth(480);
+        var hint = label.getWidget().sizeHint, labelHeight = Math.ceil(Number(hint && hint.height));
+        if (!isFinite(labelHeight) || labelHeight <= 0) throw Error("Confirmation text size is unavailable.");
+        label.setFixedHeight(labelHeight); row.setFixedHeight(32); dialog.setFixedHeight(labelHeight + 66);
+        function deny() {
+            if (!active) return;
+            cancelClicked = true; consent = false;
+            try { dialog.close(); } catch (e) { error = String(e); }
+        }
+        function approve() {
+            if (!active) return;
+            actionClicked = true; consent = false;
+            try { closeValue = dialog.close(); consent = closeValue === true; }
+            catch (e) { error = String(e); consent = false; }
+        }
+        try {
+            connect(cancel, "clicked()", deny); connected.push([cancel, deny]);
+            connect(action, "clicked()", approve); connected.push([action, approve]);
+            // Cancel is the documented default; no unsupported focus method is called.
+            if (diagnosticHook) diagnosticHook(dialog, layout, action, label);
+            execValue = dialog.exec();
+        } catch (e) { error = String(e); consent = false; }
+        finally {
+            active = false;
+            for (var i = connected.length - 1; i >= 0; i -= 1) {
+                try { disconnect(connected[i][0], "clicked()", connected[i][1]); }
+                catch (e) { error = String(e); consent = false; }
+            }
+        }
+        return { confirmed: consent === true && !cancelClicked && !error, actionClicked: actionClicked, cancelClicked: cancelClicked,
+            closeType: typeof closeValue, closeValue: String(closeValue), execType: typeof execValue, execValue: String(execValue), error: error };
+    }
+    return { revision: "explicit-click-3", show: function (title, text, actionText, diagnosticHook) {
+        try { return show(title, text, actionText, diagnosticHook); }
+        catch (e) { return { confirmed: false, actionClicked: false, cancelClicked: false, error: String(e) }; }
+    } };
+}());

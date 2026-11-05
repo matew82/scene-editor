@@ -1,0 +1,19 @@
+// Native camera payload planning; DAZ owns evaluation and interpolation.
+var SaveGuardCameraPlan=(function(){
+ function own(o,k){return !!o&&Object.prototype.hasOwnProperty.call(o,k);}
+ function need(v,m){if(!v)throw Error('Camera source: '+m);}
+ function extract(doc,sourceId,options){options=options||{};var selective=options.selective||SaveGuardSelective;
+  function check(){if(options.isCancelled&&options.isCancelled()){var e=Error('Camera preparation cancelled');e.code='CANCELLED';throw e;}}
+  check();var source=null,i,j,by={},ancestorIds=[],seen={};
+  for(i=0;i<(doc.scene&&doc.scene.nodes||[]).length;i++){check();var n=doc.scene.nodes[i];need(n&&typeof n.id==='string'&&n.id&&!own(by,'$'+n.id),'Missing/duplicate source node');by['$'+n.id]=n;if(n.id===sourceId)source=n;}
+  need(source&&SaveGuardCameraSourceProjection.cameraType(doc,source,options,check)==='camera','Selected source is not an exact saved camera');need(typeof source.label==='string'&&source.label.length,'Saved camera requires an explicit nonempty instance label');
+  var at=source;while(at){check();need(!own(seen,'$'+at.id),'Cyclic camera ancestry');seen['$'+at.id]=true;if(at!==source)ancestorIds.push(at.id);var parent=at.parent||at.parent_in_place;if(!parent)break;var ref=selective.parseURI(parent);need(ref.kind==='local'&&(!ref.nodePath||ref.nodePath===ref.fragment)&&!ref.query&&own(by,'$'+ref.fragment),'Missing or nonlocal ancestor');at=by['$'+ref.fragment];}
+  var plan=selective.plan(doc,[sourceId],{fullData:true,includeDescendants:false,preserveAnimation:true,resolveAssetDocument:options.resolveAssetDocument,isCancelled:options.isCancelled});check();need(plan.ready,(plan.errors||[]).join('; '));
+  var built=selective.extract(doc,plan,{namespace:options.namespace||'SGCameraNative',existingIds:options.existingIds||[],resolveExternal:options.resolveExternal,isCancelled:options.isCancelled});check();
+  var tracks=[],animations=built.document.scene.animations||[];for(i=0;i<animations.length;i++){check();var a=animations[i],p=selective.parseURI(a.url),parts=p.query.substring(1).split('/');tracks.push({stagedId:p.fragment,propertyName:parts.length>1?decodeURIComponent(parts[parts.length-2]):'',query:p.query,keys:a.keys});}
+  var channels=[],indexes={},definitions={},chain=[],current=source;for(i=0;i<(doc.node_library||[]).length;i++)definitions['$'+doc.node_library[i].id]=doc.node_library[i];seen={};while(current){check();chain.unshift(current);var link=current.url||current.source;if(!link)break;var r=selective.parseURI(link);if(r.kind!=='local')break;need(!own(seen,'$'+r.fragment),'Cyclic camera definition');seen['$'+r.fragment]=true;current=definitions['$'+r.fragment];need(current,'Missing camera definition');}
+  for(i=0;i<chain.length;i++){check();var extras=chain[i].extra||[];for(j=0;j<extras.length;j++){if(extras[j].type!=='studio_node_channels')continue;var cs=extras[j].channels||[];for(var ci=0;ci<cs.length;ci++){var c=cs[ci].channel;need(c&&typeof c.id==='string'&&c.id,'Malformed camera channel');var copied=SaveGuardCameraSourceProjection.copy(c,check);if(own(indexes,'$'+c.id))channels[indexes['$'+c.id]]=copied;else{indexes['$'+c.id]=channels.length;channels.push(copied);}}}}
+  check();return {schema:1,sourceId:sourceId,label:source.label,definitionKind:'camera',stagedId:built.mapId(sourceId),ancestorIds:ancestorIds,hasParent:ancestorIds.length>0,animationCount:animations.length,cameraChannels:channels,animationChannels:tracks,document:built.document,built:built,plan:plan,placement:built.placement,animationPolicy:'preserve exact authored records and native source dependency closure',globalsApplied:false,nativeVerified:false};
+ }
+ return {extract:extract};
+}());

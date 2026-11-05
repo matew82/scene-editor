@@ -1,0 +1,105 @@
+// Metadata-only bounded scanner; no native whole-file read.
+var SaveGuardListStream=(function(){
+function problem(code,message){var e=new Error(message);e.code=code;throw e;}
+    function chunkedPlain(file) {
+        var bytes = null, hex = "", used = 0, length = 0, chars = [], nibble = [], closed = false;
+        for (var i = 0; i < 256; i += 1) { chars[i] = String.fromCharCode(i); }
+        for (i = 0; i < 10; i += 1) { nibble[48 + i] = i; }
+        for (i = 0; i < 6; i += 1) { nibble[97 + i] = i + 10; }
+        return { readByte: function () { problem("API", "Chunk reader required."); }, eof: function () { return used === length && file.eof(); },
+            readChunk: function () {
+                if (used === length) {
+                    if (file.eof()) { return ""; }
+                    bytes = file.read(32768); used = 0; hex = "";
+                    if (!bytes || typeof bytes.byteAt !== "function") { problem("READ_CHUNK", "Invalid plain ByteArray."); }
+                    length = typeof bytes.length === "number" ? bytes.length : bytes.size;
+                    if (typeof length !== "number" || Math.floor(length) !== length || length <= 0 || length > 32768) { problem("READ_CHUNK", "Invalid plain chunk length."); }
+                    if (typeof file.error === "function" && file.error() !== DzFile.NoError) { problem("READ", "Plain chunk read error."); }
+                    if (typeof bytes.toHex === "function") {
+                        var h = bytes.toHex();
+                        if (h && typeof h.convertToString === "function") {
+                            hex = h.convertToString();
+                            if (typeof hex !== "string" || hex.length !== length * 2 || !/^[0-9a-f]+$/.test(hex)) { problem("READ_CHUNK", "Invalid plain hex bridge."); }
+                        }
+                    }
+                }
+                var output = [], end = Math.min(used + 16384, length), value, at;
+                while (used < end) {
+                    if (hex) { at = used++ * 2; value = nibble[hex.charCodeAt(at)] * 16 + nibble[hex.charCodeAt(at + 1)]; }
+                    else {
+                        value = bytes.byteAt(used++);
+                        if (typeof value !== "number" || Math.floor(value) !== value || value < -128 || value > 255) { problem("READ_BYTE", "Invalid plain byte."); }
+                        if (value < 0) { value += 256; }
+                    }
+                    output.push(chars[value]);
+                }
+                return output.join("");
+            }, close: function () { bytes = null; hex = ""; if (!closed) { closed = true; file.close(); } } };
+    }
+    function chunkedGzip(file, meta, maxBytes, hooks) {
+        if (typeof SaveGuardDUFGzip === "undefined" || typeof file.read !== "function") { problem("API", "Bounded gzip decoder or DzFile.read(maxSize) is unavailable."); }
+        var bytes = null, hex = "", used = 0, length = 0, obtained = 0, chunks = 0,
+            inputReadMillis = 0, bridgeMillis = 0, bridges = {}, nibble = [];
+        for (var ni = 0; ni < 10; ni += 1) { nibble[48 + ni] = ni; }
+        for (ni = 0; ni < 6; ni += 1) { nibble[97 + ni] = 10 + ni; }
+        var clock = hooks.clock || function () { return new Date().getTime(); }, started = clock();
+        function guard() {
+            if (hooks.isCancelled && hooks.isCancelled()) { problem("CANCELLED", "Inspection cancelled; partial scene counts were discarded."); }
+            if (clock() - started > SaveGuardDUF.limits.maxMillis) { problem("LIMIT_TIME", "Gzip decoding time limit reached; no partial index is valid."); }
+        }
+        var decoder = SaveGuardDUFGzip.create(function () {
+            if (used === length) {
+                guard(); if (obtained === meta.physicalBytes) { return -1; }
+                var t = clock(); bytes = file.read(32768); inputReadMillis += clock() - t; chunks += 1; used = 0; hex = "";
+                if (!bytes || typeof bytes.byteAt !== "function") { problem("READ_CHUNK", "DzFile.read(maxSize) did not return a ByteArray."); }
+                length = typeof bytes.length === "number" ? bytes.length : bytes.size;
+                if (typeof length !== "number" || length < 0 || length > 32768 || Math.floor(length) !== length) { problem("READ_CHUNK", "Invalid or oversized bounded byte chunk."); }
+                if (typeof file.error === "function" && file.error() !== DzFile.NoError) { problem("READ", "Compressed chunk read error."); }
+                if (!length) { problem("GZIP_TRUNCATED", "Compressed file ended before its recorded size."); }
+                obtained += length;
+                if (obtained > meta.physicalBytes) { problem("FILE_CHANGED", "Compressed file grew during inspection."); }
+                // Bounded ASCII hex bridges replace millions of native byteAt calls.
+                // Missing optional conversion methods retain the proven numeric route.
+                t = clock();
+                if (typeof bytes.toHex === "function") {
+                    var hexArray = bytes.toHex();
+                    if (hexArray && typeof hexArray.convertToString === "function") {
+                        hex = hexArray.convertToString();
+                        if (typeof hex !== "string" || hex.length !== length * 2 || !/^[0-9a-f]+$/.test(hex)) { problem("READ_CHUNK", "Invalid bounded hexadecimal byte bridge."); }
+                    }
+                }
+                var bridge = hex ? "ASCII-hex" : "numeric-byteAt"; bridges[bridge] = (bridges[bridge] || 0) + 1;
+                bridgeMillis += clock() - t;
+            }
+            if (hex) { var at = used++ * 2; return nibble[hex.charCodeAt(at)] * 16 + nibble[hex.charCodeAt(at + 1)]; }
+            var value = bytes.byteAt(used++);
+            if (typeof value !== "number" || value < -128 || value > 255 || Math.floor(value) !== value) { problem("READ_BYTE", "Invalid compressed ByteArray value."); }
+            return value < 0 ? value + 256 : value;
+        }, maxBytes, guard, clock, hooks.deepValidation===true);
+        decoder.close = function () { file.close(); bytes = null; };
+        decoder.chunkStats = function () { var stats = decoder.stats(); stats.compressedReadChunks = chunks; stats.maxCompressedChunkBytes = 32768;
+            stats.compressedReadMillis = inputReadMillis; stats.byteBridgeMillis = bridgeMillis; stats.byteBridges = bridges; return stats; };
+        return decoder;
+    }
+    function read(path,options){
+        options=options||{};var raw=null,stream=null,closed=false,doc=null,clock=options.clock||function(){return new Date().getTime();},start=clock();
+        function stat(){var f=new DzFileInfo(path);if(!f.exists()||!f.isFile()||!f.isReadable())problem("FILE_ACCESS","Saved copy unavailable");return {physicalBytes:Number(f.size()),stamp:String(f.lastModified())};}
+        function alive(){if(closed)problem("CLOSED","Metadata provider closed");}
+        try{
+            var before=stat();if(!(isFinite(before.physicalBytes)&&before.physicalBytes>0&&Math.floor(before.physicalBytes)===before.physicalBytes))problem("FILE_SIZE","Invalid source size");
+            if(options.isCancelled&&options.isCancelled())problem("CANCELLED","Inspection cancelled");
+            raw=new DzFile(path);if(!raw.open(DzFile.ReadOnly))problem("OPEN","Cannot open saved copy");var header=raw.read(2);var gzip=header.byteAt(0)===31&&header.byteAt(1)===139;
+            if(!raw.seek(0))problem("SEEK","Cannot rewind saved copy");stream=gzip?chunkedGzip(raw,before,Infinity,options):chunkedPlain(raw);raw=null;
+            var scanned=SaveGuardDUF.scan(function(){return stream.readByte();},{structureOnly:true,maxBytes:Infinity,clock:clock,isCancelled:options.isCancelled,onProgress:options.onProgress,readChunk:function(){return stream.readChunk();}});
+            doc=scanned.document;if(!doc.scene||!doc.scene.nodes)problem("JSON","Saved scene nodes required");var after=stat();if(after.physicalBytes!==before.physicalBytes||after.stamp!==before.stamp)problem("FILE_CHANGED","Saved copy changed while reading");
+            // lowMemoryMode mirrors explicit prefs only — never auto-enabled. metadataIndex is the
+            // Manager preview path (no full JSON DOM) and must not reintroduce Low RAM UI wording.
+            var explicitLowRam=options.lowMemoryMode===true, metadataIndex=options.metadataIndex===true;
+            var stats={mode:"bounded-metadata-scanner",lowMemoryMode:explicitLowRam,metadataIndex:metadataIndex,fullJSONTreeAllocated:false,metadataOnly:true,nativeReadMillis:0,normalizationMillis:0,parseMillis:0,projectionMillis:0,readScanMillis:clock()-start,totalMillis:clock()-start,expandedBytes:scanned.bytesRead,retainedChars:scanned.metadataChars,decoder:stream.chunkStats?stream.chunkStats():null};
+            if(typeof print==="function")print("SaveGuard metadata index phases: "+JSON.stringify(stats));
+            return {stats:stats,previewOnly:true,provider:{listRecords:function(group){alive();return group==="scene.nodes"?doc.scene.nodes:group==="node_library"?doc.node_library||[]:[];},verifySource:function(){alive();var now=stat();if(now.physicalBytes!==before.physicalBytes||now.stamp!==before.stamp)problem("FILE_CHANGED","Saved copy changed; inspect again");return true;},readRecords:function(){problem("PREVIEW_ONLY","Metadata does not authorize import");},close:function(){closed=true;doc=null;}}};
+        }catch(e){var listEnvelope=typeof SaveGuardLastErrorReport!=="undefined"?SaveGuardLastErrorReport.envelope(e,"inspect-metadata-index",{recoveryRequired:false,cancelled:e&&e.code==="CANCELLED"}):{code:e.code||"LOW_RAM_LIST",stage:"inspect-metadata-index",message:String(e.message||e),recoveryRequired:false};return {error:listEnvelope};}
+        finally{if(stream)stream.close();if(raw)raw.close();}
+    }
+    return {read:read};
+}());

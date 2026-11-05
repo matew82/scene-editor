@@ -1,0 +1,159 @@
+// Read-only target inspection. No scene/property writes and no enabled native profiles.
+var SaveGuardPoseTarget = (function () {
+    function own(o, k) { return !!o && Object.prototype.hasOwnProperty.call(o, k); }
+    function fail(code, message) { var e = new Error(message); e.code = code; throw e; }
+    function need(v, code, message) { if (!v) { fail(code, message); } }
+    function copy(v) { return JSON.parse(JSON.stringify(v)); }
+    function callable(o, k) { return !!o && typeof o[k] === "function"; }
+    function call(o, k) { need(callable(o, k), "RIG_API", "Missing native target API: " + k); return o[k](); }
+    function number(v) {
+        if (v && typeof v.valueOf === "function") { v = v.valueOf(); }
+        need(typeof v === "number" && isFinite(v), "RIG_NUMBER", "Native rig value is not finite numeric data."); return v;
+    }
+    function vec(v) { return [number(v.x), number(v.y), number(v.z)]; }
+    function uriText(v) { return v === null || v === undefined ? "" : String(v); }
+    function axes(a, name) {
+        need(Object.prototype.toString.call(a) === "[object Array]", "RIG_SOURCE", "Unresolved source " + name + ".");
+        var out = [], seen = {}, i, c, at, n;
+        for (i = 0; i < a.length; i += 1) {
+            c = a[i]; at = c && typeof c === "object" ? ["x", "y", "z"].indexOf(c.id) : i;
+            need(at >= 0 && at < 3 && !own(seen, at), "RIG_SOURCE", "Malformed source " + name + " axes."); seen[at] = true;
+            n = c && typeof c === "object" ? (own(c, "current_value") ? c.current_value : c.value) : c; out[at] = number(n);
+        }
+        need(out.length === 3 && own(seen, 0) && own(seen, 1) && own(seen, 2), "RIG_SOURCE", "Incomplete source " + name + "."); return out;
+    }
+    function create(env, options) {
+        options = options || {};
+        var domain = options.selective || SaveGuardSelective, profiles = copy(options.verifiedProfiles || []), issued = [], build = String(env.buildId || ""), scene = env.Scene;
+        function same(a, b) {
+            if (!a || !b) { return !a && !b; }
+            need(callable(env, "pointersAreEqual"), "RIG_IDENTITY", "Native pointer comparison is required."); return env.pointersAreEqual(a, b) === true;
+        }
+        function canonical(raw) {
+            var p = domain.parseURI(raw);
+            need(p.kind === "external" && !p.nodePath && !p.query && p.file.charAt(0) === "/", "RIG_IDENTITY", "Exact external content-relative asset identity is unavailable.");
+            return p.file + "#" + encodeURIComponent(p.fragment);
+        }
+        function identity(node) {
+            var source = uriText(node.assetSource), asset = uriText(node.assetUri);
+            // A nonempty embedded source must be resolved, never silently replaced by an unrelated URI.
+            return { sourceUrl: canonical(source || asset), assetSource: source, assetUri: asset };
+        }
+        function profile() {
+            var p = null, i;
+            for (i = 0; i < profiles.length; i += 1) { if (profiles[i].buildId === build && profiles[i].kind === "pose-target") { p = profiles[i]; break; } }
+            need(p && p.verified === true && p.evidenceId && p.checks && p.checks.assetIdentity === true && p.checks.restRig === true && p.checks.rotationOrder === true,
+                "RIG_NATIVE_UNVERIFIED", "No isolated target rig/asset validation for build " + (build || "unknown") + ".");
+            need(p.nativeToDSON && number(p.nativeToDSON.position) > 0 && number(p.nativeToDSON.orientation) > 0,
+                "RIG_NATIVE_UNVERIFIED", "Reviewed native rig unit factors are required."); return p;
+        }
+        function stableSource() {
+            need(callable(options, "verifySource") && options.verifySource() === true, "RIG_SOURCE_CHANGED", "Saved DUF and resolved asset definitions must remain byte-verified.");
+        }
+        function snapshot(root, bind) {
+            need(root && call(root, "isInScene") === true && root.inherits("DzFigure"), "RIG_TARGET", "An existing figure root is required.");
+            var handles = [root], count = number(call(scene, "getNumNodes")), i, j, node, rows = [], keys = [], seen = {};
+            need(isFinite(count) && count >= 0 && count <= 9007199254740991 && Math.floor(count) === count, "RIG_LIMIT", "Unexpected scene node count.");
+            for (i = 0; i < count; i += 1) {
+                node = scene.getNode(i);
+                if (!node || same(node, root) || !node.inherits("DzBone") || !same(call(node, "getSkeleton"), root)) { continue; }
+                for (j = 0; j < handles.length; j += 1) { need(!same(handles[j], node), "RIG_IDENTITY", "Duplicate native bone pointer."); } handles.push(node);
+            }
+            for (i = 0; i < handles.length; i += 1) { keys.push(bind ? bind(handles[i]) : "rig-" + i); }
+            function keyOf(n) { for (var x = 0; x < handles.length; x += 1) { if (same(handles[x], n)) { return keys[x]; } } return null; }
+            for (i = 0; i < handles.length; i += 1) {
+                node = handles[i]; var id = identity(node), order = String(call(node, "getRotationOrder")), parent = call(node, "getNodeParent"), parentKey = i ? keyOf(parent) : null;
+                need(/^(XYZ|XZY|YXZ|YZX|ZXY|ZYX)$/.test(order), "RIG_ORDER", "Unknown native rotation order.");
+                need(!i || parentKey, "RIG_PARENT", "A target bone parent is outside its selected skeleton.");
+                var name = String(call(node, "getName")), match = "$" + id.sourceUrl + "|" + name;
+                need(!own(seen, match), "RIG_AMBIGUOUS", "Duplicate target asset/bone identity."); seen[match] = true;
+                var orient = [number(call(call(node, "getOrientXControl"), "getValue")), number(call(call(node, "getOrientYControl"), "getValue")), number(call(call(node, "getOrientZControl"), "getValue"))];
+                var inherit = call(node, "inheritsScale"); need(typeof inherit === "boolean", "RIG_API", "Native inheritsScale is not Boolean.");
+                need(call(node, "isLocalTransformDisabled") === false && call(node, "isLocalTransformIgnored") === false, "RIG_CONTROL", "Disabled/ignored local transforms are unsupported.");
+                need(!call(node, "getPointAtTarget"), "RIG_CONTROL", "Point-at controlled rig is unsupported.");
+                if (callable(node, "getFollowTarget")) { need(!node.getFollowTarget(), "RIG_CONTROL", "A fitted/following target requires separate validation."); }
+                rows.push({ key: keys[i], internalName: name, sourceUrl: id.sourceUrl, assetSource: id.assetSource, assetUri: id.assetUri,
+                    parentKey: parentKey, rotationOrder: order, centerPoint: vec(node.getOrigin(false)), endPoint: vec(node.getEndPoint(false)),
+                    orientation: orient, inheritsScale: inherit });
+            }
+            return { data: { rootKey: keys[0], nodes: rows }, handles: handles, keys: keys, rootParent: call(root, "getNodeParent") };
+        }
+        function sourceRig() {
+            stableSource();
+            var resolved = domain.poseSource(options.document, options.sourceFigureId, { resolveAssetDocument: options.resolveAssetDocument }), byId = {}, rows = [], i, n;
+            need(resolved.ready === true && !resolved.errors.length, "RIG_SOURCE", "Saved source rig could not be resolved: " + resolved.errors.join("; "));
+            for (i = 0; i < resolved.nodes.length; i += 1) { n = resolved.nodes[i]; need(!own(byId, "$" + n.id), "RIG_SOURCE", "Duplicate source rig node."); byId["$" + n.id] = n; }
+            for (i = 0; i < resolved.nodes.length; i += 1) {
+                n = resolved.nodes[i]; var s = n.state, parent = byId["$" + n.parentId], inherits = s.inherits_scale;
+                // No mutable native property defaults are used to fill source data.
+                need(typeof inherits === "boolean", "RIG_SOURCE", "Unresolved source scale inheritance for " + n.internalName);
+                need(/^(XYZ|XZY|YXZ|YZX|ZXY|ZYX)$/.test(s.rotation_order), "RIG_SOURCE", "Unresolved source rotation order.");
+                rows.push({ id: n.id, internalName: n.internalName, sourceUrl: canonical(n.sourceUrl), parentId: n.parentId,
+                    parentIdentity: parent ? canonical(parent.sourceUrl) + "|" + parent.internalName : null,
+                    centerPoint: axes(s.center_point, "center_point"), endPoint: axes(s.end_point, "end_point"), orientation: axes(s.orientation, "orientation"),
+                    rotationOrder: s.rotation_order, inheritsScale: inherits });
+            }
+            stableSource(); return { rows: rows, definitionFiles: resolved.definitionFiles };
+        }
+        function compare(sceneEditorCompat_native, source, p) {
+            var matched = {}, sourceRoot = null, rows = sceneEditorCompat_native.data.nodes, i, j, src, dst, root = rows[0];
+            need(rows.length === source.rows.length, "RIG_COUNT", "Saved and target skeletons contain different node counts.");
+            for (i = 0; i < source.rows.length; i += 1) { src = source.rows[i]; if (src.id === options.sourceFigureId) { sourceRoot = src; } }
+            need(sourceRoot && sourceRoot.sourceUrl === root.sourceUrl, "RIG_ASSET", "The target figure has a different base asset.");
+            for (i = 0; i < source.rows.length; i += 1) {
+                src = source.rows[i]; dst = null;
+                if (src.id === options.sourceFigureId) { dst = root; }
+                else { for (j = 1; j < rows.length; j += 1) { if (rows[j].sourceUrl === src.sourceUrl && rows[j].internalName === src.internalName) { need(!dst, "RIG_AMBIGUOUS", "Ambiguous target bone identity."); dst = rows[j]; } } }
+                need(dst, "RIG_ASSET", "Target lacks exact saved bone asset: " + src.internalName); matched["$" + src.id] = dst;
+                need(dst.rotationOrder === src.rotationOrder && dst.inheritsScale === src.inheritsScale, "RIG_REST", "Rotation order or scale inheritance differs: " + src.internalName);
+                var fields = ["centerPoint", "endPoint", "orientation"], f, factor;
+                for (f = 0; f < fields.length; f += 1) {
+                    factor = fields[f] === "orientation" ? p.nativeToDSON.orientation : p.nativeToDSON.position;
+                    for (j = 0; j < 3; j += 1) { need(Math.abs(dst[fields[f]][j] * factor - src[fields[f]][j]) <= 0.00001, "RIG_REST", "Rest rig differs in " + fields[f] + " for " + src.internalName); }
+                }
+            }
+            for (i = 0; i < source.rows.length; i += 1) {
+                src = source.rows[i]; if (src.id === options.sourceFigureId) { continue; }
+                need(matched["$" + src.parentId] && matched["$" + src.id].parentKey === matched["$" + src.parentId].key, "RIG_PARENT", "Target bone hierarchy differs: " + src.internalName);
+            }
+        }
+        function describeTarget(root, bind) {
+            need(typeof bind === "function", "RIG_BIND", "ApplyHost opaque binding callback is required.");
+            var p = profile(), source = sourceRig(), sceneEditorCompat_native = snapshot(root, bind); compare(sceneEditorCompat_native, source, p); stableSource();
+            var nodes = sceneEditorCompat_native.data.nodes, desc = { verified: true, rigVerified: true, key: sceneEditorCompat_native.data.rootKey, sourceUrl: nodes[0].sourceUrl,
+                rotationOrder: nodes[0].rotationOrder, nodes: nodes.slice(1), inspectionId: "pose-rig-" + (issued.length + 1), evidenceId: p.evidenceId,
+                preserveRootTransformsByDefault: true, definitionFiles: copy(source.definitionFiles) };
+            issued.push({ root: root, "native": sceneEditorCompat_native, source: source, descriptor: copy(desc) }); return desc;
+        }
+        function verifyTarget(root, descriptor) {
+            try {
+                var record = null, i, p = profile();
+                for (i = 0; i < issued.length; i += 1) { if (issued[i].descriptor.inspectionId === descriptor.inspectionId) { record = issued[i]; break; } }
+                if (!record || !same(root, record.root) || JSON.stringify(record.descriptor) !== JSON.stringify(descriptor)) { return false; }
+                stableSource(); var current = snapshot(root, function (n) {
+                    for (var j = 0; j < record["native"].handles.length; j += 1) { if (same(n, record["native"].handles[j])) { return record["native"].keys[j]; } }
+                    fail("RIG_CHANGED", "The selected skeleton contains a new node.");
+                });
+                if (!same(current.rootParent, record["native"].rootParent) || JSON.stringify(current.data) !== JSON.stringify(record["native"].data)) { return false; }
+                compare(current, record.source, p); stableSource(); return true;
+            } catch (e) { return false; }
+        }
+        // Diagnostic query only: no guessed scene-instance URI or material-ready descriptor.
+        function queryMaterialIdentity(root) {
+            need(root && root.inherits("DzFigure") && call(root, "isInScene"), "RIG_TARGET", "An existing figure root is required.");
+            var object = call(root, "getObject"), out = { verified: false, instanceUri: null, reason: "Geometry instance addressing requires a separate native proof.", shapes: [] }, i, j;
+            if (!object) { return out; }
+            var count = number(call(object, "getNumShapes")); need(isFinite(count) && count >= 0 && count <= 9007199254740991 && Math.floor(count) === count, "RIG_LIMIT", "Unexpected shape count.");
+            for (i = 0; i < count; i += 1) {
+                var shape = object.getShape(i), geometry = call(shape, "getGeometry"), materialCount = number(call(shape, "getNumMaterials")), names = [];
+                need(isFinite(materialCount) && materialCount >= 0 && materialCount <= 9007199254740991 && Math.floor(materialCount) === materialCount, "RIG_LIMIT", "Unexpected material count.");
+                for (j = 0; j < materialCount; j += 1) { names.push(String(call(shape.getMaterial(j), "getName"))); }
+                out.shapes.push({ index: i, assetSource: geometry ? uriText(geometry.assetSource) : "", assetUri: geometry ? uriText(geometry.assetUri) : "",
+                    materialNames: names, instanceUri: null });
+            }
+            return out;
+        }
+        return { describeTarget: describeTarget, verifyTarget: verifyTarget, inspectRaw: function (root) { return copy(snapshot(root, null).data); }, queryMaterialIdentity: queryMaterialIdentity };
+    }
+    return { create: create, verifiedProfiles: [] };
+}());

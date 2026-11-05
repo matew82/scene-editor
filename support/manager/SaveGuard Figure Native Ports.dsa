@@ -1,0 +1,17 @@
+// Read-only adapter for already bound imported nodes. Does not enumerate Scene.
+var SaveGuardFigureNativePorts=(function(){
+    function create(env){
+        if(!env||typeof env.pointersAreEqual!=="function")throw Error("Native pointer comparison required.");
+        function method(n,name){if(!n||typeof n[name]!=="function")throw Error("Missing imported-node API: "+name);return n[name]();}
+        return {
+            identityKey:function(n){var id=Number(n.elementID);if(!isFinite(id)||id<0||Math.floor(id)!==id)throw Error("Invalid imported element identity");return id;},
+            same:function(a,b){return env.pointersAreEqual(a,b)===true;},
+            assetId:function(n){return String(n.assetId||"");},
+            nodeType:function(n){if(!n||typeof n.inherits!=="function")throw Error("Imported node type unavailable");if(n.inherits("DzBone"))return "bone";if(n.inherits("DzFigure"))return "figure";if(n.inherits("DzCamera")||n.inherits("DzLight"))return "unsupported";return n.inherits("DzNode")?"node":"unsupported";},
+            parent:function(n){return method(n,"getNodeParent");},
+            skeleton:function(n){return method(n,"getSkeleton");},
+            followTarget:function(n){return method(n,"getFollowTarget");}
+        };
+    }
+    return {create:create,nativeVerified:false};
+}());

@@ -1,0 +1,23 @@
+var SaveGuardLightManager=(function(){
+ function create(env,root){var cacheOptions=null,path='',blocked=false,closed=false,busy=false;
+  function need(v,m){if(!v)throw Error(m);}
+  function host(){need(SaveGuardNativeRuntime.hostSupported(env),'Light host build or required native APIs unavailable.');}
+  function open(p,options){host();need(!closed&&!blocked&&!busy,'Light adapter unavailable');path=p;cacheOptions=options||null;}
+  function apply(id){host();need(path&&!closed&&!blocked&&!busy,'Light adapter unavailable');busy=true;
+   var resolver=null,cache=null,source=null,selected=null,folder=null,started=new Date().getTime(),report={candidate:'manager-0.3.4.33-parented-photometric',build:String(env.App.longVersionString),sourcePath:path,sourceId:id,deepValidation:false,forcedRollback:false};
+   function dependencies(){if(!resolver)resolver=SaveGuardAssetResolver.create(env,{sourceDocumentPath:cacheOptions&&cacheOptions.version&&cacheOptions.version.manifest.source||path,lowMemoryMode:false,deepValidation:false,reader:SaveGuardNativeSource});return resolver;}
+   var dependencyOptions={resolveAssetDocument:function(file){return dependencies().resolveAssetDocument(file);},resolveExternal:function(file,info){return dependencies().resolveExternal(file,info);}};
+   try{var hit=null;if(cacheOptions&&typeof SaveGuardLoadCache!=="undefined")try{cache=SaveGuardLoadCache.create(cacheOptions.version,cacheOptions.request,cacheOptions.mode,cacheOptions.deep,null,dependencyOptions);hit=cache?cache.find():null;}catch(cacheError){if(cacheError.code==="CANCELLED")throw cacheError;cache=null;}if(hit)selected={document:hit.document,metrics:{loadCacheHit:true},provider:{verifySource:hit.verify,close:function(){}}};else{source=SaveGuardNativeSource.open(path,{deepValidation:false,preserveAnimation:true});selected=source.select(id,dependencyOptions.resolveAssetDocument);}need(selected.provider.verifySource()===true,"Selected light source changed");
+    folder=SaveGuardStorage.reserve(root,'run');var ns='SGLightManager_'+String(new env.DzFileInfo(folder).fileName()).replace(/[^A-Za-z0-9_]/g,'_'),route=SaveGuardLightProfiles.prepare(selected.document,id,ns,dependencyOptions),plan=route.plan,serialized=JSON.stringify(plan.document);
+    if(cache&&!hit)try{need(selected.provider.verifySource()===true,"Source changed before light cache publication");cache.publish({document:selected.document,summary:{ready:true},idMap:{},dependencies:[],omittedCollisionTargets:[]},null);}catch(publicationError){if(publicationError.code==="CANCELLED")throw publicationError;}
+    var json=SaveGuardStorage.writeJSONNew(folder,'payload.json',plan.document),payload=folder+'/payload.duf';need(!new env.DzFileInfo(payload).exists()&&new env.DzFile(json).rename(payload),'Cannot publish owned light payload');
+    function verify(){need(selected.provider.verifySource()===true,"Selected light source changed");need(!resolver||resolver.verifyAll()===true,"Light dependencies changed");return JSON.stringify(plan.document)===serialized&&JSON.stringify(SaveGuardStorage.readJSON(payload,Number(new env.DzFileInfo(payload).size())))===serialized;}
+    report.profile=route.profile;report.preparationMilliseconds=new Date().getTime()-started;report.sourceMetrics=selected.metrics;report.payload=payload;report.plannedNodes=plan.specs.length;report.plannedChannels=0;for(var i=0;i<plan.specs.length;i++)report.plannedChannels+=plan.specs[i].channels.length;
+    report.result=route.engine.run(env,plan,payload,false,verify);if(report.result&&report.result.status==='recovery-required')blocked=true;
+   }catch(e){report.error=String(e);}finally{if(resolver)try{resolver.close();}catch(resolverCloseError){report.dependencyCleanupError=String(resolverCloseError);}if(cache)cache.close();if(selected)selected.provider.close();if(source)source.close();report.milliseconds=new Date().getTime()-started;busy=false;try{if(!folder)folder=SaveGuardStorage.reserve(root,'run');SaveGuardStorage.writeJSONNew(folder,'result.json',report);}catch(evidenceError){report.evidenceError=String(evidenceError);}}
+   return report;
+  }
+  return {open:open,apply:apply,isBlocked:function(){return blocked;},close:function(){closed=true;path='';cacheOptions=null;}};
+ }
+ return {create:create};
+}());

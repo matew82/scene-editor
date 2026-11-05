@@ -1,0 +1,118 @@
+var SaveGuardWearablePlan=(function(){
+    function own(o,k){return Object.prototype.hasOwnProperty.call(o,k);}
+    function copy(o){var r={},k;for(k in o)if(own(o,k))r[k]=o[k];return r;}
+    function clone(o){return JSON.parse(JSON.stringify(o));}
+    function fail(s){throw Error("Wearable plan: "+s);}
+    // Compatibility is pinned to the actual saved Fit To figure asset; no cross-generation conversion.
+    function decoded(s){try{return decodeURIComponent(String(s));}catch(e){fail("Invalid asset URI");}}
+    function shellPrepare(doc,id,domain,options){
+        var rows=doc.scene.nodes,root=null,i,j,k,owner=null;
+        function isShell(n){var e=n&&n.extra||[];for(var q=0;q<e.length;q++)if(e[q].type==='studio/node/shell')return true;return false;}
+        for(i=0;i<rows.length;i++)if(rows[i].id===id)root=rows[i];
+        if(!isShell(root))return null;
+        function local(s){var r=domain.parseURI(s||'');return r.kind==='local'&&!r.query&&!r.nodePath?r.fragment:null;}
+        var ownerId=local(root.parent);if(!ownerId||root.conform_target||root.parent_in_place)fail('Standalone shell requires one explicit parent and no Fit To link');
+        for(i=0;i<rows.length;i++)if(rows[i].id===ownerId){if(owner)fail('Ambiguous shell parent');owner=rows[i];}
+        if(!owner||!owner.url||!owner.geometries||owner.geometries.length!==1)fail('Shell parent geometry identity unavailable');
+        var ownerRef=domain.parseURI(owner.url),geoRef=domain.parseURI(owner.geometries[0].url||'');
+        if(!ownerRef.file||!ownerRef.fragment||!geoRef.file||!geoRef.fragment)fail('Standalone shell requires external parent and geometry definitions');
+        var detached=copy(doc);detached.scene=copy(doc.scene);detached.scene.nodes=rows.slice(0);var changed=clone(root),links=0;
+        delete changed.parent;
+        for(i=0;i<(changed.extra||[]).length;i++)for(j=0;j<(changed.extra[i].channels||[]).length;j++){var ch=changed.extra[i].channels[j].channel;if(ch&&ch.id==='Shell Node'){if(ch.type!=='node'||local(ch.node)!==ownerId||own(ch,'keys'))fail('Shell Node binding differs from parent');delete ch.node;links++;}}
+        if(links!==1)fail('Standalone shell needs exactly one saved Shell Node binding');
+        if(!changed.geometries||changed.geometries.length!==1)fail('Standalone shell geometry is ambiguous');
+        var geometry=changed.geometries[0],shellGeometry=false;for(i=0;i<(geometry.extra||[]).length;i++)if(geometry.extra[i].type==='studio/geometry/shell')shellGeometry=true;
+        if(!shellGeometry)fail('Saved shell geometry marker missing');
+        var rootIndex=rows.indexOf(root);detached.scene.nodes[rootIndex]=changed;
+        var plan=domain.plan(detached,[id],{fullData:true,preserveAnimation:true,resolveAssetDocument:options.resolveAssetDocument});if(!plan.ready)fail('Incomplete standalone shell closure: '+plan.errors.join('; '));
+        var allowed={},pending=[id];for(i=0;i<pending.length;i++){if(allowed['$'+pending[i]])fail('Cyclic shell descendants');allowed['$'+pending[i]]=true;for(j=0;j<rows.length;j++)if(local(rows[j].parent)===pending[i])pending.push(rows[j].id);}for(i=0;i<plan.nodeIds.length;i++)if(!allowed['$'+plan.nodeIds[i]])fail('Standalone shell dependency is outside selected descendants: '+plan.nodeIds[i]);
+        return {document:detached,plan:plan,targetContract:{shell:true,assetUri:owner.url,geometryUri:owner.geometries[0].url,groups:root.extra.filter(function(e){return e.type==='studio/node/shell';})[0].polygon_material_groups||[],collisionCount:0},wrapReadRecords:function(read){return function(requests){var result=read(requests),items=result['scene.nodes']||[];for(var q=0;q<items.length;q++)if(items[q].index===rootIndex)items[q]={index:rootIndex,record:changed};return result;};},validateBuilt:function(built){var d=built.document;if(d.scene.animations&&d.scene.animations.length)fail('Animated standalone shell is not supported');if(d.scene.nodes.some(function(n){return n.id===built.mapId(ownerId);}))fail('Shell payload includes its parent');return true;}};
+    }
+
+    function boneParentPrepare(doc,id,domain,options){
+        var rows=doc.scene.nodes,by={},root=null,i,j,seen={},cache={},chain=[],cursor,owner,boneName;
+        function ref(s){return domain.parseURI(s||'');}
+        function local(s){var r=ref(s);return r.kind==='local'&&!r.query&&!r.nodePath?r.fragment:null;}
+        for(i=0;i<rows.length;i++){if(by['$'+rows[i].id])fail('Duplicate source node identity');by['$'+rows[i].id]=rows[i];if(rows[i].id===id)root=rows[i];}
+        if(!root||root.conform_target||!local(root.parent)||root.parent_in_place)return null;
+        function definition(n){var r=ref(n.url);if(r.kind!=='external'||r.nodePath||r.query)fail('Bone-parent branch requires explicit external node definition');var a=cache['$'+r.file];if(!a){a=options.resolveAssetDocument(r.file);if(!a||a.verified!==true||!a.document)fail('Unverified bone-parent asset');cache['$'+r.file]=a;}var hit=null,lib=a.document.node_library||[];for(var q=0;q<lib.length;q++)if(lib[q].id===r.fragment){if(hit)fail('Ambiguous bone-parent definition');hit=lib[q];}if(!hit||hit.source)fail('Unsupported inherited bone-parent definition');return {node:hit,file:decoded(r.file)};}
+        cursor=by['$'+local(root.parent)];if(!cursor)return null;var first=definition(cursor);if(first.node.type!=='bone')return null;
+        var ownDef=definition(root);if(ownDef.node.type!=='figure'&&!(ownDef.node.type==='node'&&root.geometries&&root.geometries.length===1))fail('Bone-parent branch requires a saved figure or single-geometry prop');
+        boneName=first.node.name||first.node.id;if(typeof boneName!=='string'||!boneName)fail('Missing saved parent bone name');
+        while(cursor){if(seen['$'+cursor.id])fail('Cyclic source bone parent');seen['$'+cursor.id]=true;var def=definition(cursor);if(def.node.type==='figure'){owner=cursor;break;}if(def.node.type!=='bone')fail('Bone ancestry contains a non-bone');chain.push({instance:cursor,definition:def});cursor=by['$'+local(cursor.parent)];}
+        if(!owner)fail('Bone owner figure unavailable');var ownerDef=definition(owner),names={};var ownerAsset=cache['$'+ref(owner.url).file];for(i=0;i<ownerAsset.document.node_library.length;i++){var nd=ownerAsset.document.node_library[i];if(nd.type==='bone'){var nm=nd.name||nd.id;if(names['$'+nm])fail('Ambiguous owner bone names');names['$'+nm]=true;}}
+        for(i=0;i<chain.length;i++){var next=i+1<chain.length?chain[i+1]:{instance:owner,definition:ownerDef};if(chain[i].definition.file!==ownerDef.file||local(chain[i].definition.node.parent)!==next.definition.node.id)fail('Saved parent bone ancestry differs from asset');}
+        var detached=copy(doc);detached.scene=copy(doc.scene);detached.scene.nodes=rows.slice(0);var changed=clone(root),index=rows.indexOf(root);delete changed.parent;detached.scene.nodes[index]=changed;
+        var allowed={},pending=[id];for(i=0;i<pending.length;i++){if(allowed['$'+pending[i]])fail('Cyclic wearable descendants');allowed['$'+pending[i]]=true;for(j=0;j<rows.length;j++)if(local(rows[j].parent)===pending[i])pending.push(rows[j].id);}
+        var plan=domain.plan(detached,[id],{fullData:true,preserveAnimation:true,resolveAssetDocument:options.resolveAssetDocument});if(!plan.ready)fail('Incomplete bone-parent wearable closure: '+plan.errors.join('; '));for(i=0;i<plan.nodeIds.length;i++)if(!allowed['$'+plan.nodeIds[i]])fail('Bone-parent payload would import outside selected descendants');
+        return {document:detached,plan:plan,targetContract:{boneParent:true,parentURI:'name://@selection/'+encodeURIComponent(boneName)+':',assetUri:owner.url,collisionCount:0},wrapReadRecords:function(read){return function(requests){var out=read(requests),items=out['scene.nodes']||[];for(var q=0;q<items.length;q++)if(items[q].index===index)items[q]={index:index,record:changed};return out;};},validateBuilt:function(built){if(built.document.scene.animations&&built.document.scene.animations.length)fail('Animated bone-parent wearable is not supported');if(built.document.scene.nodes.some(function(n){return n.id===built.mapId(owner.id);}))fail('Bone-parent payload contains owner');return true;}};
+    }
+
+    function prepare(doc,id,domain,options){
+        var shell=shellPrepare(doc,id,domain,options);if(shell)return shell;var boneParent=boneParentPrepare(doc,id,domain,options);if(boneParent)return boneParent;
+        var rows=doc&&doc.scene&&doc.scene.nodes,root=null,owner=null,by={},i,j,k,rootIndex=-1,changed={},allowed={},queue=[id],children={};
+        if(!rows||!options||typeof options.resolveAssetDocument!=="function")fail("Full saved source and verified resolver required");
+        for(i=0;i<rows.length;i++){if(by["$"+rows[i].id])fail("Duplicate source node identity");by["$"+rows[i].id]=rows[i];if(rows[i].id===id){root=rows[i];rootIndex=i;}var p=rows[i].parent;if(p){var parentRef=domain.parseURI(p);if(parentRef.kind==='local'&&!parentRef.query&&!parentRef.nodePath)p='#'+parentRef.fragment;if(!children[p])children[p]=[];children[p].push(rows[i].id);}}
+        if(!root||!root.url)fail("Saved garment root is missing");
+        if(typeof root.parent!=="string"||root.parent.charAt(0)!=="#"||decoded(root.parent)!==decoded(root.conform_target)||root.parent_in_place)fail("Saved garment must have a direct figure parent matching its Fit To target; detached wardrobe storage needs explicit recovery");
+        owner=by["$"+domain.parseURI(root.parent).fragment];if(!owner||!owner.url)fail("Saved Fit To figure is missing");
+        var localGarment=domain.parseURI(root.url).kind==='local',assetCache={};
+        function asset(file){if(!assetCache['$'+file]){var a=options.resolveAssetDocument(file);if(!a||a.verified!==true||!a.document)fail('Rig definition could not be resolved: '+file);assetCache['$'+file]=a;}return assetCache['$'+file];}
+        // Carry the owning document through local fragments; overlay oldest base first.
+        function definition(reference,depth,seen){
+            var scope=doc,file="",scopeId=['scene'],chain=[],merged={},ref,library,found,identity,di,dk;
+            while(reference){
+                ref=domain.parseURI(reference);if((ref.kind!=="local"&&ref.kind!=="external")||ref.query||ref.nodePath)fail('Unsupported saved rig reference');
+                if(ref.kind==='external'){
+                    var nextFile=ref.file;
+                    if(file&&nextFile.charAt(0)!=='/'){var parts=(file.substring(0,file.lastIndexOf('/')+1)+nextFile).split('/'),out=[];for(var pi=0;pi<parts.length;pi++){if(parts[pi]==='..'){if(!out.length)fail('Rig definition escapes content root');out.pop();}else if(parts[pi]&&parts[pi]!=='.')out.push(parts[pi]);}nextFile=(file.charAt(0)==='/'?'/':'')+out.join('/');}
+                    var loaded=asset(nextFile);scope=loaded.document;file=typeof loaded.uri==='string'&&loaded.uri?loaded.uri:nextFile;scopeId=['asset',typeof loaded.path==='string'&&loaded.path?loaded.path:nextFile];
+                }
+                identity=JSON.stringify([scopeId,ref.fragment]);
+                if(own(seen,identity))fail('Cyclic saved rig definition');seen[identity]=true;
+                library=scope.node_library;found=null;if(!library)fail('Unsupported saved rig reference');
+                for(di=0;di<library.length;di++)if(library[di].id===ref.fragment){if(found)fail('Duplicate rig definition');found=library[di];}
+                if(!found)fail('Missing saved rig definition: '+reference);chain.push(found);reference=found.source;
+            }
+            for(di=chain.length-1;di>=0;di--){found=chain[di];for(dk in found)if(own(found,dk))merged[dk]=found[dk];}
+            return merged;
+        }
+        var targetUri=decoded(owner.url),targetRef=domain.parseURI(owner.url),garmentRef=domain.parseURI(root.url);if(targetRef.kind!=="external"||(!localGarment&&garmentRef.kind!=="external"))fail("Saved target and garment require external figure definitions");
+        var targetAsset=asset(targetRef.file),garmentAsset=localGarment?{verified:true,document:{node_library:[]}}:asset(garmentRef.file);if(!targetAsset||targetAsset.verified!==true||!garmentAsset||garmentAsset.verified!==true)fail("Rig definitions could not be resolved");
+        var targetDefs={},garmentDefs={},targetRoot=null,garmentRoot=null;
+        for(i=0;i<(targetAsset.document.node_library||[]).length;i++){var td=targetAsset.document.node_library[i];targetDefs["$"+td.id]=td;if(td.id===targetRef.fragment)targetRoot=td;}
+        for(i=0;i<(garmentAsset.document.node_library||[]).length;i++){var gd=garmentAsset.document.node_library[i];garmentDefs["$"+gd.id]=gd;if(gd.id===garmentRef.fragment)garmentRoot=gd;}
+        if(localGarment){
+            var localRoot=definition(root.url,0,{});if(localRoot.type!=='figure')fail('Saved local garment is not a figure');garmentRoot=copy(localRoot);garmentRoot.id=id;garmentDefs['$'+id]=garmentRoot;
+            var rigQueue=[id],rigSeen={},bindingURLs={},localRig=[];bindingURLs['$'+decoded(root.url)]=true;
+            for(var qi=0;qi<rigQueue.length;qi++){var rid=rigQueue[qi];if(rigSeen['$'+rid])fail('Saved rig hierarchy cycle');rigSeen['$'+rid]=true;var kids=children['#'+rid]||[];for(var ki=0;ki<kids.length;ki++){var instance=by['$'+kids[ki]],def=definition(instance.url,0,{});if(def.type!=='bone')fail('Local converted garment descendants must be bones');var bone=copy(def);bone.id=instance.id;bone.name=instance.name||def.name;bone.parent=instance.parent;garmentDefs['$'+bone.id]=bone;bindingURLs['$'+decoded(instance.url)]=true;localRig.push(bone);rigQueue.push(instance.id);}}
+            var skins=0,modLibrary=doc.modifier_library||[];
+            for(var sm=0;sm<modLibrary.length;sm++){var skin=modLibrary[sm].skin;if(!skin||decoded(skin.node)!==decoded(root.url))continue;skins++;if(!skin.geometry||!skin.joints)fail('Invalid saved skin binding');var sg=domain.parseURI(skin.geometry),geometryDef=null;for(var sgi=0;sgi<(doc.geometry_library||[]).length;sgi++)if(doc.geometry_library[sgi].id===sg.fragment){if(geometryDef)fail('Duplicate saved skin geometry');geometryDef=doc.geometry_library[sgi];}if(sg.kind!=='local'||!geometryDef||!geometryDef.vertices||skin.vertex_count!==geometryDef.vertices.count)fail('Saved skin geometry count differs');var selectedGeometry=root.geometries||[];if(selectedGeometry.length!==1||decoded(selectedGeometry[0].url)!==decoded(skin.geometry))fail('Skin is not bound to selected garment geometry');var jointSeen={};for(var ji=0;ji<skin.joints.length;ji++){var joint=skin.joints[ji],ju=decoded(joint.node);if(!bindingURLs['$'+ju]||jointSeen['$'+ju])fail('Missing or duplicate saved skin joint: '+joint.node);jointSeen['$'+ju]=true;}}
+            if(skins!==1)fail('Local converted garment requires one explicit saved skin binding');
+        }
+        if(!targetRoot||targetRoot.type!=="figure"||!garmentRoot||garmentRoot.type!=="figure")fail("Saved assets do not define two figures");
+        var targetBones={};for(k in targetDefs)if(own(targetDefs,k)&&targetDefs[k].type==="bone"){var nameKey="$"+targetDefs[k].name;if(targetBones[nameKey])fail("Ambiguous saved target bone name");targetBones[nameKey]=targetDefs[k];}
+        // A wearable may omit intermediate target bones. Compare the nearest shared ancestor,
+        // without rewriting either rig or interpreting ERC.
+        var garmentNames={};for(k in garmentDefs)if(own(garmentDefs,k)&&garmentDefs[k].type==='bone'){var gn='$'+garmentDefs[k].name;if(garmentNames[gn])fail('Ambiguous garment bone name');garmentNames[gn]=true;}
+        var boneCount=0;for(k in garmentDefs)if(own(garmentDefs,k)&&garmentDefs[k].type==='bone'){
+            var gb=garmentDefs[k],tb=targetBones['$'+gb.name];if(!tb)fail('Garment bone is absent from saved target rig: '+gb.name);
+            var gp=domain.parseURI(gb.parent||'').fragment,tp=domain.parseURI(tb.parent||'').fragment,gparent=garmentDefs['$'+gp],tparent=targetDefs['$'+tp],visited={};
+            while(tparent&&tparent.type==='bone'&&!garmentNames['$'+tparent.name]){if(visited['$'+tparent.id])fail('Cyclic saved target bone hierarchy');visited['$'+tparent.id]=true;tp=domain.parseURI(tparent.parent||'').fragment;tparent=targetDefs['$'+tp];}
+            if(!gparent||!tparent||gparent.type!==tparent.type||gparent.type==='bone'&&gparent.name!==tparent.name)fail('Garment bone hierarchy differs from saved target: '+gb.name);boneCount++;
+        }if(!boneCount)fail('Garment has no compatible skeleton bones');
+        var detached=copy(doc);detached.scene=copy(doc.scene);detached.scene.nodes=rows.slice(0);root=clone(root);delete root.parent;delete root.conform_target;detached.scene.nodes[rootIndex]=root;changed["scene.nodes:"+rootIndex]=root;
+        var mods=doc.scene.modifiers||[],remaps=0;detached.scene.modifiers=mods.slice(0);
+        for(i=0;i<mods.length;i++)if(decoded(mods[i].parent||"")==="#"+id){var smoothing=false;for(j=0;j<(mods[i].extra||[]).length;j++)if(mods[i].extra[j].type==="studio/modifier/smoothing")smoothing=true;if(!smoothing)continue;var m=clone(mods[i]),edited=false;for(j=0;j<(m.extra||[]).length;j++)for(k=0;k<(m.extra[j].channels||[]).length;k++){var channel=m.extra[j].channels[k].channel;if(channel&&channel.id==="Collision Item"){if(channel.type!=="node"||decoded(channel.node||"")!=="#"+owner.id||own(channel,"keys"))fail("Smoothing collision link is outside accepted static scope");delete channel.node;remaps++;edited=true;}}if(edited){detached.scene.modifiers[i]=m;changed["scene.modifiers:"+i]=m;}}
+        // Zero or multiple collision links are allowed only when each saved link targets this exact figure.
+        for(i=0;i<queue.length;i++){var next=queue[i];if(allowed["$"+next])fail("Cyclic or duplicated wearable descendants");allowed["$"+next]=true;var kids=children["#"+next]||[];for(j=0;j<kids.length;j++)queue.push(kids[j]);}
+        var plan=domain.plan(detached,[id],{fullData:true,preserveAnimation:true,resolveAssetDocument:options.resolveAssetDocument});if(!plan.ready)fail("Incomplete wearable dependency closure");
+        if(!plan.nodeIds.length)fail("Garment closure is empty");
+        for(i=0;i<plan.nodeIds.length;i++)if(!allowed["$"+plan.nodeIds[i]])fail("Required dependency would import the saved figure or another object");
+        function reader(readRecords){return function(requests){var batch=readRecords(requests),out={},group,index;for(group in batch)if(own(batch,group)){out[group]=[];for(index=0;index<batch[group].length;index++){var item=batch[group][index],replacement=changed[group+":"+item.index];if(replacement&&String(item.record.id)!==String(replacement.id))fail("Source record identity changed");out[group].push({index:item.index,record:replacement||item.record});}}return out;};}
+        var geometryVertexCount=0,geometryRefs=root.geometries||[],builtRootURL=root.url;if(localGarment&&geometryRefs.length===1){var gr=domain.parseURI(geometryRefs[0].url);for(var gli=0;gli<(doc.geometry_library||[]).length;gli++)if(doc.geometry_library[gli].id===gr.fragment)geometryVertexCount=Number(doc.geometry_library[gli].vertices&&doc.geometry_library[gli].vertices.count);}if(geometryRefs.length===1){var geometryRef=domain.parseURI(geometryRefs[0].url||"");if(geometryRef.file===garmentRef.file)for(var gdi=0;gdi<(garmentAsset.document.geometry_library||[]).length;gdi++){var geometryDef=garmentAsset.document.geometry_library[gdi];if(geometryDef.id===geometryRef.fragment)geometryVertexCount=Number(geometryDef.vertices&&geometryDef.vertices.count);}}
+        return {document:detached,plan:plan,definitionId:garmentRef.fragment,localRig:localGarment,sourceDefinitionId:garmentRef.fragment,sourceTargetId:owner.id,targetContract:{assetUri:targetUri,assetId:targetRef.fragment,collisionCount:remaps,bones:boneCount},wrapReadRecords:reader,validateBuilt:function(built){if(localGarment&&typeof built.mapId==='function')builtRootURL='#'+built.mapId(garmentRef.fragment);var doc=built.document||built;if(doc.scene.animations&&doc.scene.animations.length)fail("Animated wearable fitting is not accepted");var nodes=doc.scene.nodes||[],mods=doc.scene.modifiers||[],allowedExtras={"geometry_selection_sets":true,"studio/node/shell":true,"studio/geometry/shell":true,"studio/modifier/push":true,"studio_geometry_channels":true,"studio_material_channels":true,"studio/material/uber_iray":true,"studio/simulation_settings/dynamic_simulation":true,skin_settings:true,studio_node_channels:true,"studio/element_data/simple_data":true,"studio/modifier/smoothing":true,studio_modifier_channels:true,"studio/modifier/dynamic_simulation":true};var cacheRootId=null;for(var cni=0;cni<nodes.length;cni++)if(nodes[cni].url&&decoded(nodes[cni].url)===decoded(builtRootURL)){if(cacheRootId)fail("Ambiguous garment cache root");cacheRootId=nodes[cni].id;}function extras(row){for(var ei=0;ei<(row.extra||[]).length;ei++){var e=row.extra[ei];if(!allowedExtras[e.type])fail("Unsupported garment extension: "+e.type);if(e.type==="studio/modifier/dynamic_simulation"&&own(e,"simulation_data")){var samples=e.simulation_data;if(Object.prototype.toString.call(samples)!=="[object Array]")fail("Invalid saved simulation sample list");if(samples.length){if(!cacheRootId||row.parent!=="#"+cacheRootId)fail("Saved simulation must belong to the selected garment root");if(!isFinite(geometryVertexCount)||geometryVertexCount<1||e.vertex_count!==geometryVertexCount)fail("Saved simulation vertex count differs from garment asset");var lastTime=-Infinity;for(var si=0;si<samples.length;si++){var sample=samples[si];if(!sample||typeof sample.time!=="number"||!isFinite(sample.time)||sample.time<=lastTime||sample.count!==geometryVertexCount||Object.prototype.toString.call(sample.values)!=="[object Array]"||sample.values.length!==geometryVertexCount)fail("Invalid saved simulation sample metadata");lastTime=sample.time;}}}}}for(var ni=0;ni<nodes.length;ni++){if(nodes[ni].parent_in_place)fail("Parent-in-place garment descendants are unsupported");extras(nodes[ni]);for(var gi=0;gi<(nodes[ni].geometries||[]).length;gi++)extras(nodes[ni].geometries[gi]);}for(var mi=0;mi<mods.length;mi++)extras(mods[mi]);var groups=[doc.node_library||[],doc.modifier_library||[],doc.geometry_library||[],doc.material_library||[],doc.scene.materials||[]];for(var li=0;li<groups.length;li++)for(var ri=0;ri<groups[li].length;ri++){if(li>=3){if(!SaveGuardFigureLoad.materialRecord(groups[li][ri]))fail('Invalid garment material record');}else extras(groups[li][ri]);}return true;}};
+    }
+    return {prepare:prepare};
+}());
+

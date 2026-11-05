@@ -1,0 +1,511 @@
+var SaveGuardApplyHost = (function () {
+    // One native global undo stack is shared by every facade in this script context.
+    // An ambiguous native transition deliberately retains its owner until this
+    // script context ends; there is no guessed unlock, retry, or reset operation.
+    var transactionOwner = null;
+    function own(o, k) { return !!o && Object.prototype.hasOwnProperty.call(o, k); }
+    function fail(code, message) { var e = new Error(message); e.code = code; throw e; }
+    function array(a) { return Object.prototype.toString.call(a) === "[object Array]"; }
+    function copy(v) { return JSON.parse(JSON.stringify(v)); }
+    function equal(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+    function requireTrue(v, code, message) { if (v !== true) { fail(code, message); } }
+    function callable(o, k) { return !!o && typeof o[k] === "function"; }
+    function cancel(f) { if (f && f() === true) { fail("CANCELLED", "Cancelled before scene mutation."); } }
+    function path(p) {
+        p = String(p || "").replace(/\\/g, "/");
+        if (!/^(?:[A-Za-z]:\/|\/)/.test(p) || /[\u0000-\u001f]/.test(p) || /(?:^|\/)\.\.?(?:\/|$)/.test(p)) { fail("PATH", "Expected an absolute normalized owned path."); }
+        return p.replace(/\/$/, "");
+    }
+    function pathKey(p) { p = path(p); return /^(?:[A-Za-z]:\/|\/\/)/.test(p) ? p.toLowerCase() : p; }
+    function inside(child, parent) { return pathKey(child).indexOf(pathKey(parent) + "/") === 0; }
+    function isApply(kind) { return kind === "pose" || kind === "materials"; }
+    function knownKind(kind) { return /^(merge|pose|materials|render)$/.test(kind); }
+    function goodPlan(p) { return !!p && p.ready === true && (!p.errors || p.errors.length === 0); }
+    function validateDocument(kind, doc) {
+        var allowed = { merge: "scene_subset", materials: "preset_material", render: "preset_render_settings" };
+        if (!doc || !doc.scene || !doc.asset_info || doc.asset_info.type !== allowed[kind]) { fail("DOCUMENT_TYPE", "Unexpected staged DUF type for " + kind + "."); }
+        if (kind === "materials" && doc.scene.nodes && doc.scene.nodes.length) { fail("MATERIAL_NODES", "A material operation cannot create scene nodes."); }
+        if (kind !== "render" && own(doc.scene, "current_camera")) { fail("CAMERA_SCOPE", "Only an explicit render operation may contain a current camera."); }
+    }
+
+    // The stager only writes inside one caller-selected, approved owned temporary root.
+    // assertOwnedDirectory must resolve symlinks/junctions against that root before writes.
+    function createStager(storage, env, approvedRoot, assertOwnedDirectory) {
+        var root = path(approvedRoot), issued = [];
+        var compact = callable(storage,"compactJSON") && callable(storage,"writeTextNew") && callable(storage,"readText");
+        if (!callable(storage, "reserve") || !callable(storage, "writeJSONNew") || !callable(storage, "readJSON") || !callable(storage,"readText") || !callable(storage,"ascii") || typeof assertOwnedDirectory !== "function") { fail("STAGER_PORT", "Complete create-only staging and canonical ownership ports are required."); }
+        function cleanup(entry) {
+            if(entry.released){if(entry.cleanupError)fail("STAGE_CLEANUP",entry.cleanupError);return true;}
+            entry.released=true;var errors=[];
+            function attempt(fn){try{fn();}catch(e){errors.push(String(e.message||e));}}
+            function owned(){requireTrue(assertOwnedDirectory(entry.folder,root),"TEMP_OWNERSHIP","Staged directory ownership changed.");}
+            function remove(name,attempted,partial){if(!attempted)return;attempt(function(){owned();var file=entry.folder+"/"+name,info=new env.DzFileInfo(file);if(!info.exists())return;requireTrue(info.isFile()&&!info.isSymLink()&&pathKey(info.canonicalFilePath())===pathKey(file),"TEMP_OWNERSHIP","Staged file ownership changed: "+file);var size=Number(info.size());requireTrue(typeof entry.text==="string"&&isFinite(size)&&size>=0&&size<=entry.text.length,"TEMP_OWNERSHIP","Staged file size changed: "+file);var contents=size===0?"":storage.readText(file,size);requireTrue(contents.length===size&&(partial?entry.text.substring(0,size)===contents:entry.text===contents),"TEMP_OWNERSHIP","Staged file contents changed: "+file);if(entry.stamps&&own(entry.stamps,name))requireTrue(String(info.lastModified())===entry.stamps[name],"TEMP_OWNERSHIP","Staged file identity metadata changed: "+file);requireTrue(new env.DzDir(entry.folder).remove(name),"STAGE_CLEANUP","Cannot remove owned file: "+file);});}
+            remove("payload.duf",entry.dufAttempted,!entry.dufComplete);remove("payload.json",entry.jsonAttempted,false);remove("payload.json.partial",entry.jsonAttempted,true);
+            attempt(function(){owned();requireTrue(new env.DzDir(root).rmdir(entry.folder.substring(root.length+1)),"STAGE_CLEANUP","Cannot remove owned empty directory: "+entry.folder);});
+            entry.expected=null;entry.text=null;if(errors.length){entry.cleanupError=errors.join("; ");fail("STAGE_CLEANUP",entry.cleanupError);}return true;
+        }
+        function stage(document, sourcePath) {
+            requireTrue(assertOwnedDirectory(root, root), "TEMP_OWNERSHIP", "Temporary root ownership could not be verified.");
+            var folder = path(storage.reserve(root, "apply"));
+            if (!inside(folder, root)) { fail("TEMP_ESCAPE", "Reserved directory escaped the approved temporary root."); }
+            requireTrue(assertOwnedDirectory(folder, root), "TEMP_OWNERSHIP", "Reserved directory ownership could not be verified.");
+            var entry={folder:folder,jsonAttempted:false,dufAttempted:false,released:false},target=folder+"/payload.duf",token={path:target,folder:folder};entry.token=token;issued.push(entry);
+            try {
+                var source=path(sourcePath);if(pathKey(target)===pathKey(source))fail("SOURCE_OVERWRITE","Staging cannot address the source backup.");
+                entry.expected=compact?null:copy(document);entry.text=compact?storage.compactJSON(document):storage.ascii(document);
+                if(new env.DzFileInfo(folder+"/payload.json").exists()||new env.DzFileInfo(folder+"/payload.json.partial").exists()||new env.DzFileInfo(target).exists())fail("STAGE_EXISTS","Staging destination already exists.");
+                entry.jsonAttempted=true;var json=path(compact?storage.writeTextNew(folder,"payload.json",entry.text):storage.writeJSONNew(folder,"payload.json",entry.expected));
+                if(json!==folder+"/payload.json")fail("TEMP_ESCAPE","Metadata writer returned an unexpected file.");
+                if(new env.DzFileInfo(target).exists())fail("STAGE_EXISTS","Staged DUF already exists.");
+                entry.dufAttempted=true;if(!new env.DzFile(json).copy(target))fail("STAGE_COPY","Cannot publish the create-only staged DUF.");
+                entry.dufComplete=true;verify(token);entry.stamps={"payload.json":String(new env.DzFileInfo(folder+"/payload.json").lastModified()),"payload.duf":String(new env.DzFileInfo(target).lastModified())};return token;
+            } catch(e){try{cleanup(entry);}catch(cleanupError){e.cleanupError=String(cleanupError.message||cleanupError);}throw e;}
+        }
+        function lookup(token){for(var i=0;i<issued.length;i++)if(issued[i].token===token)return issued[i];return null;}
+        function verify(token) {
+            var entry=lookup(token);if(!entry||entry.released||token.path!==entry.folder+"/payload.duf"||token.folder!==entry.folder)fail("STAGE_TOKEN","Unknown or changed staging token.");
+            requireTrue(assertOwnedDirectory(entry.folder, root), "TEMP_OWNERSHIP", "Staged directory ownership changed.");
+            var bytes = Number(new env.DzFileInfo(token.path).size());
+            if (!isFinite(bytes) || bytes < 1) { fail("STAGE_READ", "Staged DUF is missing or empty."); }
+            if (compact ? bytes!==entry.text.length || storage.readText(token.path,bytes)!==entry.text : !equal(storage.readJSON(token.path, bytes), entry.expected)) { fail("STAGE_CHANGED", "Staged DUF differs from the reviewed document."); }
+            return true;
+        }
+        function release(token){var entry=lookup(token);if(!entry)return false;return cleanup(entry);}
+        return {stage:stage,verify:verify,release:release};
+    }
+
+    // Trusted integration ports supply scene capture/verification; missing ports fail closed.
+    function create(ports) {
+        var host = ports.host, stager = ports.stager, prepared = [], busy = false, nativeMergeOutput = ports.nativeMergeOutput === true;
+        function capability(kind) {
+            if (!knownKind(kind) || !callable(host, "capability")) { return { enabled: false, reason: "Unknown or unavailable native operation." }; }
+            return host.capability(kind);
+        }
+        function requireCapability(kind) {
+            var c = capability(kind);
+            if (!c || c.enabled !== true || (c.nativeVerified !== true && c.portabilityMode !== 'api-checked') || !c.buildId || !c.evidenceId) { fail("NATIVE_UNVERIFIED", c && c.reason || "Native operation has no matching isolated validation."); }
+        }
+        var timingCount=0;
+        function timed(name,fn){var started=new Date().getTime();try{return fn();}finally{if(timingCount++<80&&typeof print==="function"){try{print("SaveGuard internal phase: "+JSON.stringify({owner:"apply-host",phase:name,milliseconds:new Date().getTime()-started}));}catch(ignoredTiming){}}}}
+        function sourceCheck(r) {
+            if (!r.source || !r.source.path || typeof r.source.verify !== "function") { fail("SOURCE_INTEGRITY", "A reader-owned source integrity verifier is required."); }
+            requireTrue(r.source.verify(), "SOURCE_CHANGED", "The saved source changed after reading.");
+        }
+        function prepare(request, isCancelled) {
+            if (busy) { fail("BUSY", "An apply operation is already active."); }
+            cancel(isCancelled);
+            if (!request || !knownKind(request.kind)) { fail("KIND", "Unknown operation."); }
+            requireCapability(request.kind);
+            timingCount=0;timed("prepare.source",function(){return sourceCheck(request);});
+            var plan = request.kind === "pose" ? request.plan : request.built && request.built.summary;
+            if (!goodPlan(plan)) { fail("PLAN", "The dependency/compatibility plan is not ready."); }
+            if (isApply(request.kind) && !request.targetTicket) { fail("TARGET", "An explicitly selected compatible figure is required."); }
+            // Clone mutable caller data; receipt fields are informational, never executable input.
+            var entry = { kind: request.kind, source: { path: path(request.source.path), verify: request.source.verify }, plan: copy(plan), targetTicket: request.targetTicket || null,
+                built: request.kind === "pose" ? null : { document: copy(request.built.document), dependencies: copy(request.built.dependencies || []), idMap: copy(request.built.idMap || {}), placement: copy(request.built.placement || null) },
+                used: false, staged: null, receipt: null };
+            var completed = false;
+            try {
+                if (entry.kind !== "pose") {
+                    validateDocument(entry.kind, entry.built.document);
+                    timed("prepare.preflight",function(){requireTrue(host.preflight(entry), "PREFLIGHT", "Native preflight failed.");});
+                    cancel(isCancelled);
+                    entry.staged = timed("prepare.stage",function(){return stager.stage(entry.built.document, entry.source.path);});
+                } else { requireTrue(host.preflight(entry), "PREFLIGHT", "Pose target preflight failed."); }
+                timed("prepare.source-after-stage",function(){return sourceCheck(entry);}); cancel(isCancelled);
+                entry.receipt = { kind: entry.kind, stagedPath: entry.staged ? entry.staged.path : null,
+                    summary: copy(entry.plan), capability: capability(entry.kind), cancellableUntil: "before-mutation" };
+                prepared.push(entry); completed = true; return entry.receipt;
+            } catch(e) {
+                if(entry.staged&&callable(stager,"release")){try{requireTrue(stager.release(entry.staged),"STAGE_CLEANUP","Owned staging cleanup returned false.");}catch(cleanupError){e.cleanupError=String(cleanupError.message||cleanupError);}}
+                entry.source=null;entry.plan=null;entry.built=null;entry.staged=null;entry.targetTicket=null;throw e;
+            }
+        }
+        function lookup(receipt) { for (var i = 0; i < prepared.length; i += 1) { if (prepared[i].receipt === receipt) { return prepared[i]; } } fail("RECEIPT", "Only this adapter's prepared receipt can be applied."); }
+        function release(receipt) {
+            if (busy) { fail("BUSY", "An active operation cannot be released."); }
+            for (var i = 0; i < prepared.length; i += 1) {
+                if (prepared[i].receipt !== receipt) { continue; }
+                var r = prepared[i]; prepared.splice(i, 1); r.used = true;
+                try { if(r.staged&&callable(stager,"release"))requireTrue(stager.release(r.staged),"STAGE_CLEANUP","Owned staging cleanup returned false."); } finally { r.source=null;r.plan=null;r.built=null;r.staged=null;r.targetTicket=null; } return true;
+            }
+            return false;
+        }
+        // Opt-in only from the LightAssembly action. Other facade contracts are unchanged.
+        function applyNativeMerge(receipt, isCancelled) {
+            var r, selection=null, held=false, began=false, completed=false, result={ok:false,status:'blocked',mutationStarted:false,outputAudited:false,restorationClaimed:false};
+            function failure(e,field){var text=String(e.message||e);if(field)result[field]=text;if(!result.error){result.error=text;result.code=e.code||'HOST_ERROR';}if(e.code==='CANCELLED')result.cancelled=true;}
+            try{
+                if(busy)fail('BUSY','An apply operation is already active.');r=lookup(receipt);if(r.used)fail('USED','This prepared operation was already used.');if(r.kind!=='merge')fail('KIND','Native-output path requires merge.');requireCapability(r.kind);cancel(isCancelled);busy=true;sourceCheck(r);requireTrue(stager.verify(r.staged),'STAGE_CHANGED','Staged DUF verification failed.');requireTrue(host.preflight(r),'PREFLIGHT','Prepared source context changed.');cancel(isCancelled);requireTrue(host.preflight(r),'PREFLIGHT','Context changed at final cancel gate.');selection=host.captureSelection();r.used=true;host.beginUndo(r.kind);held=true;began=true;result.mutationStarted=true;host.clearSelection();result.nativeExecuted=true;var code=host.mergeFile(r.staged.path);result.nativeCode=code;result.nativeExecuted=true;if(typeof code!=='number'||code!==0)fail('LOAD_FAILED','Native MergeFile returned a non-success error code: '+String(code));completed=true;
+            }catch(e){failure(e);if(e.undoAcquisition){result.undoAcquisition=copy(e.undoAcquisition);if(e.undoAcquisition.acquisitionUncertain||e.undoAcquisition.cleanupAttempted&&!e.undoAcquisition.cleanupSucceeded)result.recoveryRequired=true;}}
+            finally{
+                if(selection&&began)try{requireTrue(host.ownsUndo(),'UNDO_OWNERSHIP','Owned Undo unavailable; no selection mutation');requireTrue(host.restoreSelection(selection),'SELECTION_RESTORE','Prior selection could not be restored.');result.selectionRestored=true;}catch(selectionError){failure(selectionError,'selectionError');}
+                if(held)try{requireTrue(host.ownsUndo(),'UNDO_OWNERSHIP','Owned Undo unavailable; no blind accept/cancel');held=false;result.undoAcceptAttempted=true;host.acceptUndo(result.error?'SaveGuard merge - failed attempt':'SaveGuard merge');result.undoAccepted=true;}catch(undoError){result.recoveryRequired=true;failure(undoError,'undoError');}
+                if(result.recoveryRequired&&callable(host,'blockRecovery'))host.blockRecovery();if(r&&busy)busy=false;
+            }
+            result.ok=completed&&!result.error&&result.undoAccepted===true;result.status=result.ok?'applied':result.recoveryRequired?'recovery-required':result.cancelled&&!began?'cancelled':began?'failed-attempt':'blocked';result.message=result.ok?'Native light assembly import completed.':result.error;return result;
+        }
+        function apply(receipt, isCancelled) {
+            if(nativeMergeOutput)return applyNativeMerge(receipt,isCancelled);
+            var r, selection = null, snapshot = null, hold = false, began = false, committed = false, cancelCompleted = false, result = { ok: false, status: "blocked", mutationStarted: false,
+                rollback: { attempted: false, verified: false }, selectionRestored: true, sceneObservations: [] };
+            var baselineStatus = null;
+            function observe(phase) {
+                if (!callable(host, "observeSceneStatus")) { return null; }
+                var state = host.observeSceneStatus();
+                result.sceneObservations.push({ phase: phase, state: copy(state) });
+                return state;
+            }
+            function compareRollbackStatus(state) {
+                if (baselineStatus === null) { return true; }
+                var flags = SaveGuardRollbackFlags.compare(baselineStatus, state, [{ name: "needsSave" }, { name: "assetNeedSave", optional: true }]);
+                var matches = flags.ok && !!state && baselineStatus.timeTicks === state.timeTicks;
+                result.rollback.sceneStatus = { before: copy(baselineStatus), after: copy(state), verified: matches, flags: flags };
+                return matches;
+            }
+            try {
+                if (busy) { fail("BUSY", "An apply operation is already active."); }
+                r = lookup(receipt); if (r.used) { fail("USED", "This prepared operation was already used."); }
+                requireCapability(r.kind); cancel(isCancelled); busy = true;
+                timingCount=0;timed("apply.source",function(){return sourceCheck(r);});
+                if (r.staged) { timed("apply.stage-verify",function(){requireTrue(stager.verify(r.staged), "STAGE_CHANGED", "Staged DUF verification failed.");}); }
+                timed("apply.preflight",function(){requireTrue(host.preflight(r), "PREFLIGHT", "The target or dependencies changed after preparation.");});
+                // Final cancel gate. No UI pump or cancellation callback occurs after this point.
+                cancel(isCancelled);
+                // Cancellation/UI observers may have changed selection; revalidate then capture.
+                timed("apply.final-preflight",function(){requireTrue(host.preflight(r), "PREFLIGHT", "The target changed at the final cancellation gate.");});
+                selection = host.captureSelection(); snapshot = timed("apply.snapshot",function(){return host.snapshot(r);}); baselineStatus = observe("beforeUndo"); r.used = true;
+                host.beginUndo(r.kind); hold = true; began = true; result.mutationStarted = true;
+                if (r.kind === "pose") { host.applyPose(r); }
+                else {
+                    if (r.kind === "materials") { host.selectTarget(r.targetTicket); }
+                    else { host.clearSelection(); }
+                    var code = timed("apply.merge",function(){return host.mergeFile(r.staged.path);});
+                    if (typeof code !== "number" || code !== 0) { fail("LOAD_FAILED", "Native MergeFile returned a non-success error code: " + String(code)); }
+                }
+                observe("afterMutation");
+                timed("apply.outcome",function(){requireTrue(host.verifyOutcome(snapshot, r), "OUTCOME", "The native result did not match the prepared operation.");});
+                requireTrue(host.restoreSelection(selection), "SELECTION_RESTORE", "Prior selection could not be restored.");
+                timed("apply.accept",function(){return host.acceptUndo("SaveGuard " + r.kind);}); hold = false; committed = true;
+                selection = null;
+                result.ok = true; result.status = "applied";
+            } catch (e) {
+                result.code = e.code || "HOST_ERROR"; result.error = String(e.message || e);
+                result.status = result.code === "CANCELLED" && !began ? "cancelled" : (began ? "failed" : "blocked");
+                if (hold) {
+                    result.rollback.attempted = true;
+                    try { observe("beforeCancel"); } catch (observationError) { result.rollback.observationError = String(observationError.message || observationError); }
+                    try {
+                        host.cancelUndo(); hold = false; cancelCompleted = true;
+                        var statusMatches = compareRollbackStatus(observe("afterCancel"));
+                        var contentMatches = host.verifyRollback(snapshot, r) === true;
+                        result.rollback.verified = statusMatches && contentMatches;
+                    }
+                    catch (rollbackError) { result.rollback.error = String(rollbackError.message || rollbackError); }
+                    if (!result.rollback.verified) { result.status = "recovery-required"; }
+                }
+                if (!began && e.undoAcquisition) {
+                    result.undoAcquisition = copy(e.undoAcquisition);
+                    result.rollback.attempted = e.undoAcquisition.cleanupAttempted === true;
+                    if (e.undoAcquisition.cleanupSucceeded === true) {
+                        try {
+                            var acquisitionStatusMatches = compareRollbackStatus(observe("afterAcquisitionCancel"));
+                            var acquisitionContentMatches = host.verifyRollback(snapshot, r) === true;
+                            result.rollback.verified = acquisitionStatusMatches && acquisitionContentMatches;
+                            result.selectionRestored = callable(host, "verifySelection") && host.verifySelection(selection) === true;
+                        } catch (acquisitionError) { result.rollback.error = String(acquisitionError.message || acquisitionError); }
+                    } else {
+                        // No selection write occurred, but an ambiguous native begin
+                        // cannot be reported as restored without observing it.
+                        try { result.selectionRestored = callable(host, "verifySelection") && host.verifySelection(selection) === true; }
+                        catch (selectionCheckError) { result.selectionRestored = false; }
+                    }
+                    if (!result.rollback.verified || !result.selectionRestored) { result.status = "recovery-required"; }
+                }
+                if (began && !hold && !committed && !result.rollback.attempted) { result.status = "recovery-required"; }
+            } finally {
+                if (selection && began) {
+                    try {
+                        // A confirmed closed hold is distinct from an ambiguous
+                        // native completion. Restore the requested original selection
+                        // after confirmed cancel even when content/dirty audit fails;
+                        // that audit failure remains recovery-required and blocking.
+                        if (cancelCompleted && callable(host, "restoreSelectionAfterRollback")) { result.selectionRestored = host.restoreSelectionAfterRollback(selection) === true; }
+                        else { result.selectionRestored = result.status === "recovery-required" && callable(host, "verifySelection") ? host.verifySelection(selection) === true : host.restoreSelection(selection) === true; }
+                    }
+                    catch (selectionError) { result.selectionRestored = false; result.selectionError = String(selectionError.message || selectionError); }
+                    if (!result.selectionRestored && began) { result.status = "recovery-required"; result.ok = false; }
+                }
+                if (cancelCompleted) {
+                    try {
+                        var finalStatusMatches = compareRollbackStatus(observe("afterSelectionRecovery"));
+                        var finalContentMatches = result.selectionRestored && host.verifyRollback(snapshot, r) === true;
+                        result.rollback.afterSelectionContentVerified = finalContentMatches;
+                        if (!finalStatusMatches || !finalContentMatches) { result.rollback.verified = false; result.status = "recovery-required"; result.ok = false; }
+                        if (result.rollback.verified && result.selectionRestored && result.rollback.sceneStatus && result.rollback.sceneStatus.flags.raised.length) {
+                            result.rollback.notice = "Scene content and selection were recovered; DAZ still marks the scene modified. No dirty flag was cleared.";
+                        }
+                    } catch (finalObservationError) {
+                        result.rollback.finalAuditError = String(finalObservationError.message || finalObservationError);
+                        result.rollback.verified = false; result.status = "recovery-required"; result.ok = false;
+                    }
+                }
+                if (result.status === "recovery-required" && callable(host, "blockRecovery")) { host.blockRecovery(); }
+                if (snapshot !== null && callable(host, "releaseSnapshot")) {
+                    try { host.releaseSnapshot(snapshot); }
+                    catch (releaseError) { result.auditReleaseError = String(releaseError.message || releaseError); }
+                }
+                if (r && busy) { busy = false; }
+            }
+            return result;
+        }
+        return { capabilities: function () { return { merge: capability("merge"), pose: capability("pose"), materials: capability("materials"), render: capability("render") }; }, prepare: prepare, apply: apply, release: release };
+    }
+
+    // Native facade. Profiles must be reviewed code constants, never source DUF/user settings.
+    // Empty profiles intentionally disable production mutation on DAZ4 and DAZ6 alike.
+    function createNative(env, extensions, verifiedProfiles) {
+        var scene = env.Scene, io = env.App.getAssetIOMgr(), undo = env.UndoStack, ex = extensions || {}, profiles = copy(verifiedProfiles || []), tickets = [], activePose = null, activeKind = null;
+        var transactionToken = {}, transitionUnknown = false;
+        var build = String(env.buildId || "");
+        function capability(kind) {
+            var required = ["undo", "undoLifecycle", "selection", "outcome", "recovery"], p = null, i;
+            if (kind !== "pose") { required.push("mergeFile"); }
+            if (isApply(kind)) { required.push("targetIdentity"); }
+            if (kind === "pose") { required.push("poseUnits"); required.push("poseControllers"); required.push("poseUndoItems"); }
+            if (kind === "materials") {
+                required.push("materialGroups");
+                if (ex.materialAddressing === "verified-selection") { required.push("selectionPresetTargeting"); required.push("singleGeometry"); required.push("unsharedMaterials"); required.push("unsharedShape"); }
+                else { required.push("geometryInstanceUri"); }
+            }
+            if (kind === "render") { required.push("renderScope"); }
+            for (i = 0; i < profiles.length; i += 1) {
+                if (profiles[i].buildId === build && profiles[i].kind === kind) {
+                    if (p) { return { enabled: false, nativeVerified: false, buildId: build, reason: "Ambiguous exact-build native profile." }; }
+                    p = profiles[i];
+                }
+            }
+            var reason = "No isolated " + kind + " validation for DAZ build " + (build || "unknown") + ".";
+            if (!p || p.verified !== true || !p.evidenceId) { return { enabled: false, nativeVerified: false, buildId: build, reason: reason }; }
+            if (kind === "pose" && p.adapter === "pose-erc-v2" && !callable(ex, "verifyPoseReadback")) { return { enabled: false, reason: "Pose v2 requires independent raw/local/evaluated readback.", buildId: build }; }
+            if (kind === "materials" && ex.materialAddressing === "verified-selection" && p.materialAddressing !== "verified-selection") { return { enabled: false, reason: "Material targeting proof does not match selected preset mode.", buildId: build }; }
+            for (i = 0; i < required.length; i += 1) { if (!p.checks || p.checks[required[i]] !== true) { return { enabled: false, reason: "Missing native check: " + required[i], buildId: build }; } }
+            if (typeof SaveGuardRollbackFlags === "undefined" || typeof SaveGuardRollbackFlags.compare !== "function") { return { enabled: false, nativeVerified: false, buildId: build, reason: "Rollback flag comparison module is unavailable." }; }
+            if (!callable(scene, "needsSave") || !callable(scene, "getTime")) { return { enabled: false, nativeVerified: false, buildId: build, reason: "Scene dirty-state and numeric-time observations are required." }; }
+            if (!callable(env, "pointersAreEqual")) { return { enabled: false, reason: "Native pointer identity comparison is unavailable.", buildId: build }; }
+            if (!callable(ex, "preflight") || !callable(ex, "captureAudit") || !callable(ex, "verifyOutcome") || !callable(ex, "verifyRollback")) { return { enabled: false, reason: "Native audit/preflight ports are unavailable.", buildId: build }; }
+            return { enabled: true, nativeVerified: SaveGuardNativeRuntime.nativeEvidenceHost(env), portabilityMode:!SaveGuardNativeRuntime.nativeEvidenceHost(env)&&SaveGuardNativeRuntime.hostSupported(env)?'api-checked':null, buildId: build, evidenceId: p.evidenceId };
+        }
+        function observeSceneStatus() {
+            var dirty = scene.needsSave(), time = scene.getTime();
+            if (typeof dirty !== "boolean") { fail("SCENE_STATUS", "Scene.needsSave must return a Boolean."); }
+            if (time !== null && time !== undefined && typeof time.valueOf === "function") { time = time.valueOf(); }
+            if (typeof time !== "number" || !isFinite(time) || Math.floor(time) !== time || Math.abs(time) > 9007199254740991) { fail("SCENE_STATUS", "Scene time must be a finite safe-integer tick value."); }
+            var assetDirty = scene.assetNeedSave;
+            return { needsSave: dirty, timeTicks: time, assetNeedSave: typeof assetDirty === "boolean" ? assetDirty : null };
+        }
+        function selected() { return {nodes:SaveGuardSceneInventory.selected(scene),primary:scene.getPrimarySelection()}; }
+        function samePointer(a, b) {
+            if (!a || !b) { return !a && !b; }
+            if (!callable(env, "pointersAreEqual")) { fail("NATIVE_IDENTITY", "Native pointer identity comparison is unavailable."); }
+            return env.pointersAreEqual(a, b) === true;
+        }
+        function containsPointer(list, wanted) { for (var i = 0; i < list.length; i += 1) { if (samePointer(list[i], wanted)) { return true; } } return false; }
+        function requireNative(kind) {
+            var c = capability(kind);
+            if (!c.enabled || (!c.nativeVerified && c.portabilityMode !== 'api-checked')) { fail("NATIVE_UNVERIFIED", c.reason); }
+        }
+        function nativeIdle() {
+            if (!callable(undo, "canPushItems") || !callable(undo, "isInUndoRedo") || !callable(scene, "isLoading") || !callable(io, "isReadingOrWriting")) { fail("UNDO_API", "Documented native undo and scene I/O observations are required."); }
+            if (undo.isInUndoRedo() !== false || scene.isLoading() !== false || io.isReadingOrWriting() !== false) { fail("SCENE_BUSY", "Scene I/O or undo/redo is active."); }
+        }
+        function requireIdle() {
+            nativeIdle();
+            if (transactionOwner !== null || activeKind || transitionUnknown) { fail("TRANSACTION", "A SaveGuard transaction is active or requires native recovery."); }
+            // B4/B6 observations establish false outside an owned hold. True also
+            // catches an externally collecting hold; never silently nest into it.
+            var canPush=undo.canPushItems();if (canPush !== false) { if(typeof print==="function")print("SaveGuard Undo gate: "+JSON.stringify({canPushItems:canPush,valueType:typeof canPush,ownedTransaction:false,sceneMutationStarted:false}));fail("UNDO_COLLECTING", "Native undo is already collecting or its idle state is unproved. Finish the current DAZ operation and reopen Manager. SaveGuard has not started a transaction and will not close another operation's Undo block."); }
+        }
+        function requireTransaction() {
+            if (!activeKind || transactionOwner !== transactionToken || transitionUnknown) { fail("TRANSACTION", "A validated native transaction is required."); }
+            requireNative(activeKind); nativeIdle();
+            if (undo.canPushItems() !== true) { fail("UNDO_NOT_COLLECTING", "The owned undo hold is not collecting changes."); }
+        }
+        function verifySelection(s) {
+            if (!s) { return false; }
+            var after = selected(), i;
+            if (!samePointer(after.primary, s.primary) || after.nodes.length !== s.nodes.length) { return false; }
+            for (i = 0; i < s.nodes.length; i += 1) { if (!s.nodes[i].isInScene() || !containsPointer(after.nodes, s.nodes[i])) { return false; } }
+            return true;
+        }
+        function restore(s) {
+            var i, after;
+            for (i = 0; i < s.nodes.length; i += 1) { if (!s.nodes[i].isInScene()) { return false; } }
+            scene.selectAllNodes(false);
+            for (i = 0; i < s.nodes.length; i += 1) { s.nodes[i].select(true); }
+            if (s.primary && scene.setPrimarySelection(s.primary) !== true) { return false; }
+            after = selected();
+            if (!samePointer(after.primary, s.primary) || after.nodes.length !== s.nodes.length) { return false; }
+            for (i = 0; i < s.nodes.length; i += 1) { if (!containsPointer(after.nodes, s.nodes[i])) { return false; } }
+            return true;
+        }
+        function ticket(t) { for (var i = 0; i < tickets.length; i += 1) { if (tickets[i].token === t) { return tickets[i]; } } fail("TARGET_TICKET", "The target was not captured by this native adapter."); }
+        function targetContext(r) {
+            if (!isApply(r.kind)) { return null; }
+            var t = ticket(r.targetTicket);
+            return { root: t.root, descriptor: copy(t.descriptor), resolveNode: function (key) {
+                if (!own(t.handles, key) || !t.handles[key].isInScene()) { fail("TARGET_SCOPE", "Unknown or removed target node binding."); }
+                return t.handles[key];
+            } };
+        }
+        function targetStillSelected(t) {
+            t = ticket(t); var s = selected();
+            return s.nodes.length === 1 && samePointer(s.primary, t.root) && samePointer(s.nodes[0], t.root) && t.root.isInScene();
+        }
+        function inspectSelectedFigure() {
+            var s = selected(), root = s.primary, handles = {}, serial = tickets.length + 1, nodes = [], i;
+            if (s.nodes.length !== 1 || !root || !samePointer(s.nodes[0], root) || !root.inherits("DzFigure")) { fail("SELECT_FIGURE", "Select exactly one figure root before preparing this operation."); }
+            if (!callable(ex, "describeTarget") || !callable(ex, "verifyTarget")) { fail("TARGET_UNVERIFIED", "Native base asset, skeleton, and geometry identity inspection is not validated."); }
+            function bind(n) {
+                if (!n || !n.isInScene() || (!samePointer(n, root) && (!n.inherits("DzBone") || !samePointer(n.getSkeleton(), root)))) { fail("TARGET_SCOPE", "A bound node is outside the explicitly selected figure skeleton."); }
+                for (var k in handles) { if (own(handles, k) && samePointer(handles[k], n)) { return k; } }
+                var key = "target-" + serial + "-" + nodes.length; handles[key] = n; nodes.push(n); return key;
+            }
+            var descriptor = ex.describeTarget(root, bind);
+            requireTrue(ex.verifyTarget(root, descriptor), "TARGET_UNVERIFIED", "Target compatibility metadata could not be verified.");
+            if (!descriptor || descriptor.key !== bind(root) || descriptor.verified !== true) { fail("TARGET_DESCRIPTOR", "Target descriptor must use the supplied opaque binding key."); }
+            var t = { token: {}, root: root, handles: handles, descriptor: copy(descriptor) }; tickets.push(t);
+            return { ticket: t.token, descriptor: copy(descriptor) };
+        }
+        function propertyFor(node, a) {
+            var names = { rotation: { x: "getXRotControl", y: "getYRotControl", z: "getZRotControl" },
+                translation: { x: "getXPosControl", y: "getYPosControl", z: "getZPosControl" },
+                scale: { x: "getXScaleControl", y: "getYScaleControl", z: "getZScaleControl" }, general_scale: { "": "getScaleControl" } };
+            var method = names[a.property] && names[a.property][a.axis];
+            if (!method || !callable(node, method)) { fail("POSE_PROPERTY", "Unsupported pose transform channel."); }
+            var p = node[method]();
+            if (!p || !callable(p, "isLocked") || p.isLocked() || !callable(p, "setValue") || !callable(p, "getValue")) { fail("POSE_LOCKED", "Pose channel is missing, locked, or not writable."); }
+            if (!callable(p, "beginEdit") || !callable(p, "finishEdit") || !callable(p, "cancelEdit") || !callable(p, "isEditing") || p.isEditing()) { fail("POSE_EDIT", "Pose control cannot start its own documented undo item."); }
+            return p;
+        }
+        function poseControls(r) {
+            var t = ticket(r.targetTicket), out = [], a, n, p, val, seen = {}, i;
+            if (!callable(ex, "poseValue") || !callable(ex, "verifyPoseControl")) { fail("POSE_UNITS", "Validated DSON/native value and controller policy are required."); }
+            if (r.plan.targetKey !== t.descriptor.key) { fail("POSE_TARGET", "Pose plan targets a different figure."); }
+            for (i = 0; i < r.plan.assignments.length; i += 1) {
+                a = r.plan.assignments[i]; n = t.handles[a.targetKey];
+                if (!n || !n.isInScene() || !isFinite(a.value) || typeof a.value !== "number") { fail("POSE_TARGET", "Invalid pose binding or value."); }
+                var k = "$" + a.targetKey + "/" + a.property + "/" + a.axis;
+                if (own(seen, k)) { fail("POSE_DUPLICATE", "Duplicate pose channel assignment."); } seen[k] = true;
+                p = propertyFor(n, a); val = ex.poseValue(a, p);
+                if (typeof val !== "number" || !isFinite(val)) { fail("POSE_UNITS", "Invalid native pose value."); }
+                requireTrue(ex.verifyPoseControl(n, p, a, val), "POSE_CONTROL", "Pose channel rig, range, or controller compatibility failed.");
+                out.push({ node: n, assignment: copy(a), property: p, value: val });
+            }
+            if (!out.length) { fail("POSE_EMPTY", "The saved figure has no supported pose channels."); }
+            return out;
+        }
+        function preflight(r) {
+            requireNative(r.kind); requireIdle(); observeSceneStatus();
+            if (isApply(r.kind)) {
+                requireTrue(targetStillSelected(r.targetTicket), "TARGET_CHANGED", "The explicitly selected figure changed.");
+                var preparedTarget = ticket(r.targetTicket);
+                requireTrue(ex.verifyTarget(preparedTarget.root, preparedTarget.descriptor), "TARGET_CHANGED", "Target identity or rig changed.");
+            }
+            if (!callable(ex, "preflight")) { fail("PREFLIGHT_UNVERIFIED", "Native dependency and scope preflight is unavailable."); }
+            requireTrue(ex.preflight(r, targetContext(r)), "PREFLIGHT", "Dependency, placement, or target preflight failed.");
+            if (r.kind === "pose") { activePose = poseControls(r); }
+            return true;
+        }
+        function beginTransaction(kind) { 
+            requireNative(kind); requireIdle(); observeSceneStatus();
+            if (!callable(env, "beginUndo") || !callable(env, "cancelUndo") || !callable(env, "acceptUndo")) { fail("UNDO_API", "Documented global undo functions are unavailable."); }
+            var acquired = false, details = { attempted: true, acquired: false, cleanupAttempted: false, cleanupSucceeded: false };
+            transactionOwner = transactionToken;
+            try {
+                env.beginUndo(); acquired = true; details.acquired = true; activeKind = kind;
+                requireTransaction();
+            } catch (cause) {
+                var error = new Error(String(cause.message || cause)); error.code = "UNDO_ACQUIRE";
+                if (acquired) {
+                    details.cleanupAttempted = true;
+                    try {
+                        env.cancelUndo(); nativeIdle();
+                        if (undo.canPushItems() !== false) { fail("UNDO_CLEANUP", "Undo remained collecting after cancelling the acquired hold."); }
+                        activeKind = null; transactionOwner = null; details.cleanupSucceeded = true;
+                    } catch (cleanupError) { details.cleanupError = String(cleanupError.message || cleanupError); transitionUnknown = true; }
+                } else {
+                    // A throw does not prove that beginUndo never opened a hold.
+                    // Cancelling here could consume a hold that we do not own.
+                    transitionUnknown = true; details.acquisitionUncertain = true;
+                }
+                error.undoAcquisition = details; throw error;
+            }
+        }
+        function finishTransaction(cancelHold, caption) {
+            if (!activeKind || transactionOwner !== transactionToken || transitionUnknown) { fail("TRANSACTION", "No confirmed owned native transaction can be completed."); }
+            if (!cancelHold) { requireTransaction(); }
+            try {
+                if (cancelHold) { env.cancelUndo(); } else { env.acceptUndo(caption); }
+                nativeIdle();
+                if (undo.canPushItems() !== false) { fail("UNDO_FINISH", "Native undo did not return to the proved idle state."); }
+                activeKind = null; transactionOwner = null;
+            } catch (e) {
+                // Native completion may already have consumed this hold. Never
+                // blindly issue a second completion call against an outer hold.
+                transitionUnknown = true; throw e;
+            }
+        }
+        function poseReadbackMode() {
+            for (var i = 0; i < profiles.length; i += 1) {
+                if (profiles[i].buildId === build && profiles[i].kind === "pose") { return profiles[i].adapter === "pose-erc-v2"; }
+            }
+            return false;
+        }
+        return { ownsUndo: function () { try { requireTransaction(); return true; } catch (e) { return false; } }, observeSceneStatus: observeSceneStatus, capability: capability, inspectSelectedFigure: inspectSelectedFigure, preflight: preflight,
+            captureSelection: selected, restoreSelection: restore, verifySelection: verifySelection,
+            restoreSelectionAfterRollback: function (s) { requireIdle(); return restore(s); },
+            blockRecovery: function () { transitionUnknown = true; if (transactionOwner === null) { transactionOwner = transactionToken; } },
+            clearSelection: function () { requireTransaction(); scene.selectAllNodes(false); },
+            selectTarget: function (t) { requireTransaction(); t = ticket(t); scene.selectAllNodes(false); t.root.select(true); requireTrue(scene.setPrimarySelection(t.root), "TARGET_SELECT", "Could not select the prepared target."); },
+            snapshot: function (r) { return ex.captureAudit(r, targetContext(r)); },
+            verifyOutcome: function (s, r) { return ex.verifyOutcome(s, r, targetContext(r)); },
+            verifyRollback: function (s, r) { return ex.verifyRollback(s, r, targetContext(r)); },
+            releaseSnapshot: function (s) { return callable(ex, "releaseSnapshot") ? ex.releaseSnapshot(s) : false; },
+            beginUndo: beginTransaction,
+            acceptUndo: function (caption) { finishTransaction(false, caption); },
+            cancelUndo: function () { finishTransaction(true); },
+            mergeFile: function (p) { 
+                requireTransaction();
+                if (activeKind === "pose") { fail("TRANSACTION", "A pose transaction cannot load a file."); }
+                if (!/\.duf$/i.test(p) || !env.DzAssetIOMgr || env.DzAssetIOMgr.MergeFile === undefined) { fail("MERGE_API", "Explicit native MergeFile is unavailable."); }
+                var code = io.doLoad(p, env.DzAssetIOMgr.MergeFile), value = code && typeof code.valueOf === "function" ? code.valueOf() : code;
+                if (typeof value !== "number") { fail("LOAD_RESULT", "Native DzError was not a numeric value."); } return value;
+            },
+            applyPose: function (r) {
+                requireTransaction();
+                if (activeKind !== "pose") { fail("TRANSACTION", "Pose writes require a pose transaction."); }
+                if (!activePose || !activePose.length) { fail("POSE_PREFLIGHT", "Pose channels were not preflighted."); }
+                var editing = [], i, error = null, readback, v2 = poseReadbackMode();
+                try {
+                    for (i = 0; i < activePose.length; i += 1) { activePose[i].property.beginEdit(); editing.push(activePose[i].property); }
+                    for (i = 0; i < activePose.length; i += 1) { requireTransaction(); activePose[i].property.setValue(activePose[i].value); }
+                    for (i = 0; i < activePose.length; i += 1) {
+                        if (v2) {
+                            requireTrue(ex.verifyPoseReadback(activePose[i].node, activePose[i].property, activePose[i].assignment, activePose[i].value), "POSE_READBACK", "Predicted raw, local, or evaluated pose values did not match native readback.");
+                        } else {
+                            readback = Number(activePose[i].property.getValue());
+                            if (!isFinite(readback) || Math.abs(readback - activePose[i].value) > 0.000001) { fail("POSE_READBACK", "A pose value was non-finite, clamped, or changed by controllers."); }
+                        }
+                    }
+                    while (editing.length) { editing[0].finishEdit(); editing.shift(); }
+                } catch (e) {
+                    error = e;
+                    while (editing.length) { var property = editing.pop(); try { property.cancelEdit(); } catch (cancelError) { error = new Error(String(e.message || e) + "; property cancelEdit failed: " + String(cancelError.message || cancelError)); error.code = "POSE_EDIT_RECOVERY"; } }
+                    throw error;
+                } finally { activePose = null; }
+            }
+        };
+    }
+    return { version: "0.3-draft", create: create, createStager: createStager, createNative: createNative, verifiedProfiles: [] };
+}());

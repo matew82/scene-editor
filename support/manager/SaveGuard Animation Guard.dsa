@@ -1,0 +1,98 @@
+var SaveGuardAnimationGuard=(function(){
+    function fail(s){throw Error("Animation preservation: "+s);}
+    function number(v){var n=Number(v&&typeof v.valueOf==="function"?v.valueOf():v);if(!isFinite(n))fail("Invalid native time/value");return n;}
+    function timeline(scene){var a=scene.getAnimRange(),p=scene.getPlayRange();return {time:number(scene.getTime()),step:number(scene.getTimeStep()),animation:[number(a.start),number(a.end)],play:[number(p.start),number(p.end)]};}
+    function sameTimeline(a,b){return !!a&&!!b&&a.time===b.time&&a.step===b.step&&!!a.animation&&!!b.animation&&a.animation[0]===b.animation[0]&&a.animation[1]===b.animation[1]&&!!a.play&&!!b.play&&a.play[0]===b.play[0]&&a.play[1]===b.play[1];}
+    function unchanged(scene,before){return sameTimeline(timeline(scene),before);}
+    function expected(document,domain){var animations=document.scene.animations||[],out=[],seen={};var totalKeys=0;for(var i=0;i<animations.length;i++){var a=animations[i],r=domain.parseURI(a.url),id=r.nodePath?decodeURIComponent(r.nodePath):r.kind==="local"?r.fragment:null,q=/^\?(translation|rotation|scale)\/(x|y|z|general)\/value$/.exec(r.query),previous=-Infinity;if(!id||!q||(q[2]==="general"&&q[1]!=="scale")||seen["$"+id+r.query])fail("Ambiguous or unsupported animated target");seen["$"+id+r.query]=true;if(!a.keys||!a.keys.length)fail("Saved animation has no keys");for(var j=0;j<a.keys.length;j++){var k=a.keys[j];if(k.length!==2||typeof k[0]!=="number"||typeof k[1]!=="number"||!isFinite(k[0])||!isFinite(k[1])||k[0]<=previous)fail("Unsupported key tuple/order");if(j&&Math.round(k[0]*4800)<=Math.round(previous*4800))fail("Saved keys overlap at native tick precision");previous=k[0];}out.push({id:id,field:q[1],axis:q[2],keys:a.keys});}return out;}
+    // Validate only the already-selected saved subset; no external reads or live property scans.
+    function expectedImported(document,domain){
+        var nodes=document.scene.nodes||[],animations=document.scene.animations||[],by={},seen={},out=[],totalKeys=0,i,j;
+        function text(s){return decodeURIComponent(String(s||''));}
+        function bad(a,why){fail(why+': '+String(a&&a.url||'<missing URL>'));}
+        for(i=0;i<nodes.length;i++){if(!nodes[i].id||by['$'+nodes[i].id])fail('Duplicate or missing imported node identity');by['$'+nodes[i].id]=nodes[i];}
+        function descendant(id,ancestor){var visited={},n=by['$'+id];while(n&&!visited['$'+n.id]){if(n.id===ancestor)return true;visited['$'+n.id]=true;var p=domain.parseURI(n.parent||'');n=p.kind==='local'?by['$'+p.fragment]:null;}return false;}
+
+        // Native import owns channel evaluation; resolve saved declarations, never live properties.
+        function channelFor(node,id,a){
+            var matches=[],sources=[node],u=domain.parseURI(node.url||''),defs=document.node_library||[],di,ei,ci;
+            if(u.kind==='local'){var found=[];for(di=0;di<defs.length;di++)if(defs[di].id===u.fragment)found.push(defs[di]);if(found.length!==1)bad(a,'Missing or ambiguous local node definition');sources.push(found[0]);}
+            for(di=0;di<sources.length;di++){var local=[];for(ei=0;ei<(sources[di].extra||[]).length;ei++){var ex=sources[di].extra[ei];if(ex.type!=='studio_node_channels')continue;for(ci=0;ci<(ex.channels||[]).length;ci++){var ch=ex.channels[ci]&&ex.channels[ci].channel;if(ch&&ch.id===id)local.push(ch);}}
+                if(local.length>1)bad(a,'Ambiguous saved node channel');if(local.length)matches.push(local[0]);}
+            if(!matches.length)bad(a,'Missing saved node channel declaration');
+            if(matches.length>1&&matches[0].type!==matches[1].type)bad(a,'Conflicting saved node channel types');
+            var c=matches[0];if(!/^(bool|float|int|enum|color)$/.test(c.type))bad(a,'Unsupported reference or structured saved node channel type');return c;
+        }
+        function valueValid(v,type){if(type==='bool')return typeof v==='boolean'||v===0||v===1;if(type==='color'){if(Object.prototype.toString.call(v)!=='[object Array]'||v.length!==3)return false;for(var vi=0;vi<v.length;vi++)if(typeof v[vi]!=='number'||!isFinite(v[vi]))return false;return true;}return typeof v==='number'&&isFinite(v);}
+        for(i=0;i<animations.length;i++){
+            var a=animations[i],r=domain.parseURI(a.url),id='',previous='',parts=r.nodePath?r.nodePath.split('/'):[],q=text(r.query),transform=/^\?(translation|rotation|scale)\/(x|y|z|general)\/value$/.exec(q),scalar=q==='?value/value',asset=text(r.file)+'#'+r.fragment,extra=/^\?extra\/studio_node_channels\/channels\/([^/]+)\/value$/.exec(q),savedChannel=null;
+            if(r.kind!=='external'&&r.kind!=='local'||r.scheme&&r.scheme!=='id')bad(a,'Unsupported saved animation addressing');
+            if(parts.length){for(j=0;j<parts.length;j++){if(!parts[j])continue;id=text(parts[j]);if(!by['$'+id]||previous&&(id===previous||!descendant(id,previous)))bad(a,'Saved animation instance path is missing or inconsistent');previous=id;}}
+            else if(r.kind==='local')id=r.fragment;
+            if(!id||!by['$'+id])bad(a,'Saved animation owner is not in the selected subset');
+            if(transform){if(transform[2]==='general'&&transform[1]!=='scale')bad(a,'Unsupported transform axis');if(r.kind==='external'&&text(by['$'+id].url)!==asset)bad(a,'Saved transform definition differs from its instance');if(r.kind==='local'&&r.fragment!==id)bad(a,'Ambiguous local transform target');asset='node:'+id;}
+            else if(scalar){
+                if(r.kind==='local'&&r.nodePath){var definitions=document.modifier_library||[],matches=[];for(j=0;j<definitions.length;j++)if(definitions[j].id===r.fragment)matches.push(definitions[j]);
+                    if(matches.length!==1||!matches[0].channel||matches[0].channel.id!=='value')bad(a,'Missing or ambiguous saved modifier definition');
+                    var ownerNode=by['$'+id],parentAsset=text(matches[0].parent),parentRef=domain.parseURI(matches[0].parent||''),geometries=ownerNode.geometries||[];
+                    if(!parentAsset||(parentRef.kind!=='external'&&parentRef.kind!=='local')||!parentRef.fragment||parentRef.nodePath||parentRef.query||parentRef.scheme&&parentRef.scheme!=='id')bad(a,'Saved modifier requires an explicit definition parent');
+                    var ownerMatches=parentAsset===text(ownerNode.url)?1:0;
+                    for(var gi=0;gi<geometries.length;gi++)if(parentAsset===text(geometries[gi].url))ownerMatches++;
+                    if(ownerMatches!==1)bad(a,'Saved modifier definition has missing, foreign or ambiguous owner');
+                    savedChannel=matches[0].channel;if(!/^(bool|float|int|enum|color)$/.test(savedChannel.type))bad(a,'Unsupported reference or structured saved modifier type');asset='modifier:'+r.fragment;
+                }else if(r.kind!=='external'||!r.nodePath||r.file.indexOf('/data/')!==0||!/^\/data\/.*\.dsf$/i.test(text(r.file))||!r.fragment)bad(a,'Scalar animation requires an explicit node and content asset URI');
+            }
+            else if(extra){
+                if(r.kind==='external'&&text(by['$'+id].url)!==asset)bad(a,'Saved channel definition differs from its instance');
+                if(r.kind==='local'&&r.fragment!==id)bad(a,'Ambiguous local channel target');
+                savedChannel=channelFor(by['$'+id],extra[1],a);asset='node:'+id;
+            }
+            else bad(a,'Unsupported saved animation property');
+            var identity=JSON.stringify([id,asset,q]);if(seen[identity])bad(a,'Duplicate saved animation channel');seen[identity]=true;
+            if(!a.keys||!a.keys.length)bad(a,'Saved animation has no keys');var prior=-Infinity;
+            for(j=0;j<a.keys.length;j++){var k=a.keys[j];if(Object.prototype.toString.call(k)!=='[object Array]'||k.length<2||typeof k[0]!=='number'||!isFinite(k[0])||(savedChannel?!valueValid(k[1],savedChannel.type):typeof k[1]!=='number'||!isFinite(k[1]))||k[0]<=prior)bad(a,'Unsupported key tuple, interpolation or order');var tick=Math.round(k[0]*4800);if(!isFinite(tick)||Math.abs(tick)>9007199254740991||j&&tick<=Math.round(prior*4800))bad(a,'Saved keys overlap or exceed exact native tick precision');prior=k[0];}
+            out.push({id:id,field:transform?transform[1]:'value',axis:transform?transform[2]:'value',assetUri:r.kind==='external'?r.file+'#'+encodeURIComponent(r.fragment):null,url:a.url,keys:a.keys});
+        }
+        return out;
+    }
+
+    function preflight(scene,channels){var t=timeline(scene);if(t.step!==160)fail("This saved animation uses 30 fps. Destination frame rate differs; no timing changes were made.");for(var i=0;i<channels.length;i++)for(var j=0;j<channels[i].keys.length;j++){var tick=Math.round(channels[i].keys[j][0]*4800);if(tick<t.animation[0]||tick>t.animation[1]||tick<t.play[0]||tick>t.play[1])fail("Destination animation/play range must contain all saved key times; no range changes were made.");}return t;}
+    function verify(env,channels,bindings){var result=[];for(var i=0;i<channels.length;i++){var c=channels[i],n=bindings["$"+c.id]||bindings[c.id];if(!n)fail("Imported animated node has no verified binding");var getter=c.field==="translation"?"get"+c.axis.toUpperCase()+"PosControl":c.field==="rotation"?"get"+c.axis.toUpperCase()+"RotControl":c.axis==="general"?"getScaleControl":"get"+c.axis.toUpperCase()+"ScaleControl";if(typeof n[getter]!=="function")fail("Missing transform channel getter "+getter);var p=n[getter]();if(!p||p.getNumKeys()!==c.keys.length)fail("Imported key count differs");var keys=[];for(var j=0;j<c.keys.length;j++){var time=number(p.getKeyTime(j)),value=number(p.getKeyValue(j)),expectedTime=Math.round(c.keys[j][0]*4800),kind=p.getKeyInterpolationType(j),params=p.getKeyInterpolationTypeValues(j);if(time!==expectedTime||Math.abs(value-c.keys[j][1])>0.0000001*Math.max(1,Math.abs(c.keys[j][1])))fail("Imported key time/value differs");if(!env.DzProperty||kind!==env.DzProperty.InterpTCB||!params||params.length!==4||params[0]!==kind||params[1]!==0||params[2]!==0||params[3]!==0)fail("Imported default Catmull-Rom/TCB interpolation differs");keys.push({ticks:time,value:value,interpolation:kind,parameters:params});}result.push({id:c.id,field:c.field,axis:c.axis,keys:keys});}return {ok:true,channels:result};}
+    // Native imports retain authored tuples and let DAZ evaluate them. This validates
+    // saved ownership and timing only; it does not sample or inspect the live output.
+    function nativeImported(document,domain){
+        var nodes=document.scene.nodes||[],tracks=document.scene.animations||[],by={},records={},seen={},out=[],i,j;
+        function put(r,owner){if(!r||!r.id)return;if(records['$'+r.id])fail('Ambiguous native animation identity');records['$'+r.id]={record:r,owner:owner};}
+        for(i=0;i<nodes.length;i++){by['$'+nodes[i].id]=nodes[i];put(nodes[i],nodes[i].id);for(j=0;j<(nodes[i].geometries||[]).length;j++)put(nodes[i].geometries[j],nodes[i].id);}
+        for(var group in document)if(/_library$/.test(group))for(i=0;i<document[group].length;i++)put(document[group][i],null);
+        var groups=['modifiers','materials','uvs'];for(var g=0;g<groups.length;g++)for(i=0;i<(document.scene[groups[g]]||[]).length;i++)put(document.scene[groups[g]][i],null);
+        function owner(id){var visited={},entry=records['$'+id];while(entry){if(visited['$'+id])fail('Native animation owner cycle');visited['$'+id]=true;if(entry.owner)return entry.owner;var r=domain.parseURI(entry.record.parent||entry.record.geometry||'');if(r.kind!=='local')return null;id=r.fragment;entry=records['$'+id];}return null;}
+        function inside(id,parent){var visited={},n=by['$'+id];while(n){if(n.id===parent)return true;if(visited['$'+n.id])fail('Native animation parent cycle');visited['$'+n.id]=true;var p=domain.parseURI(n.parent||n.parent_in_place||'');n=p.kind==='local'?by['$'+p.fragment]:null;}return false;}
+        for(i=0;i<tracks.length;i++){
+            var a=tracks[i],r=domain.parseURI(a.url),parts=(r.nodePath||'').split('/'),id=null,prior=null,qualified=false;
+            if((r.kind!=='local'&&r.kind!=='external')||!r.query)fail('Invalid native animation address');
+            for(j=0;j<parts.length;j++)if(parts[j]){id=decodeURIComponent(parts[j]);if(!by['$'+id]||prior&&(id===prior||!inside(id,prior)))fail('Foreign or inconsistent native animation owner');prior=id;qualified=true;}
+            if(r.kind==='local'){
+                var entry=records['$'+r.fragment],recordOwner=owner(r.fragment);if(!entry)fail('Missing native animation record');
+                if(!qualified)id=recordOwner;
+                else if(recordOwner&&recordOwner!==id)fail('Foreign native animation record owner');
+                else if(!recordOwner){var parent=entry.record.parent,def=domain.parseURI(by['$'+id].url||''),matches=def.kind==='local'&&def.fragment===r.fragment;
+                    if(parent){matches=parent===by['$'+id].url;for(var gi=0;gi<(by['$'+id].geometries||[]).length;gi++)if(parent===by['$'+id].geometries[gi].url)matches=true;}if(!matches)fail('Unbound native animation definition');}
+            }else {
+                if(!qualified)fail('External native animation requires exact instance owner');
+                var nodeDefinition=domain.parseURI(by['$'+id].url||'');
+                if(r.query!=='?value/value'&&(nodeDefinition.kind!=='external'||decodeURIComponent(nodeDefinition.file)!==decodeURIComponent(r.file)||nodeDefinition.fragment!==r.fragment))fail('Foreign native animation definition');
+                if(r.query==='?value/value'&&!/^\/data\/.*\.dsf$/i.test(decodeURIComponent(r.file)))fail('External scalar animation requires a content definition');
+            }
+            if(!id||!by['$'+id])fail('Missing native animation owner');
+            var identity=JSON.stringify([id,r.file||'',r.fragment,r.query]);if(seen[identity])fail('Duplicate native animation channel');seen[identity]=true;
+            if(!a.keys||!a.keys.length)fail('Saved animation has no keys');var previous=-Infinity;
+            for(j=0;j<a.keys.length;j++){var k=a.keys[j],tick=k&&Math.round(k[0]*4800);if(Object.prototype.toString.call(k)!=='[object Array]'||k.length<2||typeof k[0]!=='number'||!isFinite(k[0])||k[0]<=previous)fail('Invalid native key tuple or time order');previous=k[0];
+                if(/^\?(translation|rotation|scale)\//.test(r.query)&&(typeof k[1]!=='number'||!isFinite(k[1])))fail('Invalid native transform key value');
+                if(typeof k[1]==='string'&&(k[1].charAt(0)==='#'||/^(id:|name:)/.test(k[1]))){var valueRef=domain.parseURI(k[1]);if(valueRef.kind!=='local'||valueRef.nodePath||!records['$'+valueRef.fragment]||!owner(valueRef.fragment))fail('Foreign native animated reference');}
+            }
+            out.push({id:id,keys:a.keys,url:a.url});
+        }return out;
+    }
+    return {nativeImported:nativeImported,expectedImported:expectedImported,timeline:timeline,unchanged:unchanged,expected:expected,preflight:preflight,verify:verify};
+}());

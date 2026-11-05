@@ -1,0 +1,254 @@
+// Read-only native MergeFile audit ports. No scene mutations or enabled profiles.
+// Include after Selective + DSON Placement; pass to ApplyHost.createNative.
+var SaveGuardSavedFigureAudit = (function () {
+    function own(o,k) { return !!o && Object.prototype.hasOwnProperty.call(o,k); }
+    function array(v) { return Object.prototype.toString.call(v)==="[object Array]"; }
+    function fail(code,message) { var e=new Error(message);e.code=code;throw e; }
+    function call(o,k) { if(!o||typeof o[k]!=="function"){fail("AUDIT_API","Missing native audit API: "+k);}return o[k](); }
+    function text(v) { return v===null||v===undefined?"":String(v); }
+    function number(v) { v=Number(v);if(!isFinite(v)){fail("AUDIT_NUMBER","Nonfinite native audit value.");}return v; }
+    function count(v,label) { v=number(v);if(v<0||Math.floor(v)!==v||v>9007199254740991){fail("AUDIT_COUNT","Invalid native "+label+" count.");}return v; }
+    function copy(v) { if(v===null||typeof v!=="object"){return v;}var out=array(v)?[]:{},k;for(k in v){if(own(v,k)){out[k]=copy(v[k]);}}return out; }
+    function create(env,options) {
+        options=options||{};var scene=env.Scene,issued=[],last=null,domain=options.selective||SaveGuardSelective,
+            placement=options.placement||SaveGuardDSONPlacement;
+        var matrixKeys=["m11","m21","m31","m12","m22","m32","m13","m23","m33","m14","m24","m34"];
+        function same(a,b) { if(!a||!b){return !a&&!b;}if(typeof env.pointersAreEqual!=="function"){fail("AUDIT_IDENTITY","Native pointer comparison is required.");}return env.pointersAreEqual(a,b)===true; }
+        function registry() {
+            var buckets={},count=0,handles={};
+            return { key:function(v) {
+                if(!v){return null;}var id=Number(v.elementID),bucket=isFinite(id)?"$element:"+id:"$class:"+text(typeof v.className==="function"?v.className():"native"),a=buckets[bucket]||[],i;
+                for(i=0;i<a.length;i+=1){if(same(v,a[i].handle)){return a[i].key;}}
+                var key="native:"+(++count),entry={key:key,handle:v};a.push(entry);buckets[bucket]=a;handles["$"+key]=v;return key;
+            },handle:function(key){return handles["$"+key]||null;}};
+        }
+        function matrix(v) { var out=[],i;for(i=0;i<matrixKeys.length;i+=1){if(v[matrixKeys[i]]===undefined){fail("AUDIT_MATRIX","Native transform lacks "+matrixKeys[i]);}out.push(number(v[matrixKeys[i]]));}return out; }
+        function warn(coverage,message) { if(coverage.indexOf(message)<0){coverage.push(message);} }
+        function ticks(v, label) {
+            if(v!==null&&v!==undefined&&typeof v.valueOf==="function"){v=v.valueOf();}
+            if(typeof v!=="number"||!isFinite(v)||Math.floor(v)!==v||Math.abs(v)>9007199254740991){fail("AUDIT_TIME","Numeric safe-integer "+label+" is required.");}return v;
+        }
+        function scalar(v) {
+            if(v===null||typeof v==="string"||typeof v==="boolean"){return {supported:true,value:v};}
+            if(typeof v==="number"){return {supported:true,value:number(v)};}
+            if(v&&typeof v.valueOf==="function"){var x=v.valueOf();if(typeof x==="number"||typeof x==="boolean"||typeof x==="string"){return scalar(x);}}
+            return {supported:false};
+        }
+        function value(v) {
+            // DAZ Color exposes 0..255 components; retain alpha independently of rgb/valueOf.
+            if(v&&typeof v.red==="number"&&typeof v.green==="number"&&typeof v.blue==="number"){
+                var rgba={kind:"Color",red:number(v.red),green:number(v.green),blue:number(v.blue)};
+                if(typeof v.alpha==="number"){rgba.alpha=number(v.alpha);}return {supported:true,value:rgba};
+            }
+            var s=scalar(v),i,out;if(s.supported){return s;}
+            if(array(v)){out=[];for(i=0;i<v.length;i+=1){s=scalar(v[i]);if(!s.supported){return {supported:false};}out.push(s.value);}return {supported:true,value:out};}
+            if(v&&typeof v.x==="number"&&typeof v.y==="number"&&typeof v.z==="number"){out=[number(v.x),number(v.y),number(v.z)];if(typeof v.w==="number"){out.push(number(v.w));}return {supported:true,value:out};}
+            return {supported:false};
+        }
+        function properties(element,reg,coverage,budget) {
+            var out=[],routes=[["getNumProperties","getProperty","public"],["getNumPrivateProperties","getPrivateProperty","private"]],r,i,j,p,row,n,v,keys,controllers;
+            for(r=0;r<routes.length;r+=1){
+                if(typeof element[routes[r][0]]!=="function"||typeof element[routes[r][1]]!=="function"){warn(coverage,"Some element property enumeration APIs are unavailable.");continue;}
+                n=count(element[routes[r][0]](),"property");
+                for(i=0;i<n;i+=1){
+                    budget.properties+=1;p=element[routes[r][1]](i);if(!p){fail("AUDIT_PROPERTY","Property enumeration returned null.");}
+                    row={key:reg.key(p),scope:routes[r][2],name:text(typeof p.getName==="function"?p.getName():p.name),className:text(typeof p.className==="function"?p.className():""),
+                        locked:typeof p.isLocked==="function"?!!p.isLocked():null};
+                    v=typeof p.getValue==="function"?value(p.getValue()):{supported:false};row.observedValue=v.supported;if(v.supported){row.value=v.value;}else{warn(coverage,"Nonscalar/plugin property payloads are represented by identity and observable metadata only.");}
+                    keys=typeof p.getNumKeys==="function"?count(p.getNumKeys(),"animation key"):null;row.keyCount=keys;row.keys=[];
+                    if(keys!==null){
+                        if(keys&&typeof p.getKeyTime!=="function"){fail("AUDIT_KEYS","Key times cannot be read.");}
+                        for(j=0;j<keys;j+=1){budget.keys+=1;var tm=p.getKeyTime(j),kv=typeof p.getValue==="function"?value(p.getValue(tm)):{supported:false},key={time:ticks(tm,"animation key time")};
+                            if(kv.supported){key.value=kv.value;}else{warn(coverage,"Some animation key payloads cannot be represented as scalar values.");}
+                            if(typeof p.getKeyInterpolationType==="function"){key.interpolation=text(p.getKeyInterpolationType(j));}
+                            if(typeof p.getKeyInterpolationTypeValues==="function"){var iv=value(p.getKeyInterpolationTypeValues(j));if(iv.supported){key.interpolationValues=iv.value;}}
+                            row.keys.push(key);
+                        }
+                    }
+                    controllers=typeof p.getNumControllers==="function"?count(p.getNumControllers(),"controller"):null;row.controllerCount=controllers;row.controllers=[];
+                    if(controllers){if(typeof p.getController!=="function"){fail("AUDIT_CONTROLLERS","Controller identities cannot be enumerated.");}for(j=0;j<controllers;j+=1){row.controllers.push(reg.key(p.getController(j)));}warn(coverage,"Controller identities/counts and resulting values are observed; arbitrary controller internals are not serialized.");}
+                    if(typeof p.getNumSlaveControllers==="function"){row.slaveControllerCount=count(p.getNumSlaveControllers(),"slave controller");}
+                    out.push(row);
+                }
+            }return out;
+        }
+        function objectState(node,reg,coverage,budget) {
+            if(typeof node.getObject!=="function"){warn(coverage,"Native geometry-object access is unavailable for some nodes.");return null;}
+            var obj=node.getObject();if(!obj){return null;}var out={key:reg.key(obj),properties:properties(obj,reg,coverage,budget),shapes:[],modifiers:[]},i,j,n,shape,entry,geo;
+            if(typeof obj.getNumShapes==="function"&&typeof obj.getShape==="function"){
+                n=count(obj.getNumShapes(),"shape");
+                for(i=0;i<n;i+=1){shape=obj.getShape(i);entry={key:reg.key(shape),properties:properties(shape,reg,coverage,budget),materials:[]};
+                    if(typeof shape.getNumMaterials==="function"&&typeof shape.getMaterial==="function"){var mc=count(shape.getNumMaterials(),"material");for(j=0;j<mc;j+=1){var mat=shape.getMaterial(j);entry.materials.push({key:reg.key(mat),properties:properties(mat,reg,coverage,budget)});}}
+                    if(typeof shape.getGeometry==="function"){geo=shape.getGeometry();entry.geometryKey=reg.key(geo);if(geo&&typeof geo.getNumVertices==="function"){entry.vertices=count(geo.getNumVertices(),"vertex");}if(geo&&typeof geo.getNumFacets==="function"){entry.facets=count(geo.getNumFacets(),"facet");}}
+                    out.shapes.push(entry);
+                }
+            }else{warn(coverage,"Some shape/material structures cannot be enumerated.");}
+            if(typeof obj.getNumModifiers==="function"&&typeof obj.getModifier==="function"){n=count(obj.getNumModifiers(),"modifier");for(i=0;i<n;i+=1){var mod=obj.getModifier(i);out.modifiers.push({key:reg.key(mod),properties:properties(mod,reg,coverage,budget)});}}
+            warn(coverage,"Existing geometry/material handles, counts and exposed scalar properties are observed; mesh buffers and private plugin payloads are not exhaustively serialized.");return out;
+        }
+        function renderState(reg,coverage,budget) {
+            var mgr=env.App.getRenderMgr(),renderer=call(mgr,"getActiveRenderer"),opts=call(mgr,"getRenderOptions"),keys=("aspect aspectHeight aspectWidth doubleSided gain gamma gammaCorrection isAspectConstrained isCurrentFrameRender lastRenderImgFilename lastRenderMovFilename lastRenderSerFilename motionBlurOffset motionBlurPct motionBlurSamples openGLPasses pixelFilter rayTraceDepth renderImgFilename renderImgToId renderMovFilename renderMovToId renderSerFilename renderStyle renderType renderViewport shadingRate shadowSamples showPreview useGLSL useMotionBlur xFilterWidth xPixelSamples yFilterWidth yPixelSamples").split(" "),out={rendererKey:reg.key(renderer),options:{},rendererProperties:renderer?properties(renderer,reg,coverage,budget):[]},i,k,s;
+            for(i=0;i<keys.length;i+=1){k=keys[i];s=scalar(opts[k]);out.options[k]=s.supported?s.value:{unavailable:true};if(!s.supported){warn(coverage,"Some standard render option properties are unavailable in this build.");}}
+            if(!opts.imageSize){fail("AUDIT_RENDER","Render image dimensions are unavailable.");}out.options.imageSize=[number(opts.imageSize.width),number(opts.imageSize.height)];
+            out.options.startTime=ticks(opts.startTime,"render start time");out.options.endTime=ticks(opts.endTime,"render end time");
+            if(typeof mgr.isRendering==="function"){out.isRendering=!!mgr.isRendering();}
+            return out;
+        }
+        function sceneDirty() { var v=call(scene,"needsSave");if(typeof v!=="boolean"){fail("AUDIT_DIRTY","Scene dirty flag is unavailable.");}return v; }
+        function sceneTime() { return ticks(call(scene,"getTime"),"scene time"); }
+        function rollbackFlags(before,after,errors) {
+            if(typeof SaveGuardRollbackFlags==="undefined"){fail("AUDIT_FLAGS","Rollback flag comparison module is unavailable.");}
+            var r=SaveGuardRollbackFlags.compare(before,after,[{name:"dirty"},{name:"assetDirty",optional:true}]);
+            for(var i=0;i<r.errors.length;i+=1){errors.push(r.errors[i]);}return r;
+        }
+        var destinationKeys=null;
+        function snapshotScene(reg) {
+            var inventory=SaveGuardSceneInventory.nodes(scene);var coverage=[],budget={properties:0,keys:0},nodes=[],byKey={},selected=[],n=count(call(scene,"getNumNodes"),"node"),i,node,key,parent,entry;
+            var captureDestination=options.importScoped===true&&destinationKeys===null;if(captureDestination)destinationKeys={};
+            for(i=0;i<n;i+=1){node=inventory[i];if(!node||call(node,"isInScene")!==true){fail("AUDIT_NODE","Node enumeration returned an unavailable scene node.");}key=reg.key(node);if(own(byKey,"$"+key)){fail("AUDIT_IDENTITY","Duplicate native node pointer in scene enumeration.");}
+                var existing=options.importScoped===true&&(captureDestination||own(destinationKeys,"$"+key));if(captureDestination)destinationKeys["$"+key]=true;
+                parent=call(node,"getNodeParent");entry={key:key,parentKey:reg.key(parent),className:text(call(node,"className")),name:text(call(node,"getName")),label:text(call(node,"getLabel")),assetId:text(node.assetId),
+                    assetUri:options.basicOnly?null:text(node.assetUri),world:existing||(options.figureStructureOnly&&options.basicOnly)?null:matrix(call(node,"getWSTransform")),local:existing||(options.figureStructureOnly&&options.basicOnly)?null:typeof node.getLocalTransform==="function"?matrix(node.getLocalTransform()):null,
+                    properties:options.basicOnly?[]:properties(node,reg,coverage,budget),object:options.basicOnly?(typeof node.getObject==="function"&&node.getObject()?{present:true,key:reg.key(node.getObject())}:null):objectState(node,reg,coverage,budget)};
+                if(typeof node.getFollowTarget==="function"){entry.followTargetKey=reg.key(node.getFollowTarget());}
+                if(typeof node.getFollowBone==="function"){entry.followBoneKey=reg.key(node.getFollowBone());}
+                if(typeof node.getFollowMode==="function"){entry.followMode=number(node.getFollowMode());}
+                if(typeof node.getSkeleton==="function"){entry.skeletonKey=reg.key(node.getSkeleton());}
+                if(typeof node.getPointAtTarget==="function"){entry.pointAtTargetKey=reg.key(node.getPointAtTarget());}
+                if(call(node,"isSelected")){selected.push(key);}nodes.push(entry);byKey["$"+key]=entry;
+            }
+            selected.sort();var out={nodes:nodes,byKey:byKey,selection:{keys:selected,primaryKey:reg.key(call(scene,"getPrimarySelection"))},filename:text(call(scene,"getFilename")),frame:number(call(scene,"getFrame")),
+                dirty:sceneDirty(),assetDirty:typeof scene.assetNeedSave==="boolean"?scene.assetNeedSave:null,render:options.basicOnly?null:renderState(reg,coverage,budget),coverage:coverage,propertiesObserved:budget.properties};
+            out.time=sceneTime();
+            if(env.MainWindow&&typeof env.MainWindow.getViewportMgr==="function"){var vmgr=env.MainWindow.getViewportMgr(),viewport=vmgr.getActiveViewport(),view=viewport&&viewport.get3DViewport();out.activeViewportKey=reg.key(viewport);out.activeCameraKey=reg.key(view&&view.getCamera());}
+            else{warn(coverage,"Active viewport camera cannot be observed without MainWindow viewport APIs.");}
+            if(options.captureAdditionalSceneState){out.additional=options.captureAdditionalSceneState();}
+            return out;
+        }
+        function compare(a,b,at,errors,abs,rel) {
+            if(typeof a==="number"&&typeof b==="number"){if(/(?:^|\.)(?:time|startTime|endTime)$/.test(at)){abs=0;rel=0;}if(Math.abs(a-b)>abs+rel*Math.max(Math.abs(a),Math.abs(b))){errors.push(at+" changed");}return;}
+            if(a===b){return;}if(a===null||b===null||typeof a!=="object"||typeof b!=="object"||array(a)!==array(b)){errors.push(at+" changed");return;}
+            var k;if(array(a)&&a.length!==b.length){errors.push(at+" count changed");return;}
+            for(k in a){if(own(a,k)){if(!own(b,k)){errors.push(at+"."+k+" disappeared");}else{compare(a[k],b[k],at+"."+k,errors,abs,rel);}}}
+            for(k in b){if(own(b,k)&&!own(a,k)){errors.push(at+"."+k+" appeared");}}
+        }
+        function importedIDs(doc) {
+            var ids={},groups=[],k,i,j,records;for(k in doc){if(own(doc,k)&&/_library$/.test(k)&&array(doc[k])){groups.push(doc[k]);}}
+            for(k in doc.scene){if(own(doc.scene,k)&&array(doc.scene[k])){groups.push(doc.scene[k]);}}
+            function add(id){if(typeof id!=="string"||!id){return;}if(own(ids,"$"+id)){fail("AUDIT_SCOPE","Duplicate staged record ID: "+id);}ids["$"+id]=true;}
+            for(i=0;i<groups.length;i+=1){records=groups[i];for(j=0;j<records.length;j+=1){add(records[j].id);if(records[j].geometries){for(var z=0;z<records[j].geometries.length;z+=1){add(records[j].geometries[z].id);}}}}return ids;
+        }
+        var retainedScope=null,scopeBuilds=0,scopeHits=0,scopeLogCount=0;
+        var scopeSnapshotOwner=options.reuseStaticAssessment===true?SaveGuardCacheSnapshot:null,scopeSnapshotFunction=scopeSnapshotOwner&&scopeSnapshotOwner.capture;
+        function scopePin(entry){if(SaveGuardCacheSnapshot!==scopeSnapshotOwner||scopeSnapshotOwner.capture!==scopeSnapshotFunction)fail("AUDIT_CACHE","Expected-content snapshot API changed.");return scopeSnapshotFunction.call(scopeSnapshotOwner,{built:entry.built,plan:entry.plan});}
+        function scopeLog(){if(scopeLogCount++<16&&typeof print==="function"){try{print("SaveGuard assessment cache: "+JSON.stringify({builds:scopeBuilds,hits:scopeHits}));}catch(ignoredScopeLog){}}}
+        function scope(entry) {
+            if(typeof env.pointersAreEqual!=="function"){fail("AUDIT_IDENTITY","Native pointer comparison is required.");}
+            if(!entry||entry.kind!=="merge"||!entry.built||!entry.built.document||!entry.plan||entry.plan.ready!==true){fail("AUDIT_KIND","This audit supports prepared scene-subset merges only.");}
+            var doc=entry.built.document,s=doc.scene,k;if(!doc.asset_info||doc.asset_info.type!=="scene_subset"||!s||!array(s.nodes)||!s.nodes.length){fail("AUDIT_SCOPE","Nonempty scene_subset nodes are required.");}
+            for(k in s){if(own(s,k)&&!(/^(nodes|materials|modifiers|uvs)$/.test(k))){if(k==="animations"&&options.preserveSelectedAnimation===true){var animated=SaveGuardAnimationGuard.expected(doc,domain),ownedNodes={};for(var ai=0;ai<s.nodes.length;ai++)ownedNodes["$"+s.nodes[ai].id]=true;for(ai=0;ai<animated.length;ai++)if(!ownedNodes["$"+animated[ai].id])fail("AUDIT_SCOPE","Animated target is outside imported nodes");continue;}if((k==="extra"||k==="animations")&&array(s[k])&&!s[k].length){continue;}fail("AUDIT_SCOPE","Scene-wide settings/animation are outside merge audit: "+k);}}
+            var inventory=SaveGuardSceneInventory.nodes(scene);var ids=importedIDs(doc),nodeCount=count(call(scene,"getNumNodes"),"node"),i,n,uri;
+            for(i=0;i<nodeCount;i+=1){n=inventory[i];if(own(ids,"$"+text(n.assetId))){fail("AUDIT_COLLISION","Staged namespace collides with an existing native asset ID.");}uri=options.basicOnly?"":text(n.assetUri);if(uri){var parsed=domain.parseURI(uri);if(parsed.fragment&&own(ids,"$"+parsed.fragment)){fail("AUDIT_COLLISION","Staged namespace collides with an existing native asset URI.");}}}
+            var deps=entry.built.dependencies||[];if(deps.length&&!options.assetResolver){fail("AUDIT_DEPENDENCY","External dependencies need a retained read-only resolver.");}
+            if(options.assetResolver){for(i=0;i<deps.length;i+=1){var found=options.assetResolver.resolveExternal(deps[i].source,{uris:[]});if(found.uri!==deps[i].uri){fail("AUDIT_DEPENDENCY","Dependency URI resolution changed.");}}if(options.assetResolver.verifyAll()!==true){fail("AUDIT_DEPENDENCY","Dependency verification failed.");}}
+            var canReuse=!!scopeSnapshotOwner&&(!options.reconstruction||options.reconstruction.requires(doc)!==true),pin=canReuse?scopePin(entry):null;
+            if(canReuse&&retainedScope){if(retainedScope.entry!==entry||retainedScope.pin!==pin)fail("AUDIT_CACHE","Prepared payload or plan changed.");scopeHits++;scopeLog();return retainedScope.expected;}
+            var reconstructed=options.reconstruction&&options.reconstruction.requires(doc)===true,
+                expected=reconstructed?options.reconstruction.prepare(entry):options.computeExpectedPlacement?options.computeExpectedPlacement(entry):placement.compute(doc,{selective:domain,resolveAssetDocument:options.assetResolver?options.assetResolver.resolveAssetDocument:null});
+            if(!expected||!array(expected.nodes)||expected.nodes.length!==s.nodes.length){fail("AUDIT_PLACEMENT","Complete expected placement is required.");}
+            var expectedIds={};for(i=0;i<expected.nodes.length;i+=1){var d=expected.nodes[i];if(!d.id||own(expectedIds,"$"+d.id)){fail("AUDIT_PLACEMENT","Expected node IDs are missing or duplicated.");}expectedIds["$"+d.id]=true;
+                if(!d.record||d.record.id!==d.id||!d.definitionId){fail("AUDIT_PLACEMENT","Expected identity and source record are required.");}
+                var symbolic=reconstructed&&d.placementMode==="native-reconstruction"&&options.reconstruction.isPrepared(expected,entry)===true;
+                if(!options.figureStructureOnly&&!symbolic&&(!array(d.world)||d.world.length!==12)){fail("AUDIT_PLACEMENT","Expected world matrix is incomplete.");}
+                if(d.world){if(!array(d.world)||d.world.length!==12){fail("AUDIT_PLACEMENT","Independent world matrix is incomplete.");}for(var j=0;j<12;j+=1){number(d.world[j]);}}
+                var chain=d.definitionChain||[d.record];for(j=0;j<chain.length;j+=1){var ex=chain[j]&&chain[j].extra||[],z;
+                    for(z=0;z<ex.length;z+=1){if(/^studio\/node\/(environment|tone_mapper)$/.test(text(ex[z].type))){fail("AUDIT_SCOPE","Render settings nodes cannot enter an ordinary merge.");}
+                        var channels=ex[z].channels||[];for(var q=0;q<channels.length;q+=1){var ch=channels[q].channel||{},v=own(ch,"current_value")?ch.current_value:ch.value;
+                            if(/^(Disable Transform|Ignore Local Transform)$/.test(ch.id)&&v){fail("AUDIT_PLACEMENT","Nonstandard transform disabling is not covered.");}
+                            if(ch.id==="Point At"&&ch.node){fail("AUDIT_PLACEMENT","Point-at constraints require separately validated expected placement.");}
+                        }
+                    }
+                }
+            }
+            for(i=0;i<s.nodes.length;i+=1){if(!own(expectedIds,"$"+s.nodes[i].id)){fail("AUDIT_PLACEMENT","Expected placement omitted a staged node.");}}
+            if(options.assessImportedContent&&options.assessImportedContent(entry,expected)!==true){fail("AUDIT_CONTENT","Requested imported content exceeds verified audit coverage.");}
+            if(canReuse){if(options.assetResolver.verifyAll()!==true||scopePin(entry)!==pin)fail("AUDIT_CACHE","Payload or dependency changed during assessment.");retainedScope={entry:entry,pin:pin,expected:expected};scopeBuilds++;scopeLog();}
+            return expected;
+        }
+        function preflight(entry) { scope(entry);return true; }
+        function captureAudit(entry) {
+            var expected=scope(entry),reg=registry(),state=snapshotScene(reg),snapshot={token:{},registry:reg,state:state,expected:expected,entry:entry};issued.push(snapshot);
+            last={phase:"capture",ok:true,coverage:state.coverage.slice(0),propertiesObserved:state.propertiesObserved,nativeVerified:false};return snapshot.token;
+        }
+        function privateSnapshot(token) {for(var i=0;i<issued.length;i+=1){if(issued[i].token===token){return issued[i];}}fail("AUDIT_SNAPSHOT","Unknown native audit snapshot.");}
+        function valid(token,entry) {var s=privateSnapshot(token);if(s.entry!==entry){fail("AUDIT_SNAPSHOT","Mismatched native audit snapshot.");}return s;}
+        function unchanged(snapshot,after,rollback,errors) {
+            var before=snapshot.state,i,key;
+            for(i=0;i<before.nodes.length;i+=1){key="$"+before.nodes[i].key;if(!own(after.byKey,key)){errors.push("Existing node removed or replaced: "+before.nodes[i].key);}else{compare(before.nodes[i],after.byKey[key],"existing "+before.nodes[i].key,errors,options.existingAbsoluteTolerance||0.000001,options.existingRelativeTolerance||0.00000001);}}
+            var fields=["filename","frame","time","render","activeViewportKey","activeCameraKey","additional"];
+            for(i=0;i<fields.length;i+=1){compare(before[fields[i]],after[fields[i]],"scene "+fields[i],errors,fields[i]==="time"?0:0.000001,fields[i]==="time"?0:0.00000001);}
+            if(!rollback&&before.dirty===true&&after.dirty!==true){errors.push("Existing dirty state was cleared.");}
+            if(!rollback&&after.nodes.length>before.nodes.length&&after.dirty!==true){errors.push("Imported nodes did not mark the scene dirty.");}
+            if(!rollback&&before.assetDirty===true&&after.assetDirty===false){errors.push("Existing asset dirty state was cleared.");}
+            if(rollback){if(before.nodes.length!==after.nodes.length){errors.push("Rollback node membership count differs.");}rollbackFlags(before,after,errors);}
+        }
+        function matchesType(node,type) {if(typeof node.inherits!=="function"){return false;}if(type==="light"){return node.inherits("DzLight");}if(type==="camera"){return node.inherits("DzCamera")&&!node.inherits("DzLight");}if(type==="bone"){return node.inherits("DzBone");}if(type==="figure"){return node.inherits("DzFigure");}return node.inherits("DzNode")&&!node.inherits("DzCamera")&&!node.inherits("DzBone")&&!node.inherits("DzFigure");}
+        function outcome(snapshot,entry,rollback) {
+            var errors=[],bindings={},after;
+            try{snapshot=valid(snapshot,entry);after=snapshotScene(snapshot.registry);unchanged(snapshot,after,rollback,errors);
+                if(!rollback){var added=[],i,j,expected=snapshot.expected.nodes,pending=expected.slice(0),used={},progress=true;
+                    for(i=0;i<after.nodes.length;i+=1){if(!own(snapshot.state.byKey,"$"+after.nodes[i].key)){added.push(after.nodes[i]);}}
+                    if(added.length!==expected.length){errors.push("Unexpected added node count: "+added.length+" expected "+expected.length);}
+                    while(pending.length&&progress){progress=false;for(i=pending.length-1;i>=0;i-=1){var d=pending[i],parent=d.parentId?bindings["$"+d.parentId]:null;if(d.parentId&&!parent){continue;}var candidates=[];
+                        for(j=0;j<added.length;j+=1){var actual=added[j];if(own(used,"$"+actual.key)||actual.parentKey!==(parent?parent.nativeKey:null)){continue;}var handle=snapshot.registry.handle(actual.key),identity=options.matchImportedIdentity?options.matchImportedIdentity(handle,d,entry)===true:actual.assetId===d.definitionId;
+                            if(!identity||!matchesType(handle,d.type)){continue;}var mismatch=[];
+                            if(d.placementMode==="native-reconstruction"){
+                                if(!options.reconstruction||!options.reconstruction.isPrepared(snapshot.expected,entry)||!options.reconstruction.matchesNode(snapshot.expected,entry,handle,d)){mismatch.push("Native reconstruction postconditions differ");}
+                            }else if(!options.figureStructureOnly){compare(d.world,actual.world,"expected placement",mismatch,options.placementAbsoluteTolerance||0.0001,options.placementRelativeTolerance||0.000001);}if(!mismatch.length){candidates.push(actual);}
+                        }
+                        if(candidates.length===1){var matched=candidates[0],sceneEditorCompat_native=snapshot.registry.handle(matched.key);if(d.record&&d.record.geometries&&d.record.geometries.length&&!matched.object){errors.push("Expected geometry object missing: "+d.id);}
+                            if(options.verifyImportedContent&&options.verifyImportedContent(sceneEditorCompat_native,d,entry)!==true){errors.push("Imported content verification failed: "+d.id);}
+                            bindings["$"+d.id]={stagedId:d.id,nativeKey:matched.key,definitionId:d.definitionId,parentId:d.parentId};used["$"+matched.key]=true;pending.splice(i,1);progress=true;
+                        }else if(candidates.length>1){errors.push("Ambiguous native binding for staged node "+d.id);pending.splice(i,1);progress=true;}
+                    }}
+                    for(i=0;i<pending.length;i+=1){errors.push("No unique native identity/parent match: "+pending[i].id);}
+                    if(snapshot.expected.rule==="profile-validated-native-reconstruction"){
+                        if(!options.reconstruction||!options.reconstruction.verifyBindings(snapshot.expected,entry,function(id){var binding=bindings["$"+id];return binding?snapshot.registry.handle(binding.nativeKey):null;})){errors.push("Native reconstruction relationships/controls were not verified");}
+                    }
+                    if(entry.built.idMap){for(var sourceId in entry.built.idMap){if(own(entry.built.idMap,sourceId)&&own(bindings,"$"+entry.built.idMap[sourceId])){bindings["$"+entry.built.idMap[sourceId]].savedId=sourceId.charAt(0)==="$"?sourceId.substring(1):sourceId;}}}
+                }
+            }catch(e){errors.push((e.code||"AUDIT")+": "+text(e.message||e));}
+            last={phase:rollback?"rollback":"outcome",ok:!errors.length,errors:errors,bindings:bindings,coverage:after?after.coverage:snapshot&&snapshot.state?snapshot.state.coverage:[],
+                dirtyFlagPolicy:rollback?"preserve-or-raise-v1":null,flagObservation:rollback&&after&&snapshot&&snapshot.state?rollbackFlags(snapshot.state,after,[]):null,selectionDeferred:true,selectionScope:"ApplyHost restores and verifies selection after this port",runtimeWorldScope:snapshot&&snapshot.expected&&snapshot.expected.runtimeWorldScope||"Independent numeric saved world matrices",nativeVerified:false};return !errors.length;
+        }
+        function comparableState(state,settings) {
+            var out=copy(state);delete out.byKey;delete out.coverage;delete out.propertiesObserved;
+            if(!settings.checkSelection){delete out.selection;}if(settings.checkDirty===false){delete out.dirty;delete out.assetDirty;}
+            out.nodes.sort(function(a,b){return a.key<b.key?-1:a.key>b.key?1:0;});return out;
+        }
+        function verifyUnchanged(token,settings) {
+            settings=settings||{};var errors=[],before,after,snapshot,flags=null;
+            try{snapshot=privateSnapshot(token);var observed=snapshotScene(snapshot.registry);
+                if(settings.rollbackFlags!==undefined){
+                    if(settings.rollbackFlags!=="preserve-or-raise-v1"||settings.project||settings.checkDirty===false){fail("AUDIT_FLAGS","Rollback flag policy cannot hide or project scene content.");}
+                    flags=rollbackFlags(snapshot.state,observed,errors);
+                }
+                compare(snapshot.state.time,observed.time,"scene time",errors,0,0);
+                before=comparableState(snapshot.state,settings);after=comparableState(observed,settings);
+                if(flags){delete before.dirty;delete after.dirty;delete before.assetDirty;delete after.assetDirty;}
+                if(settings.project){before=settings.project(before);after=settings.project(after);if(!before||typeof before!=="object"||!after||typeof after!=="object"){fail("AUDIT_PROJECT","Trusted projection must return observed-state objects.");}}
+                compare(before,after,"scene",errors,options.existingAbsoluteTolerance||0.000001,options.existingRelativeTolerance||0.00000001);
+            }catch(e){errors.push((e.code||"AUDIT")+": "+text(e.message||e));}
+            last={phase:"unchanged",ok:!errors.length,errors:errors,flagObservation:flags,coverage:snapshot?snapshot.state.coverage.slice(0):[],selectionDeferred:!settings.checkSelection,nativeVerified:false};return !errors.length;
+        }
+        return {preflight:preflight,captureAudit:captureAudit,verifyOutcome:function(s,e){return outcome(s,e,false);},verifyRollback:function(s,e){return outcome(s,e,true);},
+            captureScene:function(){if(typeof env.pointersAreEqual!=="function"){fail("AUDIT_IDENTITY","Native pointer comparison is required.");}var reg=registry(),s={token:{},registry:reg,state:snapshotScene(reg),entry:null,expected:null};issued.push(s);return s.token;},
+            readScene:function(token){return copy(privateSnapshot(token).state);},nativeKey:function(token,node){return privateSnapshot(token).registry.key(node);},verifyUnchanged:verifyUnchanged,
+            verifySelection:function(token){try{var snapshot=privateSnapshot(token),after=snapshotScene(snapshot.registry),errors=[];compare(snapshot.state.selection,after.selection,"selection",errors,0,0);return !errors.length;}catch(e){return false;}},
+            releaseSnapshot:function(token){for(var i=0;i<issued.length;i+=1){if(issued[i].token===token){if(options.reconstruction&&issued[i].expected){options.reconstruction.release(issued[i].expected);}issued.splice(i,1);return true;}}return false;},
+            lastReport:function(){return last;},sameNative:same,
+            coverage:function(){return {scope:"merge observed state and expected node identity/parent/world placement",nativeVerified:false,
+                limitations:["No exhaustive unrelated mesh buffers or private plugin/controller serialization.","Requested fitted/parent_in_place/constraint-driven placement needs a separate validated expected-placement implementation.","Added material/geometry payload semantics require verifyImportedContent for stronger claims.","Undo/redo history is outside the scene-state audit."]};}};
+    }
+    return {create:create};
+}());

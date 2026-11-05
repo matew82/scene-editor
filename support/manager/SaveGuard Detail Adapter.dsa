@@ -1,0 +1,296 @@
+// Draft lazy saved-copy inspection bridge. Inclusion/creation perform no I/O.
+// Depends on SaveGuard Full DUF.dsa + SaveGuard Selective.dsa. No scene mutation APIs.
+var SaveGuardDetailAdapter = (function () {
+    function own(o, k) { return !!o && Object.prototype.hasOwnProperty.call(o, k); }
+    function array(o) { return Object.prototype.toString.call(o) === "[object Array]"; }
+    function text(v) { return v === undefined || v === null ? "" : String(v); }
+    function fail(code, message) { var e = new Error(message); e.code = code; throw e; }
+    function copy(o) { var out = {}, k; for (k in o) { if (own(o, k)) { out[k] = o[k]; } } return out; }
+    function clipped(value, cap) { value = text(value); return value.length > cap ? value.substring(0, cap) + " ... [display shortened]" : value; }
+    function rowKey(index) { return "node-row:" + index; }
+    var duplicatePolicy = "daz-0.6.2.0-render-time-inspection-v1";
+    function pathKey(value) { var p = text(value).replace(/\\/g, "/"); return /^(?:[A-Za-z]:\/|\/\/)/.test(p) ? p.toLowerCase() : p; }
+    function detach(value) { return JSON.parse(JSON.stringify(value)); }
+    function semanticModel(catalog, view) {
+        var mapping = view.mapping, expectedNodes = {}, result = { rows: {}, nodes: [], render: [], tabs: {}, versionId: view.versionId,
+            inspectionToken: view.inspectionToken, lowMemoryMode: view.lowMemoryMode, selectiveAvailable: view.selectiveAvailable, catalogErrors: view.catalogErrors },
+            fields = ["id", "rowKey", "sourceId", "type", "selectable", "actionKeys", "catalogRowIndex", "catalogRenderIndex", "sceneExtraIndex"],
+            keys = ["cameras", "lights", "characters", "objects", "render"], key, row, entry, i, j, field, projected;
+        if (!mapping || !mapping.rowByKey || !mapping.nodeById || !mapping.renderById || !view.tabs) { fail("INSPECTION_CHANGED", "The retained inspection mapping is missing."); }
+        for (i = 0; i < catalog.rows.length; i += 1) {
+            row = catalog.rows[i]; key = "$" + text(row.id); expectedNodes[key] = own(expectedNodes, key) ? null : row;
+        }
+        for (key in expectedNodes) { if (own(expectedNodes, key) && (!own(mapping.nodeById, key) || mapping.nodeById[key] !== expectedNodes[key])) { fail("INSPECTION_CHANGED", "Saved node mapping identity changed."); } }
+        for (key in mapping.nodeById) { if (own(mapping.nodeById, key)) {
+            if (!own(expectedNodes, key) || mapping.nodeById[key] !== expectedNodes[key]) { fail("INSPECTION_CHANGED", "Saved node mapping identity changed."); }
+            result.nodes.push(key);
+        } }
+        for (key in mapping.rowByKey) { if (own(mapping.rowByKey, key)) {
+            entry = mapping.rowByKey[key]; if (!entry) { fail("INSPECTION_CHANGED", "A saved row mapping disappeared."); }
+            if (entry.kind === "node") {
+                if (entry.catalogRow !== catalog.rows[entry.catalogRowIndex] || entry.savedId !== entry.catalogRow.id) { fail("INSPECTION_CHANGED", "Saved row mapping identity changed."); }
+                result.rows[key] = { kind: entry.kind, catalogRowIndex: entry.catalogRowIndex, savedId: entry.savedId };
+            } else if (entry.kind === "render-setting") {
+                if (entry.record !== catalog.render[entry.catalogRenderIndex]) { fail("INSPECTION_CHANGED", "Saved render record mapping identity changed."); }
+                // The complete record is already fingerprinted in the document/catalog. Do not
+                // traverse that large shared block once again for every displayed render leaf.
+                result.rows[key] = { kind: entry.kind, catalogRenderIndex: entry.catalogRenderIndex, sceneExtraIndex: entry.sceneExtraIndex,
+                    locator: entry.locator, path: entry.path, value: entry.value };
+            } else { fail("INSPECTION_CHANGED", "Saved row mapping kind changed."); }
+        } }
+        for (key in mapping.renderById) { if (own(mapping.renderById, key)) {
+            if (!own(mapping.rowByKey, key) || mapping.renderById[key] !== mapping.rowByKey[key]) { fail("INSPECTION_CHANGED", "Saved render mapping identity changed."); }
+            result.render.push(key);
+        } }
+        for (i = 0; i < keys.length; i += 1) {
+            key = keys[i]; if (!array(view.tabs[key])) { fail("INSPECTION_CHANGED", "Saved detail rows changed."); } result.tabs[key] = [];
+            for (j = 0; j < view.tabs[key].length; j += 1) {
+                row = view.tabs[key][j]; if (!row || typeof row !== "object") { fail("INSPECTION_CHANGED", "A saved detail row disappeared."); } projected = {};
+                for (field = 0; field < fields.length; field += 1) { if (own(row, fields[field])) { projected[fields[field]] = row[fields[field]]; } }
+                result.tabs[key].push(projected);
+            }
+        }
+        return result;
+    }
+    function sourceEvidence(provider, getter, sourcePath) {
+        if (!getter) { return null; }
+        if (provider.readSourceEvidence !== getter) { fail("SOURCE_EVIDENCE_CHANGED", "The retained source evidence provider changed."); }
+        var evidence = getter.call(provider), source = evidence && evidence.source, fingerprint = source && source.fingerprint;
+        if (!evidence || evidence.schema !== 1 || evidence.issuer !== "SaveGuardFullDUF" || evidence.policy !== duplicatePolicy ||
+                !array(evidence.duplicates) || typeof evidence.fileVersion !== "string" || !source || pathKey(source.path) !== pathKey(sourcePath) ||
+                typeof source.physicalBytes !== "number" || !isFinite(source.physicalBytes) || source.physicalBytes <= 0 ||
+                !fingerprint || fingerprint.bytes !== source.physicalBytes || typeof fingerprint.crc32 !== "number" ||
+                Math.floor(fingerprint.crc32) !== fingerprint.crc32 || fingerprint.crc32 < 0 || fingerprint.crc32 > 4294967295) {
+            fail("SOURCE_EVIDENCE", "Reader serialization evidence does not identify the inspected DUF source.");
+        }
+        // Never accept a request/document flag as serialization provenance. The reader getter
+        // revalidates its privately retained source size, stamp and CRC before returning a clone.
+        return detach(evidence);
+    }
+    function presentation(catalog, doc, mode, versionId, token, guard, options, evidence) {
+        var tabs = { cameras: [], lights: [], characters: [], objects: [], render: [] }, keys = ["cameras", "lights", "characters", "objects", "render"],
+            mapping = { nodeById: {}, rowByKey: {}, renderById: {} }, presented = {}, presentedById = {}, wearables = {}, notes = {}, unknownEmission = 0, unknownTypes = 0,
+            unrecognizedFigures = 0, i, j, k, row, p, parent, extra = doc.scene && doc.scene.extra || [], renderPositions = [], renderDisplayCount = 0,
+            maxRenderRows = options.maxRenderRows || 5000, maxDisplayChars = options.maxDisplayChars || 512;
+        var propMotion,propResolver=null;try{propMotion=!(doc.scene&&doc.scene.nodes&&doc.scene.nodes.length)?{}:SaveGuardSelective.motionInventory(doc,{isCancelled:function(){guard();return false;},resolveAssetDocument:options.createSelectedResolver?function(file){if(!propResolver)propResolver=options.createSelectedResolver({lowMemoryMode:false,deepValidation:false,isCancelled:function(){guard();return false;}});return propResolver.resolveAssetDocument(file);}:null});}finally{if(propResolver)propResolver.close();}
+        function keyed(o, key) { return own(o, "$" + key) ? o["$" + key] : null; }
+        for (i = 0; i < catalog.rows.length; i += 1) {
+            guard(); row = catalog.rows[i]; k = "$" + text(row.id);
+            mapping.nodeById[k] = own(mapping.nodeById, k) ? null : row;
+            if (row.emissionUnknown) { unknownEmission += 1; }
+            if (row.type === "unknown") { unknownTypes += 1; }
+            if (row.category === "character" && !row.recognizedCharacter) { unrecognizedFigures += 1; }
+        }
+        for (i = 0; i < catalog.rows.length; i += 1) {
+            guard(); row = catalog.rows[i]; parent = keyed(mapping.nodeById, row.parentId);
+            p = { id: row.id, rowKey: rowKey(i), catalogRowIndex: i, label: text(row.label || row.internalName || row.id || "Unnamed saved object"),
+                name: text(row.internalName), type: text(row.type), category: text(row.category), parent: text(row.parentId), parentLabel: parent ? text(parent.label || parent.internalName || parent.id) : "",
+                source: text(row.sourceUrl || row.url), selectable: !!row.id && keyed(mapping.nodeById, row.id) === row && !catalog.errors.length,
+                value: row.emissive && row.category !== "light" ? row.category + " / confirmed saved emission" : text(row.category || row.type),
+                emissionUnknown: row.emissionUnknown === true, characterId: text(row.characterId), typeEvidence: text(row.typeEvidence) };
+            p.sourceId = row.id; p.actionKeys = [];
+            if (p.selectable) {
+                if (row.renderSettingsNode) { p.actionKeys.push("applyRenderSettings"); }
+                else if (row.category === "camera") { p.actionKeys.push("loadCamera"); }
+                else if (row.category === "light") { p.actionKeys.push("loadLight"); }
+                else if (row.recognizedCharacter) { p.actionKeys.push("loadCharacter", "applyPose"); }
+                else if (row.category === "wearable") { p.actionKeys.push("loadWearable"); }
+                else if (row.category !== "bone") { p.actionKeys.push("loadObject"); }
+                if(row.category!=="bone"&&row.category!=="camera"&&row.category!=="light"&&!row.renderSettingsNode){var motionKeys=row.type==="figure"?["applyPose","applyShape","applyTransforms","restoreSavedPose","restoreSavedShape"]:SaveGuardSelective.motionKeys(propMotion["$"+row.id]);for(var mk=0;mk<motionKeys.length;mk++)if(p.actionKeys.indexOf(motionKeys[mk])<0)p.actionKeys.push(motionKeys[mk]);}
+                if(row.geometryIds&&row.geometryIds.length&&row.materials&&row.materials.length&&row.category!=="bone")p.actionKeys.push("applyMaterials");
+                if ((row.recognizedCharacter || row.category === "wearable") && p.actionKeys.indexOf("loadObject") < 0) { p.actionKeys.push("loadObject"); }
+                if (row.emissive && row.category !== "light") { p.actionKeys.push("loadLight"); }
+            }
+            mapping.rowByKey["$" + p.rowKey] = { kind: "node", catalogRowIndex: i, catalogRow: row, savedId: row.id };
+            presented["$" + i] = p;
+            if (keyed(mapping.nodeById, row.id) === row) { presentedById["$" + row.id] = p; }
+            if (row.category === "wearable" && row.characterId) { k = "$" + row.characterId; if (!own(wearables, k)) { wearables[k] = []; } wearables[k].push(p); }
+        }
+        function tabRow(id) {
+            return keyed(presentedById, id);
+        }
+        for (i = 0; i < keys.length; i += 1) {
+            k = keys[i]; var ids = catalog.tabs[k] || [];
+            for (j = 0; j < ids.length; j += 1) { guard(); p = tabRow(ids[j]); if (p) { tabs[k].push(p); } }
+        }
+        // The domain tab lists character roots. Include each attached/fitted wearable
+        // under its saved, recognized root for this UI's Characters / wearables tab.
+        var visibleCharacters = [];
+        for (i = 0; i < tabs.characters.length; i += 1) {
+            p = tabs.characters[i]; visibleCharacters.push(p);
+            var attached = keyed(wearables, p.id) || []; for (j = 0; j < attached.length; j += 1) { visibleCharacters.push(attached[j]); }
+        }
+        tabs.characters = visibleCharacters;
+        for (i = 0; i < tabs.render.length; i += 1) {
+            p = tabs.render[i]; mapping.renderById["$" + p.rowKey] = mapping.rowByKey["$" + p.rowKey];
+        }
+        for (i = 0; i < extra.length; i += 1) { if (extra[i] && extra[i].type === "studio_render_settings") { renderPositions.push(i); } }
+        var omittedRender = 0;
+        function renderValue(v) {
+            if (v === null) { return "null"; }
+            if (typeof v === "string") { return clipped(v, maxDisplayChars); }
+            if (typeof v === "number" || typeof v === "boolean") { return String(v); }
+            if (!array(v)) { return clipped(JSON.stringify(v), maxDisplayChars); }
+            var pieces = [], vi; for (vi = 0; vi < v.length; vi += 1) { pieces.push(typeof v[vi] === "string" ? JSON.stringify(clipped(v[vi], maxDisplayChars)) : text(v[vi])); }
+            return clipped("[" + pieces.join(", ") + "]", maxDisplayChars);
+        }
+        function renderLeaf(block, blockIndex, extraIndex, path, value) {
+            if (renderDisplayCount >= maxRenderRows) { omittedRender += 1; return; }
+            renderDisplayCount += 1;
+            var id = "render-extra:" + extraIndex + ":" + JSON.stringify(path), shown = {
+                id: id, rowKey: id, label: path.length ? path.join(" / ") : "Saved render settings " + (blockIndex + 1), type: "saved render setting", category: "render",
+                value: renderValue(value), source: "scene.extra[" + extraIndex + "]", sourceId: "scene.extra[" + extraIndex + "]", selectable: !catalog.errors.length,
+                actionKeys: catalog.errors.length ? [] : ["applyRenderSettings"], catalogRenderIndex: blockIndex, sceneExtraIndex: extraIndex };
+            tabs.render.push(shown); mapping.renderById["$" + id] = { kind: "render-setting", catalogRenderIndex: blockIndex, sceneExtraIndex: extraIndex,
+                locator: shown.source, path: path.slice(0), value: value, record: block };
+            mapping.rowByKey["$" + id] = mapping.renderById["$" + id];
+        }
+        function renderWalk(block, blockIndex, extraIndex, v, path, depth) {
+            var pending = [{ value:v, path:path }], active = [];
+            while (pending.length) {
+                guard(); var frame = pending.pop();
+                if (frame.exit) { active.pop(); continue; }
+                v = frame.value; path = frame.path;
+                if (!v || typeof v !== "object") { renderLeaf(block, blockIndex, extraIndex, path, v); continue; }
+                if (active.indexOf(v) >= 0) { fail("DETAIL_CYCLE", "Cyclic render settings record."); }
+                var names = [], key, compact = array(v) && v.length <= 16, z;
+                if (compact) { for (z = 0; z < v.length; z += 1) { if (v[z] && typeof v[z] === "object") { compact = false; break; } } }
+                if (compact) { renderLeaf(block, blockIndex, extraIndex, path, v); continue; }
+                for (key in v) { if (own(v, key) && (path.length || key !== "type")) { names.push(key); } }
+                if (!names.length) { renderLeaf(block, blockIndex, extraIndex, path, v); continue; }
+                active.push(v); pending.push({exit:true});
+                for (z = names.length - 1; z >= 0; z -= 1) { key = names[z]; pending.push({value:v[key],path:path.concat([key])}); }
+            }
+        }
+        for (i = 0; i < catalog.render.length; i += 1) {
+            if (renderPositions[i] === undefined) { fail("DETAIL_RENDER", "Render settings cannot be mapped to an original record."); }
+            renderWalk(catalog.render[i], i, renderPositions[i], catalog.render[i], [], 0);
+        }
+        notes.cameras = "Saved camera instances; saved parents and definition identity are retained.";
+        notes.lights = "Saved lights and objects with confirmed saved emission. " + unknownEmission + " object(s) have unknown emission; unread shader defaults are not evaluated.";
+        notes.characters = "Recognized internal names and their saved attached/fitted wearables. " + unrecognizedFigures + " other figure root(s) remain in All Objects.";
+        notes.objects = "Saved non-bone objects. " + unknownTypes + " object type(s) remain unresolved; " + unknownEmission + " object(s) have unknown emission.";
+        notes.render = "Saved environment/tone nodes and " + catalog.render.length + " render-settings block(s)." + (omittedRender ? " " + omittedRender + " additional display rows omitted; complete settings remain in the provider." : "");
+        var serializationWarning = "", duplicates = evidence && evidence.duplicates || [];
+        if (duplicates.length) {
+            serializationWarning = "Saved render timing has duplicate serialized fields. The displayed values use the last occurrence for inspection only; their timing meaning is unresolved. Applying render settings requires a verified source-serialization profile.";
+            notes.render += " " + serializationWarning;
+            for (i = 0; i < tabs.render.length; i += 1) {
+                p = tabs.render[i]; p.serializationWarning = serializationWarning;
+                var mapped = mapping.rowByKey["$" + p.rowKey];
+                if (!mapped || mapped.kind !== "render-setting") { continue; }
+                for (j = 0; j < duplicates.length; j += 1) {
+                    var duplicate = duplicates[j];
+                    if (JSON.stringify(duplicate.path) !== JSON.stringify(["scene", "extra", mapped.sceneExtraIndex].concat(mapped.path))) { continue; }
+                    var rawValues = [], occurrence;
+                    for (k = 0; duplicate.occurrences && k < duplicate.occurrences.length; k += 1) {
+                        occurrence = duplicate.occurrences[k]; rawValues.push(clipped(occurrence.raw, maxDisplayChars));
+                    }
+                    p.serializedOccurrences = detach(duplicate.occurrences || []);
+                    p.value = "Serialized occurrences: " + rawValues.join("; ") + ". Inspection display: " + p.value + ". Timing meaning unresolved.";
+                }
+            }
+        }
+        if (catalog.errors.length) { for (i = 0; i < keys.length; i += 1) { notes[keys[i]] += " Selective operations blocked by " + catalog.errors.length + " catalog error(s)."; } }
+        return { summary: catalog.rows.length + " saved node(s); " + (mode ? "strict Low RAM catalog" : "native full-document parser") + "." +
+                (catalog.errors.length ? " Catalog issues: " + catalog.errors.join("; ") : "") + (serializationWarning ? " " + serializationWarning : ""),
+            versionId: versionId, inspectionToken: token, lowMemoryMode: mode, tabs: tabs, categoryNotes: notes, mapping: mapping,
+            catalogErrors: catalog.errors.slice(0), selectiveAvailable: !catalog.errors.length, source: "saved-DUF" };
+    }
+    function create(host) {
+        host = host || {}; var current = null, currentIntegrity = null, busy = false, closed = false, sequence = host.initialSequence || 0;
+        function safeClose(result) { if (result && result.provider && typeof result.provider.close === "function") { result.provider.close(); } }
+        function inspectVersion(version, request) {
+            request = request || {}; var candidate = null, state = null;
+            if (closed) { return { error: { code: "CLOSED", message: "Detail adapter is closed." } }; }
+            if (busy) { return { error: { code: "BUSY", message: "Another explicit DUF inspection is running." } }; }
+            busy = true;
+            try {
+                function guard() { if (closed || request.isCancelled && request.isCancelled() || host.isCancelled && host.isCancelled()) { fail("CANCELLED", "Saved DUF inspection cancelled."); } }
+                function phase(name) { guard(); if (host.onPhase) { host.onPhase(name); } if (request.onPhase) { request.onPhase(name); } guard(); }
+                phase("validate");
+                if (!version || version.inspectable !== true || (version.status !== "complete" && version.status !== "pre-save") || !version.id ||
+                        typeof version.scenePath !== "string" || !/^(?:[A-Za-z]:[\\/]|[\\/]{2}|\/)/.test(version.scenePath) || !/\.duf$/i.test(version.scenePath) || /[\x00-\x1f]/.test(version.scenePath)) {
+                    fail("VERSION", "Choose a complete or valid before-save copied DUF before inspection.");
+                }
+                if (host.validateVersion && host.validateVersion(version) !== true) { fail("VERSION_CHANGED", "The copied version is no longer eligible for inspection."); }
+                var prefs = host.readSettings ? host.readSettings() || {} : {}, mode = request.lowMemoryMode === undefined ? prefs.lowRamMode : request.lowMemoryMode;
+                if (mode === undefined) { mode = false; } if (typeof mode !== "boolean") { fail("CONFIG", "Low RAM Mode must be an explicit boolean."); }
+                var deep = (request.deepValidation === undefined ? prefs.deepValidation : request.deepValidation) === true;
+                var names = request.recognizedCharacterNames === undefined ? prefs.recognizedCharacterNames : request.recognizedCharacterNames;
+                if (names === undefined) { names = []; } if (!array(names)) { fail("CONFIG", "Recognized character names must be an array of internal names."); }
+                for (var ni = 0; ni < names.length; ni += 1) { if (typeof names[ni] !== "string" || !names[ni] || /[\x00-\x1f]/.test(names[ni])) { fail("CONFIG", "Invalid recognized character internal name."); } }
+                names = names.slice(0);
+                var reader = host.reader || (typeof SaveGuardFullDUF !== "undefined" ? SaveGuardFullDUF : null),
+                    domain = host.selective || (typeof SaveGuardSelective !== "undefined" ? SaveGuardSelective : null);
+                if (!reader || typeof reader.read !== "function" || !domain || typeof domain.fromProvider !== "function" || typeof domain.catalog !== "function") { fail("API", "Full-fidelity reader and selective catalog dependencies are required."); }
+                var integrityReader = typeof reader.structuralFingerprint === "function" ? reader : (typeof SaveGuardFullDUF !== "undefined" ? SaveGuardFullDUF : null),
+                    fingerprint = integrityReader && integrityReader.structuralFingerprint;
+                if (typeof fingerprint !== "function") { fail("API", "The bounded inspection integrity helper is required."); }
+                var readOptions = copy(host.readerOptions || {}), rk, local = request.readerOptions || {};
+                for (rk in local) { if (own(local, rk)) { readOptions[rk] = local[rk]; } }
+                // This separate compatibility adapter explicitly opts into inspection-only
+                // handling. Caller options cannot broaden or turn provenance into permission.
+                readOptions.duplicatePolicy = duplicatePolicy;
+                // FullDUF serialization provenance requires the strict duplicate policy and physical CRC.
+                // The optional deep flag still controls expensive model fingerprints below, not source provenance.
+                readOptions.deepValidation = true; readOptions.lowMemoryMode = mode; readOptions.isCancelled = function () { return closed || !!(request.isCancelled && request.isCancelled()) || !!(host.isCancelled && host.isCancelled()); };
+                readOptions.onProgress = function (bytes) { if (host.onProgress) { host.onProgress(bytes); } if (request.onProgress) { request.onProgress(bytes); } guard(); };
+                if (request.clock) { readOptions.clock = request.clock; } else if (host.clock) { readOptions.clock = host.clock; }
+                phase("read"); candidate = reader.read(version.scenePath, readOptions); guard();
+                if (!candidate || candidate.error || !candidate.provider) { fail(candidate && candidate.error && candidate.error.code || "READ", candidate && candidate.error && (candidate.error.message || candidate.error) || "Reader returned no complete provider."); }
+                var ownedProvider = candidate.provider, ownedReadResult = candidate, evidenceGetter = typeof ownedProvider.readSourceEvidence === "function" ? ownedProvider.readSourceEvidence : null,
+                    evidence = sourceEvidence(ownedProvider, evidenceGetter, version.scenePath), serializedEvidence = JSON.stringify(evidence), ownedPath = version.scenePath;
+                phase("catalog"); var doc = domain.fromProvider(candidate.provider); guard();
+                var catalog = domain.catalog(doc, { fullData: mode === false, characterNames: names }); guard();
+                var nextToken = sequence + 1, view = presentation(catalog, doc, mode, text(version.id), nextToken, guard, host, evidence), ownedMapping = view.mapping, integrityOptions = copy(readOptions);
+                integrityOptions.allowUndefined = true;
+                function signatures() { return [fingerprint(doc, integrityOptions).digest, fingerprint(catalog, integrityOptions).digest,
+                    fingerprint(semanticModel(catalog, view), integrityOptions).digest]; }
+                var baseline = deep ? signatures() : null;
+                function verifyIntegrity() {
+                    if (closed || current !== state || state.planningDocument !== doc || state.catalog !== catalog || state.view !== view ||
+                            view.mapping !== ownedMapping || state.versionId !== text(version.id) || state.scenePath !== ownedPath ||
+                            state.inspectionToken !== nextToken || state.lowMemoryMode !== mode || integrityReader.structuralFingerprint !== fingerprint) {
+                        fail("INSPECTION_CHANGED", "The retained inspection identity changed.");
+                    }
+                    if (deep && JSON.stringify(signatures()) !== JSON.stringify(baseline)) { fail("INSPECTION_CHANGED", "The retained saved-data inspection changed after it was created."); }
+                    return true;
+                }
+                state = { versionId: text(version.id), scenePath: version.scenePath, inspectionToken: nextToken, lowMemoryMode: mode, deepValidation: deep,
+                    readResult: candidate, provider: candidate.provider, planningDocument: doc, catalog: catalog, view: view,
+                    sourceEvidence: evidence === null ? null : detach(evidence),
+                    readSourceEvidence: function () {
+                        if (closed || current !== state || state.provider !== ownedProvider || state.readResult !== ownedReadResult ||
+                                ownedReadResult.provider !== ownedProvider || pathKey(state.scenePath) !== pathKey(ownedPath)) {
+                            fail("STALE_INSPECTION", "Serialization evidence belongs to a different or closed inspection.");
+                        }
+                        if (!evidenceGetter) { fail("SOURCE_EVIDENCE_UNAVAILABLE", "This reader provider does not supply verified serialization evidence."); }
+                        verifyIntegrity();
+                        var fresh = sourceEvidence(ownedProvider, evidenceGetter, ownedPath);
+                        if (JSON.stringify(fresh) !== serializedEvidence) { fail("SOURCE_EVIDENCE_CHANGED", "The source serialization evidence changed after inspection."); }
+                        return fresh;
+                    } };
+                phase("ready");
+                var previous = current; current = state; currentIntegrity = verifyIntegrity; sequence = nextToken; candidate = null;
+                if (previous) { try { safeClose(previous.readResult); } catch (closeError) { view.cleanupWarning = "Previous provider cleanup failed: " + String(closeError); } }
+                return view;
+            } catch (e) {
+                var cleanup = ""; if (candidate) { try { safeClose(candidate); } catch (closeFailure) { cleanup = " New provider cleanup failed: " + String(closeFailure); } }
+                return { error: { code: e.code || "DETAIL", message: text(e.message || e) + cleanup }, cancelled: e.code === "CANCELLED",
+                    previousAvailable: !!current, previousVersionId: current ? current.versionId : null };
+            } finally { busy = false; }
+        }
+        return { inspectVersion: inspectVersion,
+            current: function () { return current; },
+            getContext: function (versionId, token) {
+                if (closed || !current) { fail("NO_INSPECTION", "Explicitly inspect the selected copied DUF first."); }
+                if (text(versionId) !== current.versionId || token !== undefined && token !== current.inspectionToken) { fail("STALE_INSPECTION", "The selected version does not match the retained inspection."); }
+                currentIntegrity();
+                return current;
+            },
+            close: function () { if (!closed) { closed = true; var previous = current; current = null; currentIntegrity = null; if (previous) { safeClose(previous.readResult); } } },
+            isBusy: function () { return busy; } };
+    }
+    return { create: create };
+}());

@@ -1,0 +1,110 @@
+var SaveGuardMinimalNative=(function(){
+ function fail(s){throw Error(s);}
+ function eligible(r){return !!r&&(r.actionKey==='loadCharacter'||r.actionKey==='loadObject'&&(r.tabKey==='objects'||r.tabKey==='lights'));}
+ function resolver(){return {resolveExternal:function(){fail('Minimal import delegates external assets to DAZ');},resolveAssetDocument:function(){fail('External asset expansion prohibited');},verifyAll:function(){return true;},close:function(){}};}
+ // Clone only recognized smoothing records. Non-collision references keep their normal closure.
+ function collisionProjection(doc){
+  function own(o,k){return Object.prototype.hasOwnProperty.call(o,k);}
+  var out={},scene={},mods=doc.scene&&doc.scene.modifiers||[],next=mods.slice(0),links=[],i,j,k,x,record,extras,channels,channel,uri,copyRecord;
+  var animated={},animations=doc.scene&&doc.scene.animations||[];for(i=0;i<animations.length;i++){uri=SaveGuardMinimalSelector.parseURI(animations[i].url);if(uri.fragment)animated['$'+uri.fragment]=true;var paths=(uri.nodePath||'').split('/');for(j=0;j<paths.length;j++)if(paths[j])animated['$'+decodeURIComponent(paths[j])]=true;}
+  for(k in doc)if(own(doc,k))out[k]=doc[k];for(k in doc.scene)if(own(doc.scene,k))scene[k]=doc.scene[k];out.scene=scene;scene.modifiers=next;
+  for(i=0;i<mods.length;i++){
+   record=mods[i];extras=record.extra||[];var smoothing=false;for(j=0;j<extras.length;j++)if(extras[j].type==='studio/modifier/smoothing')smoothing=true;if(!smoothing||animated['$'+record.id]||animated['$'+SaveGuardMinimalSelector.parseURI(record.parent).fragment]||animated['$'+SaveGuardMinimalSelector.parseURI(record.url).fragment])continue;copyRecord=null;
+   for(j=0;j<extras.length;j++){if(extras[j].type!=='studio_modifier_channels')continue;channels=extras[j].channels||[];for(x=0;x<channels.length;x++){
+    channel=channels[x].channel;if(!channel||channel.id!=='Collision Item'||channel.type!=='node'||typeof channel.node!=='string'||!channel.node||channel.keys&&channel.keys.length||channel.animations&&channel.animations.length)continue;uri=SaveGuardMinimalSelector.parseURI(channel.node);if(uri.kind!=='local'||uri.nodePath||uri.query||!uri.fragment)continue;
+    if(!copyRecord){copyRecord=JSON.parse(JSON.stringify(record));next[i]=copyRecord;}var projected=copyRecord.extra[j].channels[x].channel;links.push({index:i,modifierId:record.id,targetId:uri.fragment,uri:channel.node,channel:projected});projected.node=null;
+   }}
+  }return {document:out,links:links};
+ }
+
+ // Preserve a fully saved ordinary point light that is owned by the selected character subtree.
+ // Reference/conform closure alone is not ownership. Cameras/render nodes remain specialized.
+ function ownedCharacterPointLight(doc,rows,row,selectedId,action){
+  if(action!=="loadCharacter"||row.type!=="light"||row.renderSettingsNode||row.id===selectedId)return false;
+  var map={},nodes={},defs={},i,cursor=row,seen={};
+  for(i=0;i<rows.length;i++)map["$"+rows[i].id]=rows[i];
+  if(!map["$"+selectedId]||map["$"+selectedId].type!=="figure")return false;
+  while(cursor&&cursor.id!==selectedId){if(seen["$"+cursor.id]||cursor.parentMode!=="parent"||!cursor.parentId)return false;seen["$"+cursor.id]=true;cursor=map["$"+cursor.parentId];if(cursor&&(cursor.type==="camera"||cursor.renderSettingsNode))return false;}
+  if(!cursor||cursor.id!==selectedId)return false;
+  for(i=0;i<(doc.scene.nodes||[]).length;i++)nodes["$"+doc.scene.nodes[i].id]=doc.scene.nodes[i];
+  for(i=0;i<(doc.node_library||[]).length;i++)defs["$"+doc.node_library[i].id]=doc.node_library[i];
+  var n=nodes["$"+row.id],u=SaveGuardMinimalSelector.parseURI(n&&n.url),d=u.kind==="local"&&!u.nodePath&&!u.query?defs["$"+u.fragment]:null;
+  return !!(d&&d.type==="light"&&d.point&&typeof d.point==="object"&&Object.prototype.toString.call(d.point)!=="[object Array]"&&!d.spot&&!d.directional&&!d.source&&!d.url);
+ }
+ function ownedScope(doc,id,p){
+  var rows=SaveGuardMinimalSelector.catalog(doc,{fullData:true}).rows,map={},i;for(i=0;i<rows.length;i++)map['$'+rows[i].id]=rows[i];
+  // The selected tree and exact explicit dependency references define ownership.
+  // A uniquely referenced saved node is retained even outside the selected tree;
+  // unrelated records never enter the planner's locator set.
+  for(i=0;i<p.nodeIds.length;i++){var row=map['$'+p.nodeIds[i]];if(!row)fail('Missing native closure node');if(row.renderSettingsNode)fail('Render settings require their specialized action');}
+ }
+ // Copy every authored member. Rewrite only parsed dependency fields or declared
+ // file channels; labels and ordinary string values are never filenames.
+ function resources(document,dependencies,options){
+  var fields={url:1,source:1,parent:1,parent_in_place:1,conform_target:1,node:1,geometry:1,uv_set:1,default_uv_set:1,image:1,image_file:1,output:1,current_camera:1,target:1,geometry_url:1,node_url:1},mapped={},stack=[],i;
+  function file(f){if(!f)return f;if(Object.prototype.hasOwnProperty.call(mapped,'$'+f))return mapped['$'+f];if(f.charAt(0)==='/')return f;if(options.isCancelled&&options.isCancelled()){var cancelled=Error('Cancelled');cancelled.code='CANCELLED';throw cancelled;}if(typeof options.resolveExternal!=='function')fail('Relative dependency requires the original source resolver: '+f);var r=options.resolveExternal(f,{uris:[f]});if(!r||r.exists!==true||typeof r.uri!=='string'||r.uri.charAt(0)!=='/'||r.uri.charAt(1)==='/'||/[?#\\\x00-\x1f]/.test(r.uri)||decodeURIComponent(r.uri).split('/').indexOf('..')>=0)fail('Relative dependency was not safely rebased: '+f);mapped['$'+f]=r.uri;return r.uri;}
+  function uri(s){if(typeof s!=='string'||!s)return s;var r=SaveGuardMinimalSelector.parseURI(s);if(r.kind==='unsafe')fail('Unsafe native resource reference');if(!r.file||r.file.charAt(0)==='/')return s;var replacement=file(r.file),offset=(r.scheme||'').length+(r.nodePath?r.nodePath.length+1:0);return s.substring(0,offset)+replacement+s.substring(offset+r.file.length);}
+  for(i=0;i<dependencies.length;i++)file(dependencies[i].file);
+  function enter(value){for(var si=0;si<stack.length;si++)if(stack[si].value===value)fail('Cyclic native record');var frame={value:value,out:Object.prototype.toString.call(value)==='[object Array]'?[]:{},keys:Object.keys(value),next:0};stack.push(frame);return frame.out;}
+  var result=enter(document);while(stack.length){var f=stack[stack.length-1];if(f.next===f.keys.length){stack.pop();continue;}var key=f.keys[f.next++],v=f.value[key];if(key==='__proto__')fail('Unsafe native member');if(typeof v==='number'&&!isFinite(v))fail('Nonfinite native value');if(typeof v==='string'&&fields[key]&&!SaveGuardMinimalSelector.isPuppeteerNodeName(stack,key))f.out[key]=uri(v);else if(f.value.type==='file'&&(key==='value'||key==='current_value'))f.out[key]=uri(v);else if(f.value.type==='file'&&key==='keys'){f.out[key]=[];for(i=0;i<v.length;i++){var pair=v[i].slice(0);pair[1]=uri(pair[1]);f.out[key].push(pair);}}else f.out[key]=v&&typeof v==='object'?enter(v):v;}
+  // Resolve a track declaration inside its exact saved owner, never by a global
+  // channel label (different nodes may reuse the same channel ID).
+  var records={},group,ri;for(group in result)if(/_library$/.test(group))for(ri=0;ri<result[group].length;ri++)records['$'+result[group][ri].id]=result[group][ri];var sceneGroups=['nodes','modifiers','materials','uvs'];for(var sg=0;sg<sceneGroups.length;sg++)for(ri=0;ri<(result.scene[sceneGroups[sg]]||[]).length;ri++){var record=result.scene[sceneGroups[sg]][ri];records['$'+record.id]=record;for(var gg=0;gg<(record.geometries||[]).length;gg++)records['$'+record.geometries[gg].id]=record.geometries[gg];}
+  function channel(record,segments){var value=record;for(var pi=0;value&&pi<segments.length;pi++){var segment=segments[pi];if(segment==='value'||segment==='current_value')return value.type?value:value.channel;if(Object.prototype.toString.call(value)==='[object Array]'){var matches=[];for(var ai=0;ai<value.length;ai++)if(value[ai]&&(value[ai].id===segment||value[ai].type===segment||value[ai].channel&&value[ai].channel.id===segment))matches.push(value[ai].channel||value[ai]);if(matches.length>1)fail('Ambiguous native file channel');value=matches[0];}else value=value[segment];}return null;}
+  function declared(record,segments){var seen={};while(record){if(seen['$'+record.id])fail('Native file-channel inheritance cycle');seen['$'+record.id]=true;var found=channel(record,segments);if(found)return found;var definition=SaveGuardMinimalSelector.parseURI(record.url||record.source||'');record=definition.kind==='local'?records['$'+definition.fragment]:null;}return null;}
+  for(i=0;i<(result.scene.animations||[]).length;i++){var track=result.scene.animations[i],ref=SaveGuardMinimalSelector.parseURI(track.url),segments=decodeURIComponent(ref.query||'').replace(/^\?/, '').split('/'),record=records['$'+ref.fragment],declaration=declared(record,segments);for(var ki=0;ki<track.keys.length;ki++){var value=track.keys[ki][1];if(declaration&&declaration.type==='file')track.keys[ki][1]=uri(value);else if(!declaration&&typeof value==='string'&&value.charAt(0)!=='#'&&!/^(id:|name:)/.test(value)&&(/[/\\]/.test(value)||/\.(duf|dsf|png|jpg|jpeg|exr|hdr|ies|tif|tiff)$/i.test(value)))fail('Native animated resource needs an exact saved channel declaration');}}
+  return result;
+ }
+ function compile(doc,id,action,options){
+   options=options||{};if(options.isCancelled&&options.isCancelled()){var cancelled=Error('Cancelled');cancelled.code='CANCELLED';throw cancelled;}
+   var channels=null,builtValue=null,projection=action==='loadObject'?collisionProjection(doc):{document:doc,links:[]},working=projection.document,planOptions={fullData:true,preserveAnimation:true,resolveAssetDocument:options.resolveAssetDocument,isCancelled:options.isCancelled},p=SaveGuardMinimalSelector.plan(working,[id],planOptions),omitted=[],i,m,src,dst,n;
+   if(!p.ready)fail(p.errors.join('; '));for(i=0;i<projection.links.length;i++){var link=projection.links[i];if(p.nodeIds.indexOf(link.targetId)>=0)link.channel.node=link.uri;else if(p.locators.indexOf('scene.modifiers['+link.index+']')>=0)omitted.push({modifierId:link.modifierId,targetId:link.targetId,channel:'Collision Item'});}if(projection.links.length)p=SaveGuardMinimalSelector.plan(working,[id],planOptions);
+   if(!p.ready)fail(p.errors.join('; '));if(!p.nodeIds.length)fail('Selected import is empty');
+   ownedScope(working,id,p);
+   var out={file_version:doc.file_version,asset_info:{id:'/SaveGuardExperiment/minimal-manager-subset.duf',type:'scene_subset',revision:'1.0'},scene:{}},ids={};
+   for(i=0;i<p.locators.length;i++){m=/^(scene\.)?([A-Za-z_]+)\[(\d+)\]$/.exec(p.locators[i]);if(!m)fail('Unsupported local locator');src=m[1]?working.scene:working;dst=m[1]?out.scene:out;if(!dst[m[2]])dst[m[2]]=[];dst[m[2]].push(src[m[2]][Number(m[3])]);}
+   if(out.scene.animations&&out.scene.animations.length){out.scene.extra=[];for(i=0;i<(doc.scene.extra||[]).length;i++)if(doc.scene.extra[i].animation_settings)out.scene.extra.push(doc.scene.extra[i]);}
+   // Native MergeFile consumes the original parent versus parent_in_place field;
+   // retain both transform values and complete saved ancestors without conversion.
+   out=resources(out,p.dependencies,options);
+   for(i=0;i<out.scene.nodes.length;i++){n=out.scene.nodes[i];ids['$'+n.id]=n.id;}
+   if(out.scene.animations&&out.scene.animations.length){var fps=null;for(i=0;i<(out.scene.extra||[]).length;i++)if(out.scene.extra[i].animation_settings)fps=out.scene.extra[i].animation_settings.current_frames_per_second;if(typeof fps!=='number'||!isFinite(fps)||fps<=0)fail('Animated minimal import requires a positive finite saved FPS');channels=SaveGuardAnimationGuard.nativeImported(out,SaveGuardMinimalSelector);}
+   if(omitted.length){p.warnings=p.warnings||[];p.warnings.push('Smoothing collision targets outside the selected subset were cleared; smoothing appearance can change.');}builtValue={document:out,idMap:ids,dependencies:p.dependencies,summary:p,omittedCollisionTargets:omitted};return {plan:p,built:builtValue,channels:channels};
+  }
+ function create(env,info,newStager){
+  if(!eligible(info.request))fail('Incompatible minimal-native action');
+  if(!SaveGuardNativeRuntime.hostSupported(env))fail('Native loading host build or required APIs unavailable');
+  if(info.context.lowMemoryMode===true)fail('Minimal-native candidate requires Low RAM OFF');
+  var provider=info.context.provider,source=info.context.planningDocument,closed=false,issued=[],stager=null,builtValue=null,channels=null;
+  function current(){if(closed||info.context.provider!==provider||info.context.planningDocument!==source||provider.verifySource()!==true)fail('Minimal source context changed');}
+  function cancel(fn){if(fn&&fn()===true){var e=Error('Cancelled');e.code='CANCELLED';throw e;}}
+  function nodeId(node){var id=node&&node.elementID;if(typeof id!=='number'||!isFinite(id)||id<0||Math.floor(id)!==id||id>9007199254740991)fail('Invalid native elementID property');return String(id);}
+  function own(o,k){return Object.prototype.hasOwnProperty.call(o,k);}
+  function identity(nodes){var map={},keys=[],i,k;for(i=0;i<nodes.length;i++){k='$'+nodeId(nodes[i]);if(own(map,k))fail('Duplicate native identity');map[k]=true;keys.push(k);}return {map:map,keys:keys};}
+  function missing(a,b){var out=[],i;for(i=0;i<a.keys.length;i++)if(!own(b.map,a.keys[i]))out.push(a.keys[i]);return out;}
+  function sameNodes(a,nodes){var b=identity(nodes);return a.keys.length===b.keys.length&&missing(a,b).length===0;}
+  function inventory(){return SaveGuardSceneInventory.nodes(env.Scene);}
+  function build(doc,id){current();if(doc!==source||id!==info.request.sourceId)fail("Minimal source selection changed");var result=info.context.loadCacheLease&&info.context.loadCacheLease.compiled;if(result)needCached(info.context.loadCacheLease);else result=compile(doc,id,info.request.actionKey,{resolveExternal:info.resolver&&info.resolver.resolveExternal,resolveAssetDocument:info.resolver&&info.resolver.resolveAssetDocument,isCancelled:info.isCancelled});builtValue=result.built;channels=result.channels;return result;}
+
+  function needCached(lease){if(!lease||lease.verify()!==true)fail("Cached payload changed");}
+  var api={minimalNative:true,buildMerge:build,computePlacement:function(b){if(b!==builtValue)fail('Unknown minimal payload');return {rule:'native-preserved-ancestors',nodes:[],byId:{}};},
+   prepare:function(req,cancelled){current();cancel(cancelled);if(req.kind!=='merge'||req.built!==builtValue)fail('Minimal request changed');
+    var start=new Date().getTime(),lease=info.context.loadCacheLease;if(!lease&&info.context.loadCache)lease=info.context.loadCache.publish(req.built,channels);var token;if(lease){needCached(lease);token={path:lease.path,cacheLease:lease};}else{if(!stager)stager=newStager();token=stager.stage(req.built.document,req.source.path);}var r={token:token,source:req.source,count:req.built.document.scene.nodes.length,used:false,stageMs:new Date().getTime()-start};issued.push(r);return r;},
+   apply:function(r,cancelled){var start=new Date().getTime(),report={ok:false,route:'minimal-native-output-v1',deepValidation:info.context.deepValidation===true,externalAssetReads:0,omittedCollisionTargets:builtValue.omittedCollisionTargets,outputAudited:false,restorationClaimed:false,mutationStarted:false},held=false,selectedBefore=[],primaryBefore=null,selectionCaptured=false,completed=false,io,mode;
+    function failure(e,field){var text=String(e.message||e);if(field)report[field]=text;if(!report.error)report.error=text;if(e.code==='CANCELLED')report.cancelled=true;}
+    function ownedSelection(){if(report.undoOwnershipLost||report.undoStateUnknown)fail('Owned Undo unavailable; selection retained');try{if(env.UndoStack.canPushItems()===true&&env.UndoStack.isInUndoRedo()===false)return;}catch(e){report.undoError=String(e);}report.undoOwnershipLost=true;report.undoStateUnknown=true;held=false;fail('Owned Undo unavailable; selection retained');}
+    function restoreSelection(){ownedSelection();if(env.Scene.selectAllNodes(false)===false)fail('Selection clear failed');for(var si=0;si<selectedBefore.length;si++){ownedSelection();if(selectedBefore[si].select(true)===false)fail('Selection restore failed');}ownedSelection();if(env.Scene.setPrimarySelection(primaryBefore)===false)fail('Selection restoration failed');report.selectionReturned=true;}
+    try{current();if(issued.indexOf(r)<0||r.used)fail('Unknown or consumed minimal receipt');r.used=true;cancel(cancelled);if(r.source.verify()!==true)fail('Source changed');if(info.resolver&&typeof info.resolver.verifyAll==='function'&&info.resolver.verifyAll()!==true)fail('Native dependencies changed');if((r.token.cacheLease?r.token.cacheLease.verify():stager.verify(r.token))!==true)fail('Staged payload changed');io=env.App.getAssetIOMgr();mode=env.DzAssetIOMgr.MergeFile;
+     if(typeof mode!=='number'||!isFinite(mode)||Math.floor(mode)!==mode||typeof env.DzAssetIOMgr.OpenNew!=='number'||typeof env.DzAssetIOMgr.DefaultMethod!=='number'||mode===env.DzAssetIOMgr.OpenNew||mode===env.DzAssetIOMgr.DefaultMethod)fail('Explicit MergeFile unavailable');
+     if(env.UndoStack.canPushItems()!==false||env.UndoStack.isInUndoRedo()!==false||env.Scene.isLoading()!==false||io.isReadingOrWriting()!==false)fail('Scene I/O or Undo busy');var timelinePlan=SaveGuardMinimalTimeline.plan(env.Scene,channels);SaveGuardMinimalTimeline.available(env,timelinePlan);report.timeline=timelinePlan;selectedBefore=SaveGuardSceneInventory.selected(env.Scene);primaryBefore=env.Scene.getPrimarySelection();selectionCaptured=true;cancel(cancelled);
+     report.undoBeginAttempted=true;env.beginUndo();held=true;if(env.UndoStack.canPushItems()!==true)fail('Owned Undo did not start');report.mutationStarted=true;SaveGuardMinimalTimeline.set(env,timelinePlan.after);cancel(cancelled);report.nativeExecuted=true;var t=new Date().getTime(),code=io.doLoad(r.token.path,mode);report.mergeMs=new Date().getTime()-t;report.nativeExecuted=true;report.nativeCode=code!==null&&code!==undefined&&typeof code.valueOf==='function'?code.valueOf():code;if(typeof report.nativeCode!=='number'||report.nativeCode!==0)fail('Native merge failed: '+String(code));ownedSelection();cancel(cancelled);completed=true;
+    }catch(e){failure(e);if(report.undoBeginAttempted&&!held&&!report.mutationStarted)report.undoStateUnknown=true;if(e.undoOwnershipLost)report.undoOwnershipLost=true;}
+    finally{
+     if(selectionCaptured&&report.mutationStarted)try{restoreSelection();}catch(selectionError){failure(selectionError,'selectionError');}
+     if(held)try{if(env.UndoStack.canPushItems()!==true||report.undoOwnershipLost){held=false;report.undoOwnershipLost=true;throw Error('Owned Undo unavailable; no blind accept/cancel');}held=false;report.undoAcceptAttempted=true;env.acceptUndo(report.error?'SaveGuard minimal import - failed attempt':'SaveGuard minimal native import');report.undoAccepted=true;if(env.UndoStack.canPushItems()!==false)fail('Undo did not return to idle');}catch(undoError){report.undoStateUnknown=true;failure(undoError,'undoError');}
+    }
+    report.ok=completed&&!report.error&&report.undoAccepted===true;report.status=report.ok?'applied':report.undoOwnershipLost||report.undoStateUnknown?'recovery-required':report.cancelled&&!report.mutationStarted?'cancelled':report.mutationStarted?'failed-attempt':'stopped';report.recoveryRequired=report.status==='recovery-required';report.message=report.ok?'Native content import completed.':report.error;if(report.ok&&builtValue.omittedCollisionTargets.length)report.message+=' Smoothing collision targets outside the selection were cleared; check the smoothing result.';report.totalMs=new Date().getTime()-start;report.stageMs=r&&r.stageMs;if(typeof print==='function')print('SG_MANAGER_MINIMAL_NATIVE '+JSON.stringify(report));return report;},
+   release:function(r){var at=issued.indexOf(r);if(at<0)return false;issued.splice(at,1);if(!r.token.cacheLease&&stager&&stager.release(r.token)!==true)fail('Owned staging cleanup returned false');return true;},close:function(){while(issued.length)api.release(issued[0]);closed=true;builtValue=null;}};return api;
+ }
+ return {compile:compile,eligible:eligible,resolver:resolver,create:create,ownedCharacterPointLight:ownedCharacterPointLight};
+}());

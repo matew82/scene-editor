@@ -1,0 +1,29 @@
+var SaveGuardPoseManager=(function(){
+    function need(value,message){if(!value)throw Error(message);}
+    function payload(plan){
+        var by={},animations=[],i,j,b,n,names,seen,axes=['x','y','z'];
+        for(i=0;i<plan.bones.length;i++)by['$'+plan.bones[i].sourceNodeId]=plan.bones[i];
+        for(i=0;i<plan.bones.length;i++){
+            b=plan.bones[i];n=b;names=[];seen={};
+            while(n){need(!seen['$'+n.sourceNodeId],'Cyclic pose path');seen['$'+n.sourceNodeId]=true;names.unshift(encodeURIComponent(n.internalName));if(n.parentSourceNodeId===plan.sourceFigureId)break;n=by['$'+n.parentSourceNodeId];need(n,'Missing pose ancestor');}
+            for(j=0;j<3;j++)animations.push({url:'name://@selection/'+names.join('/')+':?rotation/'+axes[j]+'/value',keys:[[0,b.rotation[j]]]});
+        }
+        return {file_version:'0.6.1.0',asset_info:{id:'/SaveGuard/static-pose.duf',type:'preset_pose'},scene:{animations:animations}};
+    }
+    function create(env,info,profile,newStager){
+        need(profile&&profile.verified===true&&profile.undoRedoVerified===true&&profile.actionKey==='applyPose'&&profile.buildId===String(env.buildId)&&profile.platform===env.platform&&SaveGuardNativeRuntime.hostSupported(env),'Static pose is not accepted on this host');
+        need(info.context.lowMemoryMode===false,'Static pose requires Low RAM OFF');
+        var context=info.context,doc=context.planningDocument,provider=context.provider,resolver=info.resolver,sourceId=info.request.sourceId,primary=env.Scene.getPrimarySelection(),closed=false,busy=false,plan=null,document=null,summary=null,stager=null,issued=[];
+        need(primary,'Select the matching destination figure or one of its bones');
+        function live(){need(!closed&&info.context===context&&context.planningDocument===doc&&context.provider===provider&&info.resolver===resolver&&info.request.sourceId===sourceId,'Pose context changed');need(provider.verifySource()===true&&resolver.verifyAll()===true,'Pose source or dependency changed');need(env.pointersAreEqual(env.Scene.getPrimarySelection(),primary)===true,'Pose target selection changed; prepare again');}
+        function cancelled(fn){if(fn&&fn()===true){var e=Error('Pose cancelled before import');e.code='CANCELLED';throw e;}}
+        var wrapper={
+            buildStaticPose:function(source,id,resolveAssetDocument){live();need(source===doc&&id===sourceId,'Pose source identity changed');plan=SaveGuardStaticPosePlan.extract(doc,id,SaveGuardSelective,{resolveAssetDocument:resolveAssetDocument});need(plan.bones.length>0,'Saved pose has no bones');document=payload(plan);summary={ready:true,errors:[],warnings:['Static bone rotations at frame 0 only. Existing single frame-0 rotation keys are replaced; animation tracks are rejected.'],rootTransformsIncluded:false,assignments:document.scene.animations,definitionFiles:plan.definitionFiles};return {plan:summary};},
+            prepare:function(request,isCancelled){live();cancelled(isCancelled);need(!busy&&request&&request.kind==='pose'&&request.plan===summary&&plan&&document,'Unknown pose preparation');need(request.source&&typeof request.source.verify==='function'&&request.source.verify()===true,'Pose source changed');if(!stager)stager=newStager();var token=stager.stage(document,request.source.path),receipt={kind:'pose',stagedPath:token.path};try{live();cancelled(isCancelled);issued.push({receipt:receipt,token:token,used:false,source:request.source});return receipt;}catch(e){stager.release(token);throw e;}},
+            apply:function(receipt,isCancelled){live();cancelled(isCancelled);need(!busy,'Pose action is busy');var item=null;for(var i=0;i<issued.length;i++)if(issued[i].receipt===receipt)item=issued[i];need(item&&!item.used,'Unknown or consumed pose receipt');item.used=true;need(item.source.verify()===true&&stager.verify(item.token)===true,'Pose payload changed');live();cancelled(isCancelled);busy=true;try{var nativeEnv={App:env.App,Scene:env.Scene,UndoStack:env.UndoStack,platform:env.platform,MergeFile:Number(env.DzAssetIOMgr.MergeFile),pointersAreEqual:env.pointersAreEqual,beginUndo:env.beginUndo,acceptUndo:env.acceptUndo,isCancelled:isCancelled,deepValidation:info.context.deepValidation===true};var result=SaveGuardPosePreset.run(nativeEnv,plan,document,item.token.path,false);result.nativeProfile=profile.evidenceId;result.nativeManagerWorkflowVerified=false;if(result.ok)result.message='DAZ loaded the static bone rotation preset at frame 0. Root placement is not included in the preset; DAZ result is not audited. Named Undo is available.';return result;}finally{busy=false;}},
+            release:function(receipt){for(var i=0;i<issued.length;i++)if(issued[i].receipt===receipt){stager.release(issued[i].token);issued.splice(i,1);return true;}return false;},
+            close:function(){if(closed)return;while(issued.length)wrapper.release(issued[0].receipt);closed=true;plan=null;document=null;summary=null;}
+        };return wrapper;
+    }
+    return {create:create,payload:payload};
+}());

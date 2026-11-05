@@ -1,0 +1,76 @@
+// Portable native I/O for owned metadata. Existing files are never overwritten.
+var SaveGuardStorage = (function () {
+    function normal(value) { return String(value || "").replace(/\\/g, "/"); }
+    function absolute(value) {
+        var path = normal(value);
+        if (!path || /[\u0000-\u001f]/.test(path) || !new DzFileInfo(path).isAbsolute()) { throw Error("An absolute local path is required"); }
+        return normal(new DzFileInfo(path).absoluteFilePath());
+    }
+    function stat(path) {
+        var f = new DzFileInfo(path);
+        return { exists: f.exists(), file: f.isFile(), directory: f.isDir(), size: Number(f.size()), modified: f.exists() ? Number(f.lastModified().getTime()) : null };
+    }
+    function ensureDirectory(path) {
+        path = absolute(path); var info = new DzFileInfo(path);
+        if (info.exists()) { if (!info.isDir()) { throw Error("Directory path identifies a file"); } return path; }
+        if (!new DzDir(info.path()).mkpath(info.fileName())) { throw Error("Cannot create directory: " + path); }
+        return path;
+    }
+    function ascii(value) { return JSON.stringify(value, null, 2).replace(/[\u007f-\uffff]/g, function (c) { return "\\u" + ("0000" + c.charCodeAt(0).toString(16)).slice(-4); }) + "\n"; }
+    function readText(path, limit) {
+        var before = stat(path), file = new DzFile(path), text;
+        if (!before.exists || !before.file || before.size < 1 || limit !== undefined && limit !== null && before.size > limit) { throw Error("Missing or oversized metadata: " + path); }
+        try {
+            if (!file.open(DzFile.ReadOnly)) { throw Error("Cannot open metadata"); }
+            text = file.read(before.size).convertToString();
+            if (file.error() !== DzFile.NoError || !file.eof()) { throw Error("Metadata read failed"); }
+        } finally { file.close(); }
+        var after = stat(path);
+        if (after.size !== before.size || after.modified !== before.modified) { throw Error("Metadata changed during read"); }
+        return String(text);
+    }
+    function readJSON(path, limit) { return JSON.parse(readText(path, limit).replace(/^\uFEFF/, "")); }
+    function writeJSONNew(folder, name, value) {
+        if (!/^[A-Za-z0-9._-]+\.json$/.test(name) || name.indexOf("..") >= 0) { throw Error("Invalid metadata filename"); }
+        return writeTextNew(folder, name, ascii(value));
+    }
+    // Retain the checkpoint Storage payload API required by SaveGuardLoadCache.
+    // ASCII escaping makes UTF-8 byte counts identical to the validated string length.
+    function compactJSON(value) { return JSON.stringify(value).replace(/[\u007f-\uffff]/g, function (c) { return "\\u" + ("0000" + c.charCodeAt(0).toString(16)).slice(-4); }) + "\n"; }
+    function writeTextNew(folder, name, text) {
+        if (!/^[A-Za-z0-9._-]+\.json$/.test(name) || name.indexOf("..") >= 0 || typeof text !== "string" || !text.length || /[\u0080-\uffff]/.test(text)) { throw Error("Invalid owned text payload"); }
+        folder = absolute(folder); var finalPath = folder + "/" + name, partialPath = finalPath + ".partial", file = new DzFile(partialPath);
+        function linked(path) { var info = new DzFileInfo(path); return typeof info.isSymLink === "function" && info.isSymLink(); }
+        if (new DzFileInfo(finalPath).exists() || file.exists() || linked(finalPath) || linked(partialPath)) { throw Error("Metadata destination already exists"); }
+        try {
+            if (!file.open(DzFile.WriteOnly)) { throw Error("Metadata open failed"); }
+            if (file.writeUtf8(text) !== text.length || file.error() !== DzFile.NoError) { throw Error("Metadata short write"); }
+        } finally { file.close(); }
+        if (linked(partialPath) || stat(partialPath).size !== text.length || readText(partialPath, text.length) !== text) { throw Error("Metadata readback failed"); }
+        if (new DzFileInfo(finalPath).exists() || linked(finalPath) || linked(partialPath) || !file.rename(finalPath)) { throw Error("Metadata publication failed"); }
+        return finalPath;
+    }
+    function reserve(root, prefix) {
+        root = ensureDirectory(root);
+        if (!/^[A-Za-z0-9_-]+$/.test(prefix)) { throw Error("Invalid owned directory prefix"); }
+        var parent = new DzDir(root);
+        for (var i = 0; ; i += 1) {
+            var name = prefix + "-" + new Date().getTime() + "-" + Math.floor(Math.random() * 1000000000) + "-" + i;
+            if (parent.mkdir(name)) { return normal(parent.filePath(name)); }
+            var attempted = new DzFileInfo(parent.filePath(name));
+            if (!attempted.exists() && !(typeof attempted.isSymLink === "function" && attempted.isSymLink())) { throw Error("Cannot create owned directory: " + parent.filePath(name)); }
+        }
+    }
+    function entries(root, limit) {
+        if (!new DzFileInfo(root).exists()) { return []; }
+        var values = new DzDir(root).entryList(), result = [];
+        for (var i = 0; i < values.length; i += 1) {
+            var name = String(values[i]); if (name === "." || name === "..") { continue; }
+            if (limit !== undefined && limit !== null && result.length >= limit) { throw Error("Directory entry limit exceeded"); }
+            result.push(name);
+        }
+        return result;
+    }
+    return { normal: normal, absolute: absolute, stat: stat, ensureDirectory: ensureDirectory, ascii: ascii,
+        compactJSON: compactJSON, writeTextNew: writeTextNew, readText: readText, readJSON: readJSON, writeJSONNew: writeJSONNew, reserve: reserve, entries: entries };
+}());

@@ -1,0 +1,157 @@
+// One full settings snapshot; legacy journals are read-only migration input.
+var SaveGuardSettings = (function () {
+    var keys = ["restoreDirectory", "backupDirectory", "protectedDirectory", "importLastDirectory", "loadCacheMode", "allVisibleCameraJpgs", "onlyCurrentViewWhenIray", "inspectionCache", "lowRamMode", "deepValidation", "inspectEmissives", "recognizedCharacterNames", "checkRenderSize", "checkCharacterDof", "myRenderWidth", "myRenderHeight", "warnOnSave", "saveDueMinutes", "saveOverdueMinutes", "showToolbarButton", "saveReminderMode", "startupExternalPath", "restoreDestination", "scenesPerPage"];
+    var figures = ["Genesis", "Genesis2Female", "Genesis2Male", "Genesis3Female", "Genesis3Male", "Genesis8Female", "Genesis8Male", "Genesis8_1Female", "Genesis8_1Male", "Genesis9"];
+    function own(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+    function clone(o) { return JSON.parse(JSON.stringify(o)); }
+    function equal(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
+    function knownFields(value) {
+        if (!value || Object.prototype.toString.call(value) !== '[object Object]') { throw Error('Settings must be an object'); }
+        for (var key in value) if (own(value,key) && keys.indexOf(key)<0) { throw Error('Unknown settings field: '+key); }
+    }
+    function validate(value, pathCheck) {
+        knownFields(value); var out = {}, i, name, seen = {};
+        if (!value || typeof value !== "object") { throw Error("Settings must be an object"); }
+        for (i = 0; i < 2; i += 1) {
+            name = keys[i]; if (typeof value[name] !== "string" || !value[name] || value[name].length > 4096 || /[\u0000-\u001f]/.test(value[name])) { throw Error("Choose a valid " + name); }
+            out[name] = pathCheck ? pathCheck(value[name]) : value[name].replace(/\\/g, "/");
+        }
+        out.loadCacheMode=value.loadCacheMode===undefined?"protected":value.loadCacheMode;if(["off","protected","all"].indexOf(out.loadCacheMode)<0)throw Error("Choose a valid Load Cache mode");
+        out.importLastDirectory=value.importLastDirectory===undefined?'':value.importLastDirectory;if(typeof out.importLastDirectory!=='string'||out.importLastDirectory.length>4096||/[\u0000-\u001f]/.test(out.importLastDirectory))throw Error('Invalid import picker directory');
+        out.protectedDirectory=value.protectedDirectory===undefined?"":value.protectedDirectory;
+        if(typeof out.protectedDirectory!=="string"||out.protectedDirectory.length>4096||/[\u0000-\u001f]/.test(out.protectedDirectory))throw Error("Choose a valid Protected directory");
+        if(out.protectedDirectory)out.protectedDirectory=pathCheck?pathCheck(out.protectedDirectory):out.protectedDirectory.replace(/\\/g,"/");
+        if (typeof value.allVisibleCameraJpgs !== "boolean" || typeof value.lowRamMode !== "boolean") { throw Error("Settings switches must be yes/no values"); }
+        if (value.deepValidation !== undefined && typeof value.deepValidation !== "boolean") { throw Error("Deep validation must be a yes/no value"); }
+        out.deepValidation = value.deepValidation === true;if(value.inspectionCache!==undefined&&typeof value.inspectionCache!=="boolean")throw Error("Inspection cache must be yes/no");out.inspectionCache=value.inspectionCache!==false;
+        out.restoreDestination=value.restoreDestination===undefined?"specified":value.restoreDestination;if(out.restoreDestination!=="specified"&&out.restoreDestination!=="original")throw Error("Invalid restore destination mode");
+        if(value.inspectEmissives!==undefined&&typeof value.inspectEmissives!=='boolean')throw Error('Inspect Emissives must be a yes/no value');out.inspectEmissives=true;
+        if(value.onlyCurrentViewWhenIray!==undefined&&typeof value.onlyCurrentViewWhenIray!=="boolean")throw Error("Save only current view when Iray must be yes/no");out.onlyCurrentViewWhenIray=value.onlyCurrentViewWhenIray === true;
+        out.allVisibleCameraJpgs = value.allVisibleCameraJpgs; out.lowRamMode = value.lowRamMode;
+        if (Object.prototype.toString.call(value.recognizedCharacterNames) !== "[object Array]") { throw Error("Character names must be a list of internal names"); }
+        out.recognizedCharacterNames = [];
+        for (i = 0; i < value.recognizedCharacterNames.length; i += 1) {
+            name = String(value.recognizedCharacterNames[i]).replace(/^\s+|\s+$/g, "");
+            if (!name || /[\u0000-\u001f]/.test(name)) { throw Error("Invalid character internal name"); }
+            if (!own(seen, "$" + name)) { seen["$" + name] = true; out.recognizedCharacterNames.push(name); }
+        }
+        if(value.showToolbarButton!==undefined&&typeof value.showToolbarButton!=="boolean")throw Error("Show SaveGuard Toolbar Button must be yes/no");out.showToolbarButton=value.showToolbarButton!==false;
+        out.saveReminderMode=value.saveReminderMode===undefined?"off":value.saveReminderMode;if(out.saveReminderMode!=="off"&&out.saveReminderMode!=="yellow"&&out.saveReminderMode!=="red")throw Error("Invalid save reminder mode");
+        out.startupExternalPath=value.startupExternalPath===undefined?"":value.startupExternalPath;if(typeof out.startupExternalPath!=="string"||out.startupExternalPath.length>4096||/[\u0000-\u001f]/.test(out.startupExternalPath))throw Error("Invalid external startup path");
+        function integer(key,fallback){var v=value[key]===undefined?fallback:value[key];if(typeof v!=="number"||!isFinite(v)||Math.floor(v)!==v||v<1||v>2147483647)throw Error("Invalid positive integer: "+key);return v;}
+        if(value.checkRenderSize!==undefined&&typeof value.checkRenderSize!=="boolean"||value.warnOnSave!==undefined&&typeof value.warnOnSave!=="boolean")throw Error("Warning switches must be yes/no");if(value.checkCharacterDof!==undefined&&typeof value.checkCharacterDof!=="boolean")throw Error("Character DOF switch must be yes/no");out.checkCharacterDof=value.checkCharacterDof!==false;out.checkRenderSize=value.checkRenderSize===true;out.warnOnSave=value.warnOnSave===true;out.myRenderWidth=integer("myRenderWidth",1920);out.myRenderHeight=integer("myRenderHeight",1080);out.saveDueMinutes=integer("saveDueMinutes",10);out.saveOverdueMinutes=integer("saveOverdueMinutes",30);if(out.saveOverdueMinutes<=out.saveDueMinutes)throw Error("Overdue minutes must exceed due minutes");
+        out.scenesPerPage=integer("scenesPerPage",40);if(out.scenesPerPage>10000)throw Error("Scenes per page must be from 1 to 10000");
+        return out;
+    }
+    function defaults(projectRoot, restoreDirectory) {
+        var parent = SaveGuardStorage.normal(new DzFileInfo(projectRoot).path());
+        return validate({ restoreDirectory: restoreDirectory || parent + "/Restored Scenes", backupDirectory: parent + "/Scenes Copies",
+            allVisibleCameraJpgs: false, onlyCurrentViewWhenIray: false, lowRamMode: false, deepValidation: false, inspectEmissives: true, recognizedCharacterNames: figures.slice(0) }, SaveGuardStorage.absolute);
+    }
+    function replay(initial, records, pathCheck) {
+        var values = validate(initial, pathCheck), warnings = [], revision = "defaults", lastTime = 0;
+        records = records.slice(0); records.sort(function (a, b) { return a.created - b.created || (a.revision < b.revision ? -1 : a.revision > b.revision ? 1 : 0); });
+        for (var i = 0; i < records.length; i += 1) {
+            var r = records[i], candidate = clone(values), key, n;
+            if (r.schema !== 1 || typeof r.revision !== "string" || !/^[A-Za-z0-9_-]+$/.test(r.revision) || typeof r.created !== "number" || !isFinite(r.created) || !r.delta || !r.previous) { throw Error("Invalid settings revision"); }
+            for (key in r.delta) { if (own(r.delta, key)) {
+                var accepted = false; for (n = 0; n < keys.length; n += 1) { if (key === keys[n]) { accepted = true; } }
+                if (!accepted) { throw Error("Unknown settings field"); }
+                if (!equal(values[key], r.previous[key]) && !equal(values[key], r.delta[key])) { warnings.push("Concurrent update to " + key + "; the latest journal revision is displayed."); }
+                candidate[key] = r.delta[key];
+            } }
+            values = validate(candidate, pathCheck); revision = r.revision; lastTime = Math.max(lastTime, r.created);
+        }
+        return { values: values, revision: revision, warnings: warnings, lastTime: lastTime };
+    }
+    function patch(base, desired, current, pathCheck) {
+        knownFields(desired); var merged=clone(base.values), inputKey;
+        for(inputKey in desired)if(own(desired,inputKey))merged[inputKey]=desired[inputKey];
+        desired = validate(merged, pathCheck); var delta = {}, previous = {}, count = 0;
+        for (var i = 0; i < keys.length; i += 1) {
+            var key = keys[i]; if (equal(base.values[key], desired[key]) || equal(current.values[key], desired[key])) { continue; }
+            if (!equal(base.values[key], current.values[key]) && !equal(desired[key], current.values[key])) { throw Error("Settings changed in another session: " + key + ". Reopen Settings before saving."); }
+            delta[key] = clone(desired[key]); previous[key] = clone(current.values[key]); count += 1;
+        }
+        return { delta: delta, previous: previous, count: count };
+    }
+    function host(projectRoot) {
+        projectRoot = SaveGuardStorage.absolute(projectRoot); var storage = SaveGuardStorage, root = projectRoot + "/settings", restore = "";
+        var ini = storage.normal(new DzFileInfo(projectRoot).path()) + "/dazsaveguard.ini";
+        try {
+            if (storage.stat(ini).file) {
+                var lines = storage.readText(ini,settingsBytes(ini)).split(/\r?\n/);
+                for (var i = 0; i < lines.length; i += 1) { var m = /^track=(.+)$/i.exec(lines[i]); if (m && storage.stat(m[1]).directory) { restore = storage.absolute(m[1]); break; } }
+            }
+        } catch (ignoredLegacy) {}
+        var initial = defaults(projectRoot, restore);
+        function settingsBytes(file){safeFile(file);var size=storage.stat(file).size;if(typeof size!=='number'||!isFinite(size)||Math.floor(size)!==size||size<0||size>9007199254740991)throw Error('Invalid settings file size');return Math.max(1,size);}
+        function pathCheck(path) { var resolved = storage.absolute(path), st = storage.stat(resolved); if (st.exists && !st.directory) { throw Error("Directory path points to a file"); } return resolved; }
+        function loadLegacy() {
+            var names = storage.entries(root, 5000), records = [], warnings = [];
+            for (var i = 0; i < names.length; i += 1) {
+                if (!/^settings-[0-9]+-[0-9]+-[0-9]+$/.test(names[i])) { continue; }
+                var file = root + "/" + names[i] + "/complete.json";
+                if (!storage.stat(file).file) { continue; }
+                try { var record = storage.readJSON(file,settingsBytes(file)); if (record.revision !== names[i]) { throw Error("Revision identity mismatch"); } records.push(record); }
+                catch (e) { warnings.push("Ignored unreadable settings revision " + names[i] + ": " + String(e)); }
+            }
+            var result = replay(initial, records, pathCheck); result.warnings = warnings.concat(result.warnings); result.storageFormat='legacy'; return result;
+        }
+        var single=root+'/settings.json',lockName='.settings-write-lock',lock=root+'/'+lockName,previous=lock+'/previous.json',nextFile=lock+'/next.json';
+        function safeFile(file){var info=new DzFileInfo(file);if(info.isSymLink()||!info.isFile())throw Error('Invalid settings file: '+file);}
+        function readSingle(file){
+            safeFile(file);var record=storage.readJSON(file,settingsBytes(file)),allowed={schema:true,revision:true,created:true,values:true},key;
+            if(!record||record.schema!==2||typeof record.revision!=='string'||!/^[A-Za-z0-9_-]+$/.test(record.revision)||typeof record.created!=='number'||!isFinite(record.created))throw Error('Invalid settings snapshot');
+            for(key in record)if(own(record,key)&&!own(allowed,key))throw Error('Unknown settings snapshot member: '+key);
+            knownFields(record.values);for(var i=0;i<keys.length;i++)if(keys[i]!=='checkCharacterDof'&&keys[i]!=='onlyCurrentViewWhenIray'&&!own(record.values,keys[i]))throw Error('Incomplete settings snapshot: '+keys[i]);
+            return {values:validate(record.values,pathCheck),revision:record.revision,lastTime:record.created,warnings:[],storageFormat:'single'};
+        }
+        function load(lockedLegacy){
+            var info=new DzFileInfo(root);if(info.exists()&&(!info.isDir()||info.isSymLink()))throw Error('Invalid settings directory');
+            for(var attempt=0;attempt<3;attempt++){
+                if(new DzFileInfo(single).exists())try{return readSingle(single);}catch(currentError){if(new DzFileInfo(single).exists())throw currentError;continue;}
+                var held=new DzFileInfo(lock);if(held.exists()&&(!held.isDir()||held.isSymLink()))throw Error('Invalid settings lock');
+                if(new DzFileInfo(previous).exists())try{var prior=readSingle(previous);prior.warnings.push('An interrupted settings write retained the previous snapshot; close other sessions and recover the settings lock before saving.');return prior;}catch(previousError){if(new DzFileInfo(previous).exists())throw previousError;continue;}
+                if(new DzFileInfo(single).exists())continue;
+                if(held.exists()&&lockedLegacy!==true)throw Error('Settings publication is incomplete; retained data must be recovered before reading defaults.');
+                return loadLegacy();
+            }
+            throw Error('Settings changed during reading; retry after the current save finishes.');
+        }
+        function save(value, base) {
+            if (!base || !base.values) { throw Error('Settings must be opened before saving'); }
+            knownFields(value);var rootInfo=new DzFileInfo(root);if(rootInfo.exists()&&(!rootInfo.isDir()||rootInfo.isSymLink()))throw Error('Invalid settings directory');storage.ensureDirectory(root);
+            var dir=new DzDir(root);if(!dir.mkdir(lockName))throw Error('Settings are busy or an interrupted write needs recovery. No settings were replaced.');
+            var oldMoved=false,published=false,expected=null,oldText=null,keepLock=false,saved=null,primary=null;
+            function ownedLock(){var f=new DzFileInfo(lock);if(!f.exists()||!f.isDir()||f.isSymLink())throw Error('Settings lock ownership changed');}
+            function removeExact(file,text){if(!new DzFileInfo(file).exists())return;safeFile(file);if(storage.readText(file,settingsBytes(file))!==text)throw Error('Changed settings staging retained: '+file);if(new DzFile(file).remove()!==true)throw Error('Settings staging cleanup failed: '+file);}
+            try{
+                ownedLock();var current=load(true),change=patch(base,value,current,pathCheck),values=clone(current.values),key;
+                if(!change.count&&current.storageFormat==='single'){saved=current;}
+                else{
+                    for(key in change.delta)if(own(change.delta,key))values[key]=change.delta[key];
+                    var stamp=Math.max(new Date().getTime(),current.lastTime+1),record={schema:2,revision:'settings-'+stamp+'-'+Math.floor(Math.random()*1000000000),created:stamp,values:validate(values,pathCheck)};
+                    expected=storage.ascii(record);
+                    storage.writeJSONNew(lock,'next.json',record);ownedLock();if(storage.readText(nextFile,settingsBytes(nextFile))!==expected)throw Error('Settings staging changed');
+                    // DzFile.rename does not overwrite. Keep the previous complete snapshot until publication verifies.
+                    if(new DzFileInfo(single).exists()){safeFile(single);oldText=storage.readText(single,settingsBytes(single));if(new DzFile(single).rename(previous)!==true)throw Error('Cannot retain previous settings');oldMoved=true;}
+                    if(new DzFile(nextFile).rename(single)!==true)throw Error('Cannot publish settings snapshot');published=true;
+                    if(storage.readText(single,settingsBytes(single))!==expected)throw Error('Published settings readback differs');saved=readSingle(single);
+                    if(oldMoved){removeExact(previous,oldText);oldMoved=false;}
+                }
+            }catch(e){primary=e;
+                if(saved&&published){saved.warnings.push('Settings saved, but recovery files remain: '+String(e));saved.cleanupPending=true;keepLock=true;primary=null;}else try{ownedLock();if(!published&&oldMoved&&!new DzFileInfo(single).exists()){if(new DzFile(previous).rename(single)!==true)throw Error('Previous settings could not be restored');oldMoved=false;}
+                    if(!published&&expected){removeExact(nextFile,expected);var partial=nextFile+'.partial';if(new DzFileInfo(partial).exists()){safeFile(partial);var text=storage.readText(partial,settingsBytes(partial));if(expected.indexOf(text)!==0)throw Error('Unrecognized settings partial retained');removeExact(partial,text);}}
+                    if(published||oldMoved)keepLock=true;
+                }catch(recovery){keepLock=true;primary.recoveryError=String(recovery);}
+            }finally{
+                if(!keepLock)try{ownedLock();if(dir.rmdir(lockName)!==true)throw Error('Settings lock cleanup failed');}catch(cleanup){if(primary)primary.cleanupError=String(cleanup);else if(saved){saved.warnings.push('Settings saved or unchanged, but the write lock remains: '+String(cleanup));saved.cleanupPending=true;}else primary=cleanup;}
+            }
+            if(primary)throw primary;saved.committed=published;
+            try{var status=App.getCallBackMgr().getCallBack('matew.SaveGuard.Status.v1.tick');if(status){status.setDynamicProperty('prefs',JSON.stringify(saved.values));var refresh=new DzScript();if(!refresh.loadFromFile(projectRoot+'/support/SaveGuard Toolbar Refresh.dsa',false))throw Error('Toolbar refresh helper unavailable');refresh.execute();}}catch(ignoreStatus){try{print('[SaveGuard] Settings toolbar refresh: '+String(ignoreStatus));}catch(ignoreDiagnostic){}}if(saved.warnings.length)try{print('[SaveGuard] Settings: '+saved.warnings.join(' '));}catch(ignoreDiagnostic){}return saved;
+        }
+        return { load: load, save: save, defaults: clone(initial), root: root };
+    }
+    return { validate: validate, defaults: defaults, replay: replay, patch: patch, host: host, characterNames: figures.slice(0) };
+}());

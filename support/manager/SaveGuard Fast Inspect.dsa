@@ -1,0 +1,378 @@
+var SaveGuardFastInspect = (function () {
+    var hexCharacters={},hexIndex;for(hexIndex=0;hexIndex<256;hexIndex++){var hexKey=hexIndex.toString(16);if(hexKey.length<2)hexKey="0"+hexKey;hexCharacters[hexKey]=String.fromCharCode(hexIndex);}
+    function fail(code, text) { var e = new Error(text); e.code = code; throw e; }
+    function own(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+    function isArray(o) { return Object.prototype.toString.call(o) === "[object Array]"; }
+    function object(o) { return o && typeof o === "object" && !isArray(o); }
+    function timeBudget(options){var n=options.maxMillis;if(n===undefined)return null;if(typeof n!=='number'||!isFinite(n)||n<=0)fail('CONFIG','Invalid explicit inspection time budget');return n;}
+    // Preview-only: known local hierarchy restrictions, not a dependency authorization.
+    function renderHelper(node) {
+        if(!node)return false;if(node.renderSettingsNode===true)return true;
+        var extra=node.extra||[];for(var i=0;i<extra.length;i++)if(extra[i]&&/^studio\/node\/(environment|tone_mapper)$/.test(extra[i].type||""))return true;
+        return false;
+    }
+    function genericLoadEligibility(doc) {
+        var nodes=doc.scene&&doc.scene.nodes||[],defs=doc.node_library||[],by={},definitions={},needs=[],dependents=[],special=[],typeCache={},i,j,key;
+        function local(value){if(typeof value!=="string")return null;var at=value.indexOf("#");if(at<0||value.indexOf("#",at+1)>=0||value.indexOf("?")>=0)return null;var id;try{id=decodeURIComponent(value.substring(at+1));}catch(e){return null;}return at===0||value.substring(0,at)===id+":"?id:null;}
+        function definitionType(d){var chain=[],seen={},current=d,t="";while(current){var k="$"+current.id;if(own(typeCache,k)){t=typeCache[k];break;}if(current.type){t=current.type;break;}if(seen[k])break;seen[k]=true;chain.push(k);var ref=local(current.source||current.url);current=ref===null?null:definitions["$"+ref];}for(var c=0;c<chain.length;c++)typeCache[chain[c]]=t;return t;}
+        for(i=0;i<defs.length;i++){key="$"+defs[i].id;definitions[key]=own(definitions,key)?null:defs[i];}
+        for(i=0;i<nodes.length;i++){key="$"+nodes[i].id;by[key]=own(by,key)?null:i;needs[i]=[];dependents[i]=[];}
+        for(i=0;i<nodes.length;i++){
+            var n=nodes[i],ref=local(n.url||n.source),d=ref===null?null:definitions["$"+ref],type=definitionType(d)||n.preview&&n.preview.type||n.type||"unknown";
+            special[i]=type==="camera"||type==="light"||renderHelper(n)||renderHelper(d);
+            var refs=[n.parent||n.parent_in_place,n.conform_target];
+            for(j=0;j<refs.length;j++){ref=local(refs[j]);key="$"+ref;if(ref!==null&&own(by,key)&&by[key]!==null){var parent=by[key];if(needs[i].indexOf(parent)<0){needs[i].push(parent);dependents[parent].push(i);}}}
+        }
+        function spread(seed,edges){var marked=[],queue=[],head=0;for(var k=0;k<nodes.length;k++){marked[k]=!!seed[k];if(marked[k])queue.push(k);}while(head<queue.length){var from=queue[head++],next=edges[from];for(var q=0;q<next.length;q++)if(!marked[next[q]]){marked[next[q]]=true;queue.push(next[q]);}}return marked;}
+        // Required ancestors/targets first; then selected descendants/followers.
+        // Do not spread a sibling's restriction back down from its ordinary parent.
+        var required=spread(special,dependents),blocked=spread(required,needs);
+        return {blocked:blocked,specialized:special};
+    }
+
+
+    function collectMotionInventory(doc,options) {
+        options=options||{};var nodes=doc.scene&&doc.scene.nodes||[],mods=doc.scene&&doc.scene.modifiers||[],defs={},owners={},out={},figures={},i,j,n;
+        function localId(v){if(typeof v!=="string"||v.charAt(0)!=="#")return null;try{return decodeURIComponent(v.substring(1));}catch(e){return null;}}
+        for(i=0;i<(doc.modifier_library||[]).length;i++){n=doc.modifier_library[i];defs["$"+n.id]=n;}
+        function mark(id,role){var entry=out["$"+id];if(!entry)return;if(role==="Modifier/Pose")entry.pose=true;if(role==="Modifier/Shape")entry.shape=true;}
+        var nodeDefs={};for(i=0;i<(doc.node_library||[]).length;i++)nodeDefs["$"+doc.node_library[i].id]=doc.node_library[i];
+        for(i=0;i<nodes.length;i++){n=nodes[i];var nd=nodeDefs["$"+localId(n.url)];figures["$"+n.id]=(n.type||n.preview&&n.preview.type||nd&&nd.type)==="figure";out["$"+n.id]={transforms:true,pose:false,shape:false};owners["$"+n.id]=n.id;for(j=0;j<(n.geometries||[]).length;j++)owners["$"+n.geometries[j].id]=n.id;
+            for(var ei=0;ei<(n.extra||[]).length;ei++){var ex=n.extra[ei];if(ex.type!=="studio_node_channels")continue;for(var ci=0;ci<(ex.channels||[]).length;ci++){var record=ex.channels[ci],channel=record.channel,presentation=record.presentation||channel&&channel.presentation;if(channel&&channel.type==="float"&&presentation)mark(n.id,presentation.type);}}
+        }
+        var definitionResolver=null;
+        for(i=0;i<mods.length;i++){if(options.isCancelled&&options.isCancelled()){var cancelled=Error('Motion inspection cancelled');cancelled.code='CANCELLED';throw cancelled;}n=mods[i];var owner=owners["$"+localId(n.parent)],role=n.presentation&&n.presentation.type,d=n,seen={};while(!role&&d&&localId(d.url)!==null){var id=localId(d.url);if(seen["$"+id])break;seen["$"+id]=true;d=defs["$"+id];role=d&&d.presentation&&d.presentation.type;}
+            if(owner&&!figures["$"+owner]&&!role&&n.channel&&(n.channel.type==='float'||typeof n.channel.current_value==='number')&&typeof options.resolveAssetDocument==='function'){
+                try{if(!definitionResolver)definitionResolver=SaveGuardShapePlan.definitions(doc,options.resolveAssetDocument,options.isCancelled);var resolved=definitionResolver.get(n.url,'modifier_library');role=resolved.presentation&&resolved.presentation.type;}catch(error){if(error.code==='CANCELLED')throw error;out["$"+owner].unclassified=true;}
+            }
+            if(owner)mark(owner,role);}
+        return out;
+    }
+    function collectMotionKeys(evidence){var result=[];if(!evidence)return result;if(evidence.transforms)result.push("applyTransforms");if(evidence.pose)result.push("applyPose","restoreSavedPose");if(evidence.shape)result.push("applyShape","restoreSavedShape");return result;}
+    function scan(text, major, options, clock) {
+        var start = clock(), normalizationStart = start, bytes = text.length, retained = 0;
+        var limits = {defaultExpandedBytes:9007199254740991,maxBytes:9007199254740991,maxMillis:timeBudget(options)};
+        var budget = options.maxBytes === undefined ? limits.defaultExpandedBytes : options.maxBytes;
+        if (typeof budget !== "number" || !isFinite(budget) || budget <= 0 || Math.floor(budget) !== budget || budget > limits.maxBytes) {
+            fail("CONFIG", "Unsupported expanded scan budget.");
+        }
+        function guard() {
+            if (options.isCancelled && options.isCancelled()) { fail("CANCELLED", "Inspection cancelled."); }
+            if (limits.maxMillis!==null && clock() - start > limits.maxMillis) { fail("LIMIT_TIME", "Inspection time limit reached."); }
+        }
+        guard();
+        if (text.length > budget) { fail("LIMIT_BYTES", "Native tree text exceeds the selected expanded scan budget."); }
+        // Convert raw DAZ4 UTF-8 BEFORE JSON.parse: decoding selected strings
+        // afterwards would corrupt mixtures of raw UTF-8 and JSON Unicode escapes.
+        if (major === 4) {
+            var byteRuns = /[^\x00-\x7f]+/g, byteMatch, sourcePosition = 0, normalizedPieces = [], pieceBatches = [];
+            var decodeRun = function (run) {
+                guard(); var position = 0, out = [], pieces = [], b, cp, n, min, c;
+                while (position < run.length) {
+                    b = run.charCodeAt(position++);
+                    if (b >= 194 && b <= 223) { cp = b & 31; n = 1; min = 128; }
+                    else if (b >= 224 && b <= 239) { cp = b & 15; n = 2; min = 2048; }
+                    else if (b >= 240 && b <= 244) { cp = b & 7; n = 3; min = 65536; }
+                    else { fail("UTF8", "Invalid native UTF-8 leading byte."); }
+                    while (n-- > 0) {
+                        c = run.charCodeAt(position++);
+                        if (!(c >= 128 && c <= 191)) { fail("UTF8", "Invalid native UTF-8 continuation."); }
+                        cp = cp * 64 + (c & 63);
+                    }
+                    if (cp < min || cp > 1114111 || cp >= 55296 && cp <= 57343) { fail("UTF8", "Invalid native UTF-8 code point."); }
+                    if (cp < 65536) { out.push(String.fromCharCode(cp)); }
+                    else { cp -= 65536; out.push(String.fromCharCode(55296 + (cp >> 10), 56320 + (cp & 1023))); }
+                    if (out.length >= 4096) { guard(); pieces.push(out.join("")); out = []; }
+                }
+                pieces.push(out.join("")); return pieces.join("");
+            };
+            while ((byteMatch = byteRuns.exec(text)) !== null) {
+                normalizedPieces.push(text.substring(sourcePosition, byteMatch.index), decodeRun(byteMatch[0]));
+                sourcePosition = byteRuns.lastIndex;
+                if (normalizedPieces.length >= 4096) { pieceBatches.push(normalizedPieces.join("")); normalizedPieces = []; }
+            }
+            if (sourcePosition) {
+                normalizedPieces.push(text.substring(sourcePosition)); pieceBatches.push(normalizedPieces.join("")); text = pieceBatches.join("");
+            }
+            byteMatch = null; normalizedPieces = null; pieceBatches = null;
+        } else {
+            // Count UTF-8 bytes and validate only non-ASCII runs; no second full
+            // byte buffer is built for DAZ6's Unicode return value.
+            var runs = /[\u0080-\uffff]+/g, match, i, cp, low, nextGuard;
+            while ((match = runs.exec(text)) !== null) {
+                guard();
+                nextGuard = 4096;
+                for (i = 0; i < match[0].length; i += 1) {
+                    if (i >= nextGuard) { guard(); nextGuard = i + 4096; }
+                    cp = match[0].charCodeAt(i);
+                    if (cp >= 55296 && cp <= 56319) {
+                        low = match[0].charCodeAt(++i);
+                        if (!(low >= 56320 && low <= 57343)) { fail("UTF8", "Unpaired native Unicode surrogate."); }
+                        bytes += 2;
+                    } else if (cp >= 56320 && cp <= 57343) { fail("UTF8", "Unpaired native Unicode surrogate."); }
+                    else { bytes += cp < 2048 ? 1 : 2; }
+                }
+            }
+        }
+        if (bytes > budget) { fail("LIMIT_BYTES", "Expanded UTF-8 size exceeds the fast-path budget."); }
+        var normalizationMillis = clock() - normalizationStart;
+        guard(); if (text.charCodeAt(0) === 65279) { text = text.substring(1); }
+        var parseStart = clock(), source;
+        try { source = JSON.parse(text); }
+        catch (e) { fail("JSON_PARSE", "Native JSON parsing failed: " + String(e) + ". No alternate parser was attempted."); }
+        var parseMillis = clock() - parseStart; text = null; guard();
+        if (!object(source)) { fail("JSON", "DUF root must be an object."); }
+        var projectionStart = clock();
+        function scalar(input,names) {
+            if(!object(input))fail("JSON","Metadata record must be an object");
+            var out={},i,k,v;
+            for(i=0;i<names.length;i+=1){k=names[i];if(!own(input,k))continue;v=input[k];if(v!==null&&typeof v==="object")fail("JSON","Compound metadata field "+k);if(typeof v==="string"){retained+=v.length;}out[k]=v;}
+            return out;
+        }
+        var cameraDefinitions={},rawDefinitions=source.node_library||[];
+        for(var ci=0;ci<rawDefinitions.length;ci++){var cd=rawDefinitions[ci];if(cd&&cd.type==="camera")cameraDefinitions["$"+cd.id]=true;}
+        function cameraMarker(n){
+            var local=null;if(typeof n.url==="string"&&n.url.charAt(0)==="#")try{local=decodeURIComponent(n.url.substring(1));}catch(e){}
+            if(n.type!=="camera"&&!(n.preview&&n.preview.type==="camera")&&!(local!==null&&cameraDefinitions["$"+local]))return undefined;
+            if(!isArray(n.extra))return undefined;var found=false,result;
+            for(var ei=0;ei<n.extra.length;ei++){var ex=n.extra[ei];if(!ex||ex.type!=="studio_node_channels"||!isArray(ex.channels))continue;
+                for(var cj=0;cj<ex.channels.length;cj++){var channel=ex.channels[cj]&&ex.channels[cj].channel;if(!channel||channel.id!=="Visible")continue;if(found)return null;found=true;var value=own(channel,"current_value")?channel.current_value:channel.value;result=typeof value==="boolean"?value:null;}
+            }return found?result:undefined;
+        }
+        var motionInventory=collectMotionInventory(source,{resolveAssetDocument:options.motionResolveAssetDocument,isCancelled:options.isCancelled});
+        function nodes(input){
+            if(!isArray(input))fail("LIMIT_NODES","Invalid node metadata list");
+            var out=[],i,j,n,r,a;
+            for(i=0;i<input.length;i+=1){if(i%128===0)guard();n=input[i];r=scalar(n,["id","name","label","url","type","parent","parent_in_place","source","conform_target"]);
+                var lightKinds=[],lightKeys=["directional","spot","point"];for(var lk=0;lk<lightKeys.length;lk++)if(own(n,lightKeys[lk])&&object(n[lightKeys[lk]]))lightKinds.push(lightKeys[lk]);if(lightKinds.length)r.lightKind=lightKinds.length===1?(lightKinds[0]==="directional"?"distant":lightKinds[0]):"unknown";
+                if(motionInventory["$"+n.id])r.motionEvidence=motionInventory["$"+n.id];if(isArray(n.geometries))r.geometryCount=n.geometries.length;if(n.preview)r.preview=scalar(n.preview,["type"]);if(n.presentation)r.presentation=scalar(n.presentation,["type"]);
+                r.isGeometryShell=false;for(var shellIndex=0;shellIndex<(n.extra||[]).length;shellIndex++)if(n.extra[shellIndex].type==='studio/node/shell')r.isGeometryShell=true;r.renderSettingsNode=renderHelper(n);var marker=cameraMarker(n);if(marker!==undefined)r.cameraOwnVisible=marker;out.push(r);
+            }return out;
+        }
+        var doc=scalar(source,["file_version"]);if(!object(source.scene))fail("JSON","Saved scene required");
+        doc.node_library=nodes(source.node_library||[]);doc.scene={nodes:nodes(source.scene.nodes||[]),extra:[]};
+        doc.savedSceneInfo=typeof SaveGuardDerivedMetadata!=="undefined"?SaveGuardDerivedMetadata.savedScene(source):null;
+        doc.renderInfo=typeof SaveGuardRenderSettings!=="undefined"?SaveGuardRenderSettings.metadata(source):null;
+        try{var renderProjection=SaveGuardRenderSettings.selectSource(source);doc.renderDetails={rows:SaveGuardRenderSettings.rows(renderProjection),renderInfo:doc.renderInfo};renderProjection=null;}catch(renderError){doc.renderDetails={error:String(renderError.message||renderError)};}
+        doc.timeline=typeof SaveGuardTimeline!=="undefined"?SaveGuardTimeline.fromDUF(source.scene):null;
+        if(options.motionDependencies&&doc.scene.nodes.length)doc.scene.nodes[0].motionDependencies=options.motionDependencies;var emissionStart=clock();{try{doc.emission=SaveGuardEmissives.collect(source,guard);}catch(ee){if(ee.code==='CANCELLED'||ee.code==='LIMIT_TIME')throw ee;doc.emission={objects:[],error:String(ee.message||ee)};}}var emissionMillis=clock()-emissionStart;source=null;guard();return {document:doc,stats:{emissionMillis:emissionMillis,inspectEmissives:true,parseMillis:parseMillis,normalizationMillis:normalizationMillis,projectionMillis:clock()-projectionStart,expandedBytes:bytes,retainedChars:retained,metadataOnly:true}};
+    }
+    // Disposable display-only cache. Never authorizes an action or contains native handles.
+    var cacheSchema="inspection-projection-import-3-20261025";
+    function cacheHash(s){var a=2166136261,b=5381;for(var i=0;i<s.length;i++){a=((a^s.charCodeAt(i))*16777619)>>>0;b=((b*33)^s.charCodeAt(i))>>>0;}return a.toString(16)+"-"+b.toString(16);}
+    function cacheValid(d){return SaveGuardInspectionCache.validDocument(d);}
+    function cacheSlot(path,before,options){
+        if(options.inspectionCache===false||!options.cacheDirectory||!options.cacheVersionId||!options.cacheManifest)return null;
+        var header={schema:cacheSchema,backup:String(options.cacheVersionId),source:before.canonical,bytes:before.bytes,stamp:before.stamp,sceneEditorEvidence:options.cacheManifest&&options.cacheManifest.sceneEditor?options.cacheManifest.sceneEditor.signature:null,dazMajor:parseInt(String(App.longVersionString),10),options:{motionEvidenceVersion:1,inspectEmissives:true,recognizedCharacterNames:options.recognizedCharacterNames||[],deepValidation:options.deepValidation===true}};
+        var text=JSON.stringify(header),root=String(options.cacheDirectory).replace(/\\/g,'/');return {root:root,name:"inspection-projection-daz"+header.dazMajor+".json",header:header,key:text,manifest:options.cacheManifest};
+    }
+    function cacheLog(event,data){try{if(typeof print==='function')print('Scene Editor inspection cache '+event+': '+JSON.stringify(data));}catch(ignoreCacheLog){}}
+    function cacheRead(slot){var started=new Date().getTime();if(!slot){cacheLog('BYPASS',{reason:'disabled or missing cache context'});return null;}var names=[slot.name,SaveGuardInspectionCache.filename];for(var i=0;i<names.length;i++){var name=names[i];try{if(!new DzFileInfo(slot.root+'/'+name).exists()){cacheLog('MISS',{file:name,reason:'missing',millis:new Date().getTime()-started});continue;}var r=SaveGuardInspectionCache.readOwned(slot.root,slot.manifest,name).value,diff=[],k;for(k in slot.header)if(own(slot.header,k)&&JSON.stringify(r.header[k])!==JSON.stringify(slot.header[k]))diff.push(k);var oldEvidence=r.header.sceneEditorEvidence,newEvidence=slot.header.sceneEditorEvidence,legacyEvidence=diff.length===1&&diff[0]==='sceneEditorEvidence'&&newEvidence&&newEvidence.schema==='scene-editor-source-metadata-1'&&oldEvidence&&((oldEvidence.schema==='scene-editor-source-sha256-1'&&oldEvidence.bytes===slot.header.bytes&&typeof oldEvidence.sha256==='string'&&/^[0-9a-f]{64}$/.test(oldEvidence.sha256))||(oldEvidence.meta&&oldEvidence.meta.bytes===slot.header.bytes&&Object.prototype.toString.call(oldEvidence.chunks)==='[object Array]'));if(legacyEvidence){var compatibleHeader={},hk;for(hk in r.header)if(own(r.header,hk))compatibleHeader[hk]=hk==='sceneEditorEvidence'?newEvidence:r.header[hk];legacyEvidence=JSON.stringify(compatibleHeader)===slot.key;}if(JSON.stringify(r.header)!==slot.key&&!legacyEvidence){cacheLog('MISS',{file:name,reason:'header mismatch',fields:diff,millis:new Date().getTime()-started});continue;}if(!cacheValid(r.document)){cacheLog('MISS',{file:name,reason:'invalid document',millis:new Date().getTime()-started});continue;}cacheLog('HIT',{file:name,legacy:i===1,legacyEvidence:!!legacyEvidence,millis:new Date().getTime()-started});var dependencyNodes=r.document.scene.nodes,dependencies=dependencyNodes.length&&dependencyNodes[0].motionDependencies||[],fresh=true;for(var dni=0;dni<dependencyNodes.length;dni++)if(dependencyNodes[dni].motionEvidence&&dependencyNodes[dni].motionEvidence.unclassified)return null;for(var di=0;di<dependencies.length;di++){var dependency=dependencies[di],dependencyInfo=new DzFileInfo(dependency.path);if(!dependencyInfo.exists()||String(dependencyInfo.canonicalFilePath())!==dependency.path||Number(dependencyInfo.size())!==dependency.bytes||String(dependencyInfo.lastModified())!==dependency.stamp){fresh=false;break;}}if(!fresh)return null;return r.document;}catch(e){cacheLog('MISS',{file:name,reason:'read invalid',error:String(e.message||e),millis:new Date().getTime()-started});}}return null;}
+    function cacheWrite(slot,doc){var started=new Date().getTime();try{if(!slot||!cacheValid(doc)){cacheLog('WRITE_SKIPPED',{reason:!slot?'disabled or missing cache context':'invalid document'});return false;}var written=SaveGuardInspectionCache.write(slot.root,slot.manifest,slot.header,doc,slot.name);cacheLog('PUBLISHED',{file:slot.name,millis:new Date().getTime()-started});return written;}catch(e){cacheLog('WRITE_FAILED',{file:slot&&slot.name,reason:String(e.message||e),millis:new Date().getTime()-started});return false;}}
+
+    function listStreamUtf8Failure(result){
+        if(!result||!result.error)return false;
+        var code=String(result.error.code||"");
+        if(code==="UTF8")return true;
+        var message=String(result.error.message||"");
+        return /Invalid UTF-8|UTF-8 leading byte|UTF-8 continuation|UTF-8 code point|Truncated UTF-8/i.test(message);
+    }
+    function fullInspectOptions(options){
+        return {inspectionCache:options.inspectionCache,cacheDirectory:options.cacheDirectory,cacheVersionId:options.cacheVersionId,cacheManifest:options.cacheManifest,cacheRefresh:options.cacheRefresh,deepValidation:options.deepValidation===true,recognizedCharacterNames:options.recognizedCharacterNames,isCancelled:options.isCancelled,onProgress:options.onProgress,clock:options.clock,maxBytes:options.maxBytes,maxMillis:options.maxMillis,lowMemoryMode:false,metadataIndex:false};
+    }
+    function read(path,options){
+        options=options||{};
+        // Manager preview uses a metadata index (ListStream) without allocating a full JSON DOM.
+        // Explicit prefs.lowRamMode still routes here; never auto-enable Low RAM. Full document
+        // parse remains for ActionController / callers that omit metadataIndex.
+        if(options.lowMemoryMode===true||options.metadataIndex===true){
+            if(options.onSourceRead)options.onSourceRead();
+            var indexed=SaveGuardListStream.read(path,options);
+            // ListStream (strict byte UTF-8 / bounded skip) can fail or return unusable
+            // indexes on DUFs FastInspect's DAZ4/6 native read + normalize/parse accepts.
+            // When Low RAM is off, fall back so preview TreeViews populate like pre-pass2.
+            // Explicit lowMemoryMode keeps the ListStream error (no silent full parse).
+            if(indexed&&indexed.error&&options.metadataIndex===true&&options.lowMemoryMode!==true){
+                var indexFail=String(indexed.error&&indexed.error.message||indexed.error&&indexed.error.code||"LISTSTREAM");
+                if(typeof print==="function")print("SaveGuard metadata index failed; falling back to FastInspect normalize/parse: "+indexFail+(listStreamUtf8Failure(indexed)?" (utf8)":""));
+                var fallback=read(path,fullInspectOptions(options));
+                if(fallback&&!fallback.error&&fallback.stats){
+                    fallback.stats.metadataIndex=false;
+                    fallback.stats.metadataIndexUtf8Fallback=listStreamUtf8Failure(indexed);
+                    fallback.stats.metadataIndexFallback=true;
+                    fallback.stats.metadataIndexUtf8Error=indexFail;
+                }
+                return fallback;
+            }
+            if(indexed&&!indexed.error&&options.metadataIndex===true&&options.lowMemoryMode!==true&&indexed.provider){
+                // Render tab can request a one-shot full projection without flipping Low RAM prefs.
+                var indexProvider=indexed.provider, renderCache=null, renderClosed=false;
+                indexed.provider={
+                    listRecords:function(group){return indexProvider.listRecords(group);},
+                    verifySource:function(){return indexProvider.verifySource();},
+                    readRecords:function(){return indexProvider.readRecords();},
+                    renderDetails:function(){
+                        if(renderClosed)fail("CLOSED","Metadata provider closed");
+                        if(renderCache)return renderCache;
+                        var full=read(path,fullInspectOptions(options));
+                        if(full.error){renderCache={error:full.error.message||String(full.error.code||full.error)};return renderCache;}
+                        try{renderCache=full.provider.renderDetails();full.provider.close();}catch(renderError){try{if(full.provider)full.provider.close();}catch(ignoreClose){}renderCache={error:String(renderError.message||renderError)};}
+                        return renderCache;
+                    },
+                    close:function(){renderClosed=true;renderCache=null;indexProvider.close();}
+                };
+            }
+            return indexed;
+        }
+        var raw=null,gz=null,clock=options.clock||function(){return new Date().getTime();},start=clock(),before,parsed;
+        function stat(){var i=new DzFileInfo(path);if(!i.exists()||!i.isFile()||!i.isReadable())fail("FILE_ACCESS","Saved DUF unavailable");var modified=i.lastModified();return {canonical:String(i.canonicalFilePath()).replace(/\\/g,"/"),bytes:Number(i.size()),stamp:typeof modified.getTime==="function"?String(modified.getTime()):String(modified)};}
+        var maxMillis=timeBudget(options);function guard(){if(options.isCancelled&&options.isCancelled())fail("CANCELLED","Inspection cancelled");if(maxMillis!==null&&clock()-start>maxMillis)fail("LIMIT_TIME","Fast inspection exceeded its time budget");}
+        function phase(name){guard();if(typeof print==="function")print("SaveGuard fast inspect: "+name);if(options.onProgress)options.onProgress(0);guard();}
+        function sceneEditorCompat_byte(a,n){var v=a.byteAt(n);return v<0?v+256:v;}
+        try{
+            before=stat();if(!(isFinite(before.bytes)&&before.bytes>0&&Math.floor(before.bytes)===before.bytes&&before.bytes<=9007199254740991))fail("LIMIT_PHYSICAL","Source size is empty or not an exactly representable byte count");
+            guard();var slot=cacheSlot(path,before,options),cached=options.cacheRefresh===true?null:cacheRead(slot);if(cached){parsed={document:cached,stats:{persistentCacheHit:true,nativeReadMillis:0,parseMillis:0,normalizationMillis:0,projectionMillis:0}};}else{
+            if(options.onSourceRead)options.onSourceRead();
+            raw=new DzFile(path);if(!raw.open(DzFile.ReadOnly))fail("OPEN","Cannot read saved DUF");var header=raw.read(2),gzip=sceneEditorCompat_byte(header,0)===31&&sceneEditorCompat_byte(header,1)===139,major=parseInt(String(App.longVersionString),10),text;
+            if(major!==4&&major!==6)fail("API","Fast inspection supports DAZ4/DAZ6 only");
+            if(gzip){
+                if(before.bytes<18||!raw.seek(before.bytes-4))fail("GZIP","Invalid gzip source");var trailer=raw.read(4),expected=sceneEditorCompat_byte(trailer,0)+sceneEditorCompat_byte(trailer,1)*256+sceneEditorCompat_byte(trailer,2)*65536+sceneEditorCompat_byte(trailer,3)*16777216;
+                // ISIZE is unsigned modulo 2^32, not an allocation estimate or size ceiling.
+                raw.close();raw=null;gz=new DzGZFile(path);if(typeof gz.read!=="function"||typeof gz.eof!=="function"||typeof gz.close!=="function")fail("API","Native gzip read/eof/close API unavailable; no fallback attempted");if(!gz.open(DzGZFile.ReadOnly))fail("OPEN","Cannot open gzip DUF");phase("native whole read (not interruptible)");var nativeStart=clock();text=gz.read();var nativeReadMillis=clock()-nativeStart;
+                if(typeof text!=="string"||!gz.eof()||(typeof gz.error==="function"&&gz.error()!==DzFile.NoError))fail("READ","Native gzip read failed");
+            }else{
+                if(!raw.seek(0))fail("SEEK","Cannot rewind saved DUF");phase("native plain UTF-8 bulk read");
+                var nativeStart=clock(),a=raw.read(before.bytes),len=typeof a.length==="number"?a.length:a.size;
+                if(len!==before.bytes||!raw.eof()||raw.error()!==DzFile.NoError)fail("READ","Incomplete plain DUF or native error");
+                if(typeof a.convertToStringFromUtf8!=="function")fail("API","Native UTF-8 conversion unavailable");
+                text=a.convertToStringFromUtf8();a=null;major=6;nativeReadMillis=clock()-nativeStart;
+                if(typeof text!=="string")fail("READ","Native plain read returned invalid text");
+                guard();
+            }
+            phase("native JSON parse and metadata projection");parsed=scan(text,major,{maxBytes:options.maxBytes,isCancelled:options.isCancelled,inspectEmissives:true,motionResolveAssetDocument:options.motionResolveAssetDocument,motionDependencies:options.motionDependencies},clock);text=null;
+            if(gzip&&parsed.stats.expandedBytes%4294967296!==expected)fail("GZIP","Returned text size differs from gzip trailer");
+            var after=stat();if(before.bytes!==after.bytes||before.stamp!==after.stamp)fail("FILE_CHANGED","Saved DUF changed while reading");
+            var gcStart=clock();if(typeof gc==="function")gc();parsed.stats.garbageCollectionMillis=clock()-gcStart;
+            parsed.stats.persistentCacheHit=false;parsed.stats.persistentCacheWritten=cacheWrite(slot,parsed.document);if(slot&&!parsed.stats.persistentCacheWritten)parsed.stats.inspectionCacheWarning="Inspection succeeded without saving its cache. The Scene Editor cache folder may be read-only or an existing projection could not be safely replaced.";}
+            guard();var cachedAfter=stat();if(cachedAfter.canonical!==before.canonical||cachedAfter.bytes!==before.bytes||cachedAfter.stamp!==before.stamp)fail("FILE_CHANGED","Saved DUF changed while reading");
+            var doc=parsed.document,closed=false,groups=["node_library","scene.nodes","scene.extra"];
+            function alive(){if(closed)fail("CLOSED","Metadata provider closed");}
+            var provider={groups:function(){alive();return groups.slice(0);},readEnvelope:function(){alive();return {file_version:doc.file_version,scene:{}};},listRecords:function(group){alive();return group==="node_library"?doc.node_library:group==="scene.nodes"?doc.scene.nodes:group==="scene.extra"?doc.scene.extra:[];},
+                verifySource:function(){alive();var now=stat();if(now.bytes!==before.bytes||now.stamp!==before.stamp)fail("FILE_CHANGED","Saved DUF changed; inspect again");return true;},
+                renderDetails:function(){alive();return JSON.parse(JSON.stringify(doc.renderDetails));},readRecords:function(){fail("PREVIEW_ONLY","Metadata cannot authorize an import; strict action read required");},close:function(){closed=true;doc=null;}};
+            parsed.stats.nativeReadMillis=nativeReadMillis||0;parsed.stats.totalMillis=clock()-start;if(typeof print==="function")print("SaveGuard fast inspect complete: "+JSON.stringify(parsed.stats));
+            return {provider:provider,stats:parsed.stats,previewOnly:true,savedSceneInfo:doc.savedSceneInfo||null,emission:doc.emission||null,timeline:doc.timeline||null,renderInfo:doc.renderInfo||null};
+        }catch(e){var readEnvelope=typeof SaveGuardLastErrorReport!=="undefined"?SaveGuardLastErrorReport.envelope(e,"inspect-read",{recoveryRequired:false,cancelled:e&&e.code==="CANCELLED"}):{code:e.code||"FAST_INSPECT",stage:"inspect-read",message:String(e.message||e),recoveryRequired:false};return {error:readEnvelope};}
+        finally{if(raw&&typeof raw.close==="function")raw.close();if(gz&&typeof gz.close==="function")gz.close();}
+    }
+    // Display-only identity. No catalog, dependency analysis, cloning or hashing.
+    function cachedPresentation(result,request,version,sequence){
+                var start=new Date().getTime(),nodes=result.provider.listRecords("scene.nodes"),defs=result.provider.listRecords("node_library"),byId={},definitions={},pins={},tabs={cameras:[],lights:[],characters:[],objects:[],render:[]},mapping={rowByKey:{}},i,n,d,type,p,key;
+                for(i=0;i<defs.length;i++){key="$"+defs[i].id;definitions[key]=own(definitions,key)?null:defs[i];}
+                for(i=0;i<nodes.length;i++){key="$"+nodes[i].id;byId[key]=own(byId,key)?null:nodes[i];}
+                function boneParentPresenter(byId,definitions){
+                    var memo={};
+                    function local(ref){if(typeof ref!=='string'||ref.charAt(0)!=='#')return null;try{return decodeURIComponent(ref.substring(1));}catch(e){return null;}}
+                    function info(id){var node=byId['$'+id];if(!node)return null;var defId=local(node.url),def=defId===null?null:definitions['$'+defId];if(defId!==null&&own(definitions,'$'+defId)&&!def)return null;
+                        var kinds=[node.type,node.preview&&node.preview.type,def&&def.type],kind=null;for(var i=0;i<kinds.length;i++){if(!kinds[i])continue;if(kind&&kind!==kinds[i])return null;kind=kinds[i];}
+                        return {node:node,type:kind,label:typeof node.label==='string'&&node.label?node.label:def&&typeof def.label==='string'?def.label:null};}
+                    function skeleton(id){var path=[],seen={},result=null,current=id;while(current!==null){if(own(memo,'$'+current)){result=memo['$'+current];break;}if(seen['$'+current])break;seen['$'+current]=true;path.push(current);var row=info(current);if(!row)break;if(row.type==='figure'){result=row.label||null;break;}if(row.type!=='bone')break;current=local(row.node.parent);}
+                        for(var i=0;i<path.length;i++)memo['$'+path[i]]=result;return result;}
+                    return function(ref){var id=local(ref),bone=id===null?null:info(id);if(!bone||bone.type!=='bone'||!bone.label)return null;var label=skeleton(id);return label?bone.label+' \u2192 '+label:null;};
+                }
+                var presentBoneParent=boneParentPresenter(byId,definitions);
+
+                // Only bounded, already projected local metadata; never open external assets for icons.
+                function savedLightKind(node){if(!node)return null;if(node.lightKind)return node.lightKind;var kinds=[],ks=["directional","spot","point"];for(var ki=0;ki<ks.length;ki++)if(node[ks[ki]]&&typeof node[ks[ki]]==="object")kinds.push(ks[ki]);return kinds.length===1?(kinds[0]==="directional"?"distant":kinds[0]):kinds.length?"unknown":null;}
+                function lightKind(node,definition){var a=savedLightKind(node),b=savedLightKind(definition);return a&&b&&a!==b?"unknown":a||b||"unknown";}
+                for(i=0;i<nodes.length;i++){
+                    if(i%128===0&&request.isCancelled&&request.isCancelled())fail("CANCELLED","Inspection cancelled");
+                    n=nodes[i];var fragment=null;if(typeof n.url==="string"&&n.url.charAt(0)==="#"){try{fragment=decodeURIComponent(n.url.substring(1));}catch(ignoredReference){}}d=fragment!==null?definitions["$"+fragment]:null;
+                    type=n.isGeometryShell===true?"node":d&&d.type||n.preview&&n.preview.type||n.type||"unknown";
+                    if(type==="bone")continue;
+                    p={id:n.id,sourceId:n.id,rowKey:"node-row:"+i,label:n.label||n.name||n.id||"Unnamed object",name:n.name||"",type:type,parent:n.parent||"",source:n.url||"",selectable:!!n.id&&byId["$"+n.id]===n,actionKeys:[]};
+                    var boneParentLabel=presentBoneParent(p.parent);if(boneParentLabel)p.parentLabel=boneParentLabel;
+                    if(type==="camera")p.cameraOwnVisible=own(n,"cameraOwnVisible")?n.cameraOwnVisible:d&&own(d,"cameraOwnVisible")?d.cameraOwnVisible:null;
+                    if(type==="light")p.lightKind=lightKind(n,d);
+                    p.displayType=type==="unknown"?(n.geometryCount>0?"Geometry Object":"Scene node (type not recorded)"):type==="node"?(n.geometryCount>0?"Geometry Object":"Scene node"):type.charAt(0).toUpperCase()+type.substring(1);
+                    if(p.selectable)p.actionKeys=type==="figure"?["loadCharacter","loadObject","applyShape"]:[type==="camera"?"loadCamera":type==="light"?"loadLight":"loadObject"];
+                    p.hasOwnGeometry=n.geometryCount>0||(typeof n.geometries==="number"&&n.geometries>0);if(p.selectable&&p.hasOwnGeometry)p.actionKeys.push("applyMaterials");
+                    mapping.rowByKey["$"+p.rowKey]={kind:"node",savedId:n.id};pins["$"+p.rowKey]=JSON.stringify([n.id,type]);tabs.objects.push(p);
+                    if(type==="camera")tabs.cameras.push(p);if(type==="light")tabs.lights.push(p);
+                }
+                // Metadata-only ownership. Labels and storage-group names never establish membership.
+                var recognized={},roots={},rowsById={},included={},characterRows=[],names=request.recognizedCharacterNames||[],j;
+                for(i=0;i<names.length;i++)recognized["$"+names[i]]=true;
+                for(i=0;i<tabs.objects.length;i++){p=tabs.objects[i];p.iconKind=p.type==="camera"?"camera":p.type==="figure"?(recognized["$"+p.name]?"character":"figure"):p.type==="node"?"object":"neutral";rowsById["$"+p.id]=p;if(p.selectable&&p.type==="figure"&&recognized["$"+p.name])roots["$"+p.id]=true;}
+                function localId(value){if(typeof value!=="string"||value.charAt(0)!=="#")return null;try{return decodeURIComponent(value.substring(1));}catch(e){return null;}}
+                function owner(id){var queue=[id],seen={},at=0,found=null;while(at<queue.length){var next=queue[at++],k="$"+next;if(seen[k])continue;seen[k]=true;var node=byId[k];if(!node)continue;if(roots[k]){if(found!==null&&found!==next)return null;found=next;continue;}var refs=[node.parent,node.parent_in_place,node.conform_target];for(var ri=0;ri<refs.length;ri++){var ref=localId(refs[ri]);if(ref!==null&&!seen["$"+ref])queue.push(ref);}}return found;}
+                for(i=0;i<tabs.objects.length;i++){p=tabs.objects[i];var root=p.selectable?owner(p.id):null;if(root!==null){included["$"+p.id]=root;characterRows.push(p);}}
+                for(i=0;i<characterRows.length;i++){p=characterRows[i];var copy={};for(key in p)if(own(p,key))copy[key]=p[key];var parentId=localId(p.parent),rootId=included["$"+p.id];if(p.id===rootId)copy.parent="";else if(parentId===null||included["$"+parentId]!==rootId)copy.parent="#"+encodeURIComponent(rootId);copy.ownershipRootId=rootId;copy.iconKind=p.id===rootId?"character":((p.type==="figure"||p.type==="node"||(p.type==="unknown"&&p.hasOwnGeometry&&p.parentLabel))?"wearable":p.iconKind);copy.actionKeys=p.id===rootId?["loadCharacter","applyPose","applyShape"]:((p.type==="figure"||p.type==="node"||(p.type==="unknown"&&p.hasOwnGeometry&&p.parentLabel))?["loadWearable"]:[]);if(p.id!==rootId&&p.type==="figure")copy.actionKeys.push("applyShape");if(p.id===rootId){p.ownershipRootId=rootId;if(p.actionKeys.indexOf("applyPose")<0)p.actionKeys.push("applyPose");}if(p.hasOwnGeometry)copy.actionKeys.push("applyMaterials");tabs.characters.push(copy);if(copy.actionKeys.indexOf("loadWearable")>=0){p.ownershipRootId=rootId;p.actionKeys=p.type==="figure"?["loadWearable","applyShape"]:["loadWearable"];if(p.hasOwnGeometry)p.actionKeys.push("applyMaterials");}}
+                var motionTabs=[tabs.objects,tabs.characters],motionKeys=["applyPose","applyShape","applyTransforms","restoreSavedPose","restoreSavedShape"];for(var mt=0;mt<motionTabs.length;mt++)for(var mi=0;mi<motionTabs[mt].length;mi++){var mr=motionTabs[mt][mi];var motionNode=byId["$"+mr.id],available=mr.type==="figure"?motionKeys:(mr.type!=="camera"&&mr.type!=="light"&&!mr.renderSettingsNode?collectMotionKeys(motionNode&&motionNode.motionEvidence):[]);if(mr.selectable)for(var mk=0;mk<available.length;mk++)if(mr.actionKeys.indexOf(available[mk])<0)mr.actionKeys.push(available[mk]);}
+                var eligibility=genericLoadEligibility({node_library:defs,scene:{nodes:nodes}});
+                for(i=0;i<tabs.objects.length;i++){p=tabs.objects[i];var index=Number(p.rowKey.substring(9));if(eligibility.blocked[index]){var allowed=[];for(j=0;j<p.actionKeys.length;j++)if(p.actionKeys[j]!=="loadObject")allowed.push(p.actionKeys[j]);p.actionKeys=allowed;p.genericLoadBlocked=true;}}
+                var emission=result.emission,emissionNote=emission&&emission.error?'Emission inspection unavailable: '+emission.error:'Saved emission candidates; maps/external/custom shaders may be unknown. Actual rendered output is not evaluated.';
+                var lightPresentation=SaveGuardLightAssemblies.rows(tabs.objects,emission);tabs.lights=lightPresentation.rows;if(lightPresentation.unconfirmed)emissionNote+=' '+lightPresentation.unconfirmed+' unconfirmed emission objects hidden (not classified as non-emissive).';
+                var renderRow={id:"render:static",sourceId:"render:static",rowKey:"render:static",label:"Saved render settings",name:"Render Settings",type:"Static Iray",selectable:true,actionKeys:["applyRenderSettings"],sceneExtraIndex:0,catalogRenderIndex:0};tabs.render.push(renderRow);mapping.rowByKey["$render:static"]={kind:"render-setting",locator:"render:static",sceneExtraIndex:0,catalogRenderIndex:0};pins["$render:static"]=JSON.stringify(["render:static","Static Iray"]);result.stats.listModelMillis=new Date().getTime()-start;
+                var usedMetadataIndex=request.metadataIndex===true&&!(result.stats&&(result.stats.metadataIndexFallback===true||result.stats.metadataIndexUtf8Fallback===true));
+                var token=++sequence,view={versionId:String(version.id),savedSceneInfo:result.savedSceneInfo||null,timeline:result.timeline||null,renderInfo:result.renderInfo||null,inspectionToken:token,lowMemoryMode:request.lowMemoryMode===true,metadataIndex:usedMetadataIndex,selectiveAvailable:true,catalogErrors:[],tabs:tabs,mapping:mapping,source:"saved-DUF",categoryNotes:{lights:emissionNote,render:"Apply restores saved dimensions, quality/samples and existing Environment/HDRI/Tone Mapper. Open Render Settings for saved values; Apply restores the supported set. Current frame is preserved."},stats:result.stats,summary:tabs.objects.length+" saved objects; "+(usedMetadataIndex?"metadata index "+(result.stats.readScanMillis||0)+" ms":(result.stats&&result.stats.metadataIndexFallback?"index-fallback":"full inspect"))+"; Read "+(result.stats.nativeReadMillis||0)+" ms; normalize "+(result.stats.normalizationMillis||0)+" ms; parse "+(result.stats.parseMillis||0)+" ms; project "+(result.stats.projectionMillis||0)+" ms; list "+result.stats.listModelMillis+" ms."};
+return{view:view,pins:pins,token:token};
+    }
+    function minimalAdapter(host) {
+        var current=null,sequence=0,closed=false;
+        function inspectVersion(version,request) {
+            var result=null;
+            try {
+                if(closed)fail("CLOSED","Inspector closed");if(current){current.provider.close();current=null;}
+                if(!version||!version.inspectable||!version.id||!version.scenePath)fail("VERSION","Select a saved copy");
+                if(host.validateVersion&&host.validateVersion(version)!==true)fail("VERSION_CHANGED","Saved version changed");
+                request=request||{};request.cacheVersionId=String(version.id);request.cacheDirectory=version.folder;request.cacheManifest=version.manifest;
+                // Normal preview (Low RAM off): full FastInspect normalize/parse — TreeViews match
+                // pre-pass2. ListStream metadata index only for explicit lowMemoryMode (or an
+                // explicit metadataIndex=true opt-in). Actions still full-parse via getContext.
+                if(request.lowMemoryMode===true){request.metadataIndex=true;}
+                else if(request.metadataIndex!==true){request.metadataIndex=false;}
+                var motionResolver=null,motionDependencies=[],motionDependencyPaths={};request.motionResolveAssetDocument=host.createSelectedResolver?function(file){if(!motionResolver)motionResolver=host.createSelectedResolver({lowMemoryMode:false,deepValidation:false,isCancelled:request.isCancelled});var value=motionResolver.resolveAssetDocument(file),stat=new DzFileInfo(value.path);var canonical=String(stat.canonicalFilePath());if(!motionDependencyPaths["$"+canonical]){motionDependencyPaths["$"+canonical]=true;motionDependencies.push({path:canonical,bytes:Number(stat.size()),stamp:String(stat.lastModified())});}return value;}:null;
+                request.motionDependencies=motionDependencies;try{result=read(version.scenePath,request);}finally{if(motionResolver)motionResolver.close();request.motionResolveAssetDocument=null;}if(result.error)return result;
+                var built=cachedPresentation(result,request,version,sequence),view=built.view,token=built.token,pins=built.pins;sequence=token;
+                if(current)current.provider.close();current={versionId:String(version.id),sourcePath:String(version.scenePath),inspectionToken:token,view:view,provider:result.provider,verifyRow:function(r){if(!r||pins["$"+r.rowKey]!==JSON.stringify([r.sourceId,r.rowType]))fail("STALE_ROW","Selected row identity changed; inspect again");return true;}};
+                if(result.stats.inspectionCacheWarning){view.inspectionCacheWarning=result.stats.inspectionCacheWarning;view.summary+=" "+view.inspectionCacheWarning;}if(typeof print==="function")print("SaveGuard list phases: "+JSON.stringify(result.stats));return view;
+            }catch(e){if(result&&result.provider)result.provider.close();if(result&&result.stats&&result.stats.persistentCacheHit&&request.cacheRefresh!==true){var retry={};for(var rk in request)if(own(request,rk))retry[rk]=request[rk];retry.cacheRefresh=true;return inspectVersion(version,retry);}var listEnvelope=typeof SaveGuardLastErrorReport!=="undefined"?SaveGuardLastErrorReport.envelope(e,"inspect",{recoveryRequired:false,cancelled:e&&e.code==="CANCELLED"}):{code:e.code||"LIST",stage:"inspect",message:String(e.message||e),recoveryRequired:false};return {error:listEnvelope};}
+        }
+        return {inspectVersion:inspectVersion,getContext:function(id,token){if(closed||!current||String(id)!==current.versionId||token!==current.inspectionToken)fail("STALE_INSPECTION","Inspect this saved copy again");return current;},close:function(){closed=true;if(current)current.provider.close();current=null;}};
+    }
+
+    // The metadata provider is never returned to the action controller.
+    function create(host){
+        host=host||{};var fastHost={},k;for(k in host)if(own(host,k))fastHost[k]=host[k];fastHost.reader={read:read};
+        var fast=minimalAdapter(fastHost),strict=null,selectedAction=null,selectedKey="",version=null,request=null,closed=false,busy=false,fastMode=false;
+        function inspectVersion(v,r){
+            if(closed||busy){var busyEnvelope=typeof SaveGuardLastErrorReport!=="undefined"?SaveGuardLastErrorReport.envelope({code:"BUSY",message:"Inspector closed or busy"},"inspect",{recoveryRequired:false}):{code:"BUSY",stage:"inspect",message:"Inspector closed or busy",recoveryRequired:false};return {error:busyEnvelope};}busy=true;
+            try{
+                var chosenFast=true,result;
+                if(!chosenFast){if(!strict)strict=SaveGuardDetailAdapter.create(host);result=strict.inspectVersion(v,r);}
+                else result=fast.inspectVersion(v,r);
+                if(!result.error){if(selectedAction){selectedAction.close();selectedAction=null;selectedKey="";}if(chosenFast&&strict){strict.close();strict=null;}version=v;request={};for(var key in r)if(own(r,key))request[key]=r[key];fastMode=chosenFast;
+                    if(chosenFast){result.summary+=" Metadata preview only; complete source/dependencies are validated only on an explicit Load action.";result.categoryNotes.render="Apply restores saved dimensions, quality/samples and existing Environment/HDRI/Tone Mapper. Values are read on Apply; current frame is preserved.";}}
+                return result;
+            }finally{busy=false;}
+        }
+        function getContext(id,token,actionRequest){
+            if(closed||busy)fail("BUSY","Inspection unavailable");
+            if(!fastMode)return strict.getContext(id,token);
+            var preview=fast.getContext(id,token);preview.provider.verifySource();if(actionRequest)preview.verifyRow(actionRequest);
+            if(actionRequest&&(actionRequest.actionKey==="loadLightAssembly"||actionRequest.actionKey==="loadObject"||actionRequest.actionKey==="loadCharacter"||actionRequest.actionKey==="loadWearable"||actionRequest.actionKey==="applyPose"||(actionRequest.actionKey==="applyShape"||actionRequest.actionKey==="applyTransforms"||actionRequest.actionKey==="restoreSavedPose"||actionRequest.actionKey==="restoreSavedShape")||actionRequest.actionKey==="applyMaterials"||actionRequest.actionKey==="applyRenderSettings")&&request.lowMemoryMode!==true&&host.createSelectedResolver){
+                var key=JSON.stringify([id,token,actionRequest.sourceId,actionRequest.rowKey,actionRequest.actionKey,own(actionRequest,"sourceFrame"),host.loadCacheMode?host.loadCacheMode():"off"].concat(own(actionRequest,"sourceFrame")?[actionRequest.sourceFrame]:[]).concat(actionRequest.includeRootTransforms===true?["pose-with-transforms"]:[]));
+                if(selectedAction&&selectedKey!==key){selectedAction.close();selectedAction=null;}
+                if(!selectedAction){busy=true;try{selectedAction=SaveGuardSelectedContext.create(preview,version,actionRequest,{loadCacheMode:host.loadCacheMode?host.loadCacheMode():"off",createResolver:host.createSelectedResolver,deepValidation:request.deepValidation===true,characterNames:request.recognizedCharacterNames,isCancelled:host.isActionCancelled||request.isCancelled,onProgress:host.onActionProgress||request.onProgress});selectedKey=key;}finally{busy=false;}}
+                try{selectedAction.verify();return selectedAction.context;}catch(error){selectedAction.close();selectedAction=null;throw error;}
+            }
+            if(!strict){busy=true;try{var h={};for(var key in host)if(own(host,key))h[key]=host[key];h.initialSequence=preview.inspectionToken-1;strict=SaveGuardDetailAdapter.create(h);var actionReadRequest={},rk;for(rk in request)if(own(request,rk))actionReadRequest[rk]=request[rk];if(host.isActionCancelled)actionReadRequest.isCancelled=host.isActionCancelled;if(host.onActionProgress)actionReadRequest.onProgress=host.onActionProgress;var result=strict.inspectVersion(version,actionReadRequest);if(result.error){strict.close();strict=null;fail(result.error.code,result.error.message);}}finally{busy=false;}}
+            return strict.getContext(id,token);
+        }
+        function isInspectionCurrent(v,token,prefs){try{if(closed||busy||!fastMode||!version||v.id!==version.id||v.scenePath!==version.scenePath||!request||request.lowMemoryMode!==prefs.lowRamMode||(request.deepValidation===true)!==(prefs.deepValidation===true)||JSON.stringify(request.recognizedCharacterNames)!==JSON.stringify(prefs.recognizedCharacterNames))return false;var preview=fast.getContext(v.id,token);return preview.provider.verifySource()===true;}catch(e){var code=e&&e.code?String(e.code):"INSPECTION_CURRENT";if(typeof print==="function")print("SaveGuard FastInspect isInspectionCurrent failed: "+code+" "+String(e&&e.message!==undefined?e.message:e));try{if(typeof SaveGuardLastErrorReport!=="undefined")SaveGuardLastErrorReport.capture({stage:"fast-inspect-current",action:"probe",cancelled:false},e,null);}catch(ignoreProbeCapture){}return false;}}
+        function inspectRenderSettings(v,token,prefs){if(!isInspectionCurrent(v,token,prefs))fail("STALE_INSPECTION","Saved inspection changed");var preview=fast.getContext(v.id,token);if(preview.sourcePath!==String(v.scenePath))fail("STALE_INSPECTION","Saved source identity changed");var cached=preview.provider.renderDetails();if(!cached||cached.error)fail("RENDER_PREVIEW",cached&&cached.error||"Render details unavailable; inspect again");return {versionId:String(v.id),inspectionToken:token,rows:cached.rows,renderInfo:cached.renderInfo};}
+        return {getPreviewContext:function(id,token){if(closed||busy)fail("BUSY","Inspection unavailable");var context=fast.getContext(id,token);context.provider.verifySource();return context;},verifyPreview:function(id,token){return fast.getContext(id,token).provider.verifySource();},inspectRenderSettings:inspectRenderSettings,isInspectionCurrent:isInspectionCurrent,inspectVersion:inspectVersion,getContext:getContext,close:function(){closed=true;fast.close();if(strict)strict.close();if(selectedAction)selectedAction.close();},isBusy:function(){return busy;}};
+    }
+    return {cachedCategories:function(doc,options){options=options||{};return cachedPresentation({provider:{listRecords:function(key){return key==='scene.nodes'?doc.scene.nodes:doc.node_library;}},stats:{},savedSceneInfo:doc.savedSceneInfo,timeline:doc.timeline,renderInfo:doc.renderInfo,emission:doc.emission},{recognizedCharacterNames:options.recognizedCharacterNames||(typeof SaveGuardSettings!=='undefined'?SaveGuardSettings.characterNames:[])||[],isCancelled:options.isCancelled},{id:'cached-comparison'},0).view.tabs;},cachedOnly:function(path,before,options){return cacheRead(cacheSlot(path,before,options));},read:read,scan:scan,create:create,genericLoadEligibility:genericLoadEligibility};
+}());

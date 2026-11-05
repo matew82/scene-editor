@@ -1,0 +1,88 @@
+var SaveGuardCameraRestore=(function(){
+ function need(v,m){if(!v)throw Error('Camera restore: '+m);}
+ function num(v){v=Number(v&&typeof v.valueOf==='function'?v.valueOf():v);need(isFinite(v),'Non-finite native value');return v;}
+ function camera(n){return !!n&&n.inherits('DzCamera')&&!n.inherits('DzLight')&&typeof n.isViewCamera==='function'&&!n.isViewCamera()&&n.isInScene();}
+ function matrix(n){var m=n.getWSTransform(),keys=['m11','m21','m31','m12','m22','m32','m13','m23','m33','m14','m24','m34'],a=[];for(var i=0;i<keys.length;i++)a.push(num(m[keys[i]]));return a;}
+ function near(a,b){if(typeof a==='boolean')a=a?1:0;if(typeof b==='boolean')b=b?1:0;if(typeof a==='number'&&typeof b==='number')return Math.abs(a-b)<=0.00002*Math.max(1,Math.abs(a),Math.abs(b));if(Object.prototype.toString.call(a)==='[object Array]'&&Object.prototype.toString.call(b)==='[object Array]'){if(a.length!==b.length)return false;for(var i=0;i<a.length;i++)if(!near(a[i],b[i]))return false;return true;}return a===b;}
+ function observedDimensionPreset(build,rows){
+  // Candidate-only native observation, not universal preset-name equivalence.
+  // No preset is applied. Every dormant/effective numeric control stays exact.
+  if((build!=='6.25.2026.14722'&&build!=='4.24.0.4')||!rows||rows.length!==5)return false;
+  var preset='Photo / 35mm Slide / VistaVision (3:2)',specs={
+   '$Local Dimensions':['bool','DzBoolProperty',false,false],
+   '$Dimension Preset':['string','DzStringProperty','',preset],
+   '$Pixel Size':['int2','DzInt2Property',[1800,1200],[1800,1200]],
+   '$Aspect Ratio':['float2','DzFloat2Property',[3,2],[3,2]],
+   '$Constrain Proportions':['bool','DzBoolProperty',true,true]},seen={};
+  function exact(a,b){if(typeof a==='boolean')a=a?1:0;if(typeof b==='boolean')b=b?1:0;return JSON.stringify(a)===JSON.stringify(b);}
+  for(var i=0;i<rows.length;i++){var r=rows[i],key='$'+r.id,s=specs[key];if(!s||seen[key]||r.savedType!==s[0]||r.nativeType!==s[1]||r.keyCount!==0||!exact(r.expected,s[2])||!exact(r.savedDefault,s[2])||!exact(r.raw,s[3])||!exact(r.evaluated,s[3])||!exact(r.defaultValue,s[2]))return false;seen[key]=true;}
+  return true;
+ }
+ function run(env,plan,path,mode,force,verifyPayload){
+  var result={ok:false,candidate:'native-camera-output-v1',nativeVerified:false,deepValidation:false,mode:mode,mutationStarted:false,restorationClaimed:false,outputAudited:false},scene=env.Scene,io=env.App.getAssetIOMgr(),props=SaveGuardCameraProperties.create(env,phase),parentGuard=SaveGuardCameraParentGuard.create(env),before=[],beforeById={},selected=[],primary=null,target=null,targetBefore=null,targetParent=null,targetParentIndex=null,parentDescriptor=null,imported=null,importedParent=null,importedAncestors=[],retainedNodes=[],referenceReceipt={incomplete:false},sourceCaptureCompleted=false,parentChangeAttempted=false,parentChangeCompleted=false,held=false,accepting=false,selectionCaptured=false,cleanupAttempted=false,operationCompleted=false;
+  var phaseStart=new Date().getTime();
+  function phase(name,detail){if(name==='property-write.before'||name==='property-write.after')requireHeld();try{if(typeof print==='function')print('SAVEGUARD_CAMERA_PHASE '+JSON.stringify({at:new Date().getTime(),elapsedMillis:new Date().getTime()-phaseStart,phase:name,detail:detail||null}));}catch(traceError){}}
+  function same(a,b){return !a&&!b||!!a&&!!b&&env.pointersAreEqual(a,b)===true;}
+  function list(){return SaveGuardSceneInventory.nodes(scene);}
+  function old(n){var id=n&&n.elementID,bucket=id===undefined||id===null?before:beforeById['$'+String(id)]||[];for(var i=0;i<bucket.length;i++)if(same(bucket[i],n))return true;return false;}
+  function failure(e,field){var message=String(e);if(field)result[field]=message;if(!result.error)result.error=message;}
+  function requireHeld(){var available=false;try{available=held&&env.UndoStack.canPushItems()===true;}catch(holdError){}if(!available){held=false;result.undoOwnershipLost=true;throw Error('Owned Undo unavailable; no further writes or blind accept/cancel');}}
+  function restoreSelection(){phase('selection.before');requireHeld();var current=SaveGuardSceneInventory.selected(scene),i;for(i=0;i<current.length;i++){requireHeld();need(current[i].select(false)!==false,'Selection restoration failed');}for(i=0;i<selected.length;i++){requireHeld();need(selected[i].select(true)!==false,'Selection restoration failed');}requireHeld();need(scene.setPrimarySelection(primary)!==false,'Selection restoration failed');result.selectionReturned=true;phase('selection.after');}
+  function transformMetadata(n){need(typeof n.getRotationOrder==='function'&&typeof n.setRotationOrder==='function'&&typeof n.inheritsScale==='function'&&typeof n.setInheritScale==='function','Camera native transform metadata APIs unavailable');var order=n.getRotationOrder(),inherit=n.inheritsScale();need(order!==null&&order!==undefined&&typeof inherit==='boolean','Camera native transform metadata unavailable');return {rotationOrder:order,inheritsScale:inherit};}
+  function copyTransformMetadata(source){var state=transformMetadata(source);requireHeld();need(target.setRotationOrder(state.rotationOrder)!==false,'Camera rotation order setter failed');requireHeld();need(target.setInheritScale(state.inheritsScale)!==false,'Camera scale inheritance setter failed');requireHeld();}
+  function nativeSuccess(value,message){if(value&&typeof value.valueOf==='function')value=value.valueOf();need(typeof value==='number'&&isFinite(value)&&value===0,message);}
+  function bindReplacementSource(){
+   phase('bind-source.before');var nodes=list(),found=null,i;for(i=0;i<nodes.length;i++)if(camera(nodes[i])&&!old(nodes[i])){need(!found,'Cannot uniquely identify temporary replacement camera');found=nodes[i];}
+   need(found,'Temporary replacement camera unavailable');var parent=found.getNodeParent(),at=parent,chain=[];
+   while(at){need(!old(at)&&at.isInScene(),'Temporary replacement parent ownership unavailable');for(i=0;i<chain.length;i++)need(!same(chain[i],at),'Cyclic temporary replacement ancestry');chain.push(at);at=at.getNodeParent();}
+   need(chain.length===parentDescriptor.ancestorIds.length,'Temporary replacement ancestor binding differs');
+   if(parent)need(typeof parent.addNodeChild==='function','Saved parent attachment API unavailable');
+   imported=found;importedParent=parent;importedAncestors=chain;retainedNodes=[];for(i=0;i<nodes.length;i++)if(!old(nodes[i])&&!same(nodes[i],imported))retainedNodes.push(nodes[i]);result.temporarySourceIdentified=true;phase('bind-source.after');
+  }
+  function mapReference(node){requireHeld();need(node&&node.isInScene()===true,'Source reference node is no longer live');if(same(node,imported)){need(target.isInScene()&&num(target.elementID)===result.targetIdBefore,'Reference destination identity changed');return target;}for(var ri=0;ri<retainedNodes.length;ri++)if(same(node,retainedNodes[ri])){need(!old(node)&&node.isInScene()===true,'Retained reference node ownership changed');return node;}throw Error('Camera reference points outside the retained imported closure; exact target binding is required');}
+  function adoptParent(){
+   requireHeld();need(target.isInScene()&&same(target.getNodeParent(),targetParent)&&(!targetParent||targetParent.isInScene()),'Replacement target parent changed before adoption');for(var ai=0;ai<importedAncestors.length;ai++)need(!old(importedAncestors[ai])&&importedAncestors[ai].isInScene()&&same(importedAncestors[ai].getNodeParent(),ai+1<importedAncestors.length?importedAncestors[ai+1]:null),'Saved ancestor ownership changed before adoption');
+   if(same(targetParent,importedParent))return;
+   parentChangeAttempted=true;
+   if(targetParent){requireHeld();nativeSuccess(targetParent.removeNodeChild(target,false),'Original parent detach failed');requireHeld();need(!target.getNodeParent(),'Original parent did not detach target');}
+   if(importedParent){requireHeld();nativeSuccess(importedParent.addNodeChild(target,false),'Saved parent attachment failed');requireHeld();need(same(target.getNodeParent(),importedParent),'Saved parent did not attach target');}
+   parentChangeCompleted=true;result.savedHierarchyAdopted=true;result.retainedAncestorCount=importedAncestors.length;
+  }
+  function restoreParent(){
+   if(!parentChangeAttempted||parentChangeCompleted)return;requireHeld();need(target.isInScene(),'Target unavailable for parent restoration');var current=target.getNodeParent();
+   if(same(current,targetParent)){result.originalParentRestored=true;return;}
+   need(!current||same(current,importedParent),'Target acquired an unrelated parent; no blind detach');
+   if(current){requireHeld();nativeSuccess(current.removeNodeChild(target,false),'Partial saved parent detach failed');requireHeld();need(!target.getNodeParent(),'Partial saved parent did not detach');}
+   if(targetParent){need(old(targetParent)&&targetParent.isInScene(),'Original parent unavailable');requireHeld();nativeSuccess(targetParent.addNodeChild(target,false),'Original parent restoration failed');requireHeld();need(same(target.getNodeParent(),targetParent),'Original parent did not reattach target');requireHeld();nativeSuccess(targetParent.moveNodeChildToIndex(target,targetParentIndex),'Original child order restoration failed');requireHeld();}
+   result.originalParentRestored=true;
+  }
+  function cleanupSource(){
+   if(cleanupAttempted||!imported)return;cleanupAttempted=true;requireHeld();if(!sourceCaptureCompleted){result.temporarySourceRemoved=false;result.temporaryCameraRetainedForUninspectedRelationships=true;throw Error('Temporary camera retained: source property/controller inspection did not complete');}if(referenceReceipt.incomplete){result.temporarySourceRemoved=false;result.temporaryCameraRetainedForReferences=true;throw Error('Temporary camera retained: native reference copy or repair did not complete');}
+   // Ancestors are retained: on success they are the adopted saved hierarchy; on
+   // failure the single failed-attempt Undo owns their recovery. Remove only the camera.
+   phase('cleanup-scope.before');var nodes=list(),i;need(!old(imported)&&imported.isInScene(),'Temporary camera ownership changed');need(same(imported.getNodeParent(),importedParent),'Temporary camera parent changed');
+   for(i=0;i<nodes.length;i++)need(!same(nodes[i].getNodeParent(),imported),'Temporary camera has dependents; retained');
+   phase('cleanup-scope.after');phase('remove-camera.before');requireHeld();need(scene.removeNode(imported)===true,'Temporary source camera removal failed');result.temporaryCameraRemoved=true;phase('remove-camera.after');result.temporarySourceRemoved=true;
+  }
+  try{
+   result.build=String(env.App.longVersionString);need(SaveGuardNativeRuntime.hostSupported(env),'Camera host build or required native APIs unavailable');need(mode==='add'||mode==='replace','Unknown mode');need(force!==true,'Forced result rollback is unavailable on this native-output path');need(plan&&typeof plan.label==='string'&&plan.label.length&&plan.document&&typeof verifyPayload==='function'&&verifyPayload()===true,'Saved label/payload identity unavailable');result.savedLabel=plan.label;
+   var preTracks=plan.animationChannels||[];need(preTracks.length===plan.animationCount,'Missing exact animation bindings');
+   need(scene.isLoading()===false&&io.isReadingOrWriting()===false&&env.UndoStack.canPushItems()===false&&env.UndoStack.isInUndoRedo()===false,'Scene I/O or Undo busy');need(num(scene.getTimeStep())>0,'Camera time step must be positive');before=list();for(var bi=0;bi<before.length;bi++){var bid='$'+String(before[bi].elementID);if(!beforeById[bid])beforeById[bid]=[];beforeById[bid].push(before[bi]);}selected=SaveGuardSceneInventory.selected(scene);primary=scene.getPrimarySelection();selectionCaptured=true;
+   var matches=[],i;for(i=0;i<before.length;i++){if(camera(before[i])&&String(before[i].getLabel())===plan.label)matches.push(before[i]);}result.requestedMode=mode;result.replaceFallbackToAdd=mode==='replace'&&matches.length===0;
+   var manual=env.manualCameraPrecondition;if(manual&&manual.absent===true)need(mode==='add'&&matches.length===0,'Setup camera already exists');if(mode==='replace')need(matches.length<=1,'More than one camera has the saved label; no camera was changed');result.matchesBeforeImport=matches.length;
+   if(mode==='replace'&&matches.length){parentDescriptor=parentGuard.replacement(plan);target=matches[0];targetParent=target.getNodeParent();if(targetParent){need(typeof targetParent.removeNodeChild==='function'&&typeof targetParent.addNodeChild==='function'&&typeof targetParent.findChildIndex==='function'&&typeof targetParent.moveNodeChildToIndex==='function','Original parent attachment APIs unavailable');targetParentIndex=num(targetParent.findChildIndex(target));need(targetParentIndex>=0&&targetParentIndex===Math.floor(targetParentIndex),'Original parent child binding unavailable');}transformMetadata(target);targetBefore=props.capture(target);result.targetIdBefore=num(target.elementID);}
+   if(manual&&manual.staticDof!==undefined){need(targetBefore,'Replacement requires one setup camera');var dof=null;for(i=0;i<targetBefore.rows.length;i++)if(targetBefore.rows[i].name==='DOF')dof=targetBefore.rows[i];need(dof&&(manual.staticDof===0||manual.staticDof===1)&&dof.type==='DzBoolProperty'&&dof.state.raw===manual.staticDof&&dof.state.value===manual.staticDof&&dof.state.defaultValue===manual.staticDof&&dof.state.keys.length===0,'Replacement setup DOF state differs');}
+   result.operation=target?'replace-existing-camera':'add-new-camera';if(target)result.temporarySourceIdentified=false;need(verifyPayload()===true,'Payload changed before import');env.beginUndo();held=true;requireHeld();result.stage='native-import';result.nativeExecuted=true;result.mutationStarted=true;phase('native-import.before');var nativeResult=io.doLoad(path,Number(env.DzAssetIOMgr.MergeFile));if(nativeResult&&typeof nativeResult.valueOf==='function')nativeResult=nativeResult.valueOf();need(typeof nativeResult==='number'&&isFinite(nativeResult),'Invalid native camera import result');result.nativeCode=nativeResult;phase('native-import.after',{code:result.nativeCode});need(result.nativeCode===0,'Native camera import returned '+result.nativeCode);requireHeld();
+   if(target){need(target.isInScene()&&num(target.elementID)===result.targetIdBefore&&same(target.getNodeParent(),targetParent),'Replacement target ownership changed');bindReplacementSource();result.stage='copy-native-properties';phase('copy.before');var source=props.capture(imported);sourceCaptureCompleted=true;var copied=props.copy(source,targetBefore,function(){copyTransformMetadata(imported);},mapReference,referenceReceipt);phase('copy.after');adoptParent();if(copied&&copied.copyAdjustments&&copied.copyAdjustments.length)result.copyAdjustments=copied.copyAdjustments;}
+   operationCompleted=true;
+  }catch(e){failure(e);if(e&&e.code==='CANCELLED')result.cancelled=true;if(e&&e.cameraParentDiagnostics)result.cameraParentDiagnostics=e.cameraParentDiagnostics;if(e&&e.cameraPropertyDiagnostics)result.cameraPropertyDiagnostics=e.cameraPropertyDiagnostics;if(e&&e.cameraCopyDiagnostics)result.cameraCopyDiagnostics=e.cameraCopyDiagnostics;}
+  finally{
+   if(parentChangeAttempted&&!parentChangeCompleted)try{restoreParent();}catch(parentError){failure(parentError,'parentRestoreError');result.parentRestorationUnknown=true;}
+   if(imported)try{cleanupSource();}catch(cleanupError){result.temporarySourceRemoved=false;failure(cleanupError,'cleanupError');}
+   if(selectionCaptured&&result.mutationStarted)try{restoreSelection();}catch(selectionError){failure(selectionError,'selectionError');}
+   if(held){try{requireHeld();accepting=true;phase('accept-undo.before');env.acceptUndo(result.error?'SaveGuard camera - failed attempt':target?'SaveGuard replace camera':'SaveGuard add camera');held=false;result.undoAccepted=true;phase('accept-undo.after');if(env.UndoStack.canPushItems()!==false){result.undoStateUnknown=true;throw Error('Undo did not return to idle');}}catch(undoError){if(held||accepting)result.undoStateUnknown=true;failure(undoError,'undoError');}}
+  }
+  result.ok=operationCompleted&&!result.error&&result.undoAccepted===true;result.status=result.ok?'applied':result.undoOwnershipLost||result.undoStateUnknown||result.parentRestorationUnknown?'recovery-required':result.mutationStarted?'failed-attempt':'stopped';result.message=result.ok?'Native camera operation completed.':result.error;result.scope='Existing supported camera input and replacement-copy scope; native output is not compared to saved values.';return result;
+ }
+ return {run:run,isCamera:camera,observedDimensionPreset:observedDimensionPreset};
+}());

@@ -1,0 +1,20 @@
+// Required-reference discovery only. No native scene/property/mesh reads or integrity sweeps.
+var SaveGuardFigureDependencies=(function(){
+    function collect(document,resolver,cancelled,diagnostic){
+        var files={},documents={},fileCount=0,documentCount=0,list=[];
+        function check(){if(cancelled&&cancelled()){var e=Error("Figure dependency preparation cancelled.");e.code="CANCELLED";throw e;}}
+        function absolute(file,base){if(file.charAt(0)==="/")return file;if(/^(data|Runtime|People)\//.test(file))return "/"+file;if(!base)return file;var parts=(base.substring(0,base.lastIndexOf("/")+1)+file).split("/"),out=[];for(var i=0;i<parts.length;i++){if(parts[i]===".."){if(!out.length)throw Error("Dependency escapes content root");out.pop();}else if(parts[i]&&parts[i]!==".")out.push(parts[i]);}return "/"+out.join("/");}
+        function ref(text,base){if(typeof text!=="string"||!(/\.(dsf|duf|dhdm|png|jpg|jpeg|tif|tiff|bmp|exr|hdr)(?:[#?]|$)/i.test(text)))return;var uri=SaveGuardSelective.parseURI(text);if(!uri.file)return;var file=absolute(uri.file,base),key="$"+file;if(files[key])return;check();fileCount++;resolver.resolveExternal(file);files[key]=true;list.push(file);if(/\.(dsf|duf)$/i.test(file)&&!documents[key]){documentCount++;documents[key]=true;var loaded=resolver.resolveAssetDocument(file);if(!loaded||loaded.verified!==true)throw Error("Unverified figure dependency document");return {document:loaded.document,file:file};}}
+        // Per-document DFS: preserve reference order and reject active-path cycles only.
+        function scan(value,base,depth){
+            var stack=[];
+            function enter(item,level,file){check();if(!item||typeof item!=="object")return;if(item.type==="file")return;var keys=[],key,i;for(i=0;i<stack.length;i++)if(stack[i].value===item&&stack[i].base===file)throw Error("Figure dependency object cycle.");for(key in item)if(Object.prototype.hasOwnProperty.call(item,key))keys.push(key);stack.push({value:item,keys:keys,next:0,depth:level,base:file});}
+            enter(value,depth,base);while(stack.length){check();var frame=stack[stack.length-1];if(frame.next===frame.keys.length){stack.pop();continue;}var key=frame.keys[frame.next++],item,loaded;
+                if(/^(id|name|label|asset_info|vertices|polylist|deltas|weights|node_weights|scale_weights|local_weights|bulge_weights|uvs|vertex_connections)$/.test(key))continue;
+                item=frame.value[key];if(typeof item==="string"){loaded=ref(item,frame.base);if(loaded)enter(loaded.document,0,loaded.file);}else if(item&&typeof item==="object"){if(Object.prototype.toString.call(item)==="[object Array]"&&item.length&&(typeof item[0]==="number"||(Object.prototype.toString.call(item[0])==="[object Array]"&&typeof item[0][0]==="number")))continue;enter(item,frame.depth+1,frame.base);}
+            }
+        }
+        scan(document,null,0);return {files:list,documents:documentCount,scope:"Explicit source references including HD; implicit native auto-loaded product/plugin dependencies are not exhaustively enumerated."};
+    }
+    return {collect:collect};
+}());

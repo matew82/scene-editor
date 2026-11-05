@@ -1,0 +1,127 @@
+// Default initial-tree parser. Native JSON.parse temporarily allocates the
+// full document; only bounded metadata survives this call. Never used for export.
+var SaveGuardCameraSource = (function () {
+    var hexCharacters={},hexIndex;for(hexIndex=0;hexIndex<256;hexIndex++){var hexKey=hexIndex.toString(16);if(hexKey.length<2)hexKey="0"+hexKey;hexCharacters[hexKey]=String.fromCharCode(hexIndex);}
+    function fail(code, text) { var e = new Error(text); e.code = code; throw e; }
+    function own(o, k) { return Object.prototype.hasOwnProperty.call(o, k); }
+    function isArray(o) { return Object.prototype.toString.call(o) === "[object Array]"; }
+    function object(o) { return o && typeof o === "object" && !isArray(o); }
+    function timeBudget(options){var value=options.maxMillis;if(value===undefined||value===null)return null;if(typeof value!=="number"||!isFinite(value)||value<=0)fail("CONFIG","Invalid explicit camera time budget");return value;}
+    function scan(text, major, options, clock) {
+        var start = clock(), normalizationStart = start, bytes = text.length, retained = 0;
+        var limits = {defaultExpandedBytes:9007199254740991,maxBytes:9007199254740991,maxMillis:timeBudget(options)};
+        var budget = options.maxBytes === undefined ? limits.defaultExpandedBytes : options.maxBytes;
+        if (typeof budget !== "number" || !isFinite(budget) || budget <= 0 || Math.floor(budget) !== budget || budget > limits.maxBytes) {
+            fail("CONFIG", "Unsupported expanded scan budget.");
+        }
+        function guard() {
+            if (options.isCancelled && options.isCancelled()) { fail("CANCELLED", "Inspection cancelled."); }
+            if (limits.maxMillis!==null && clock() - start > limits.maxMillis) { fail("LIMIT_TIME", "Inspection time limit reached."); }
+        }
+        guard();
+        if (text.length > budget) { fail("LIMIT_BYTES", "Native tree text exceeds the selected expanded scan budget."); }
+        // Convert raw DAZ4 UTF-8 BEFORE JSON.parse: decoding selected strings
+        // afterwards would corrupt mixtures of raw UTF-8 and JSON Unicode escapes.
+        if (major === 4) {
+            var byteRuns = /[^\x00-\x7f]+/g, byteMatch, sourcePosition = 0, normalizedPieces = [], pieceBatches = [];
+            var decodeRun = function (run) {
+                guard(); var position = 0, out = [], pieces = [], b, cp, n, min, c;
+                while (position < run.length) {
+                    b = run.charCodeAt(position++);
+                    if (b >= 194 && b <= 223) { cp = b & 31; n = 1; min = 128; }
+                    else if (b >= 224 && b <= 239) { cp = b & 15; n = 2; min = 2048; }
+                    else if (b >= 240 && b <= 244) { cp = b & 7; n = 3; min = 65536; }
+                    else { fail("UTF8", "Invalid native UTF-8 leading byte."); }
+                    while (n-- > 0) {
+                        c = run.charCodeAt(position++);
+                        if (!(c >= 128 && c <= 191)) { fail("UTF8", "Invalid native UTF-8 continuation."); }
+                        cp = cp * 64 + (c & 63);
+                    }
+                    if (cp < min || cp > 1114111 || cp >= 55296 && cp <= 57343) { fail("UTF8", "Invalid native UTF-8 code point."); }
+                    if (cp < 65536) { out.push(String.fromCharCode(cp)); }
+                    else { cp -= 65536; out.push(String.fromCharCode(55296 + (cp >> 10), 56320 + (cp & 1023))); }
+                    if (out.length >= 4096) { guard(); pieces.push(out.join("")); out = []; }
+                }
+                pieces.push(out.join("")); return pieces.join("");
+            };
+            while ((byteMatch = byteRuns.exec(text)) !== null) {
+                normalizedPieces.push(text.substring(sourcePosition, byteMatch.index), decodeRun(byteMatch[0]));
+                sourcePosition = byteRuns.lastIndex;
+                if (normalizedPieces.length >= 4096) { pieceBatches.push(normalizedPieces.join("")); normalizedPieces = []; }
+            }
+            if (sourcePosition) {
+                normalizedPieces.push(text.substring(sourcePosition)); pieceBatches.push(normalizedPieces.join("")); text = pieceBatches.join("");
+            }
+            byteMatch = null; normalizedPieces = null; pieceBatches = null;
+        } else {
+            // Count UTF-8 bytes and validate only non-ASCII runs; no second full
+            // byte buffer is built for DAZ6's Unicode return value.
+            var runs = /[\u0080-\uffff]+/g, match, i, cp, low, nextGuard;
+            while ((match = runs.exec(text)) !== null) {
+                guard();
+                nextGuard = 4096;
+                for (i = 0; i < match[0].length; i += 1) {
+                    if (i >= nextGuard) { guard(); nextGuard = i + 4096; }
+                    cp = match[0].charCodeAt(i);
+                    if (cp >= 55296 && cp <= 56319) {
+                        low = match[0].charCodeAt(++i);
+                        if (!(low >= 56320 && low <= 57343)) { fail("UTF8", "Unpaired native Unicode surrogate."); }
+                        bytes += 2;
+                    } else if (cp >= 56320 && cp <= 57343) { fail("UTF8", "Unpaired native Unicode surrogate."); }
+                    else { bytes += cp < 2048 ? 1 : 2; }
+                }
+            }
+        }
+        if (bytes > budget) { fail("LIMIT_BYTES", "Expanded UTF-8 size exceeds the fast-path budget."); }
+        var normalizationMillis = clock() - normalizationStart;
+        guard(); if (text.charCodeAt(0) === 65279) { text = text.substring(1); }
+        var parseStart = clock(), source;
+        try { source = JSON.parse(text); }
+        catch (e) { fail("JSON_PARSE", "Native JSON parsing failed: " + String(e) + ". No alternate parser was attempted."); }
+        var parseMillis = clock() - parseStart; text = null; guard();
+        if (!object(source)) { fail("JSON", "DUF root must be an object."); }
+        var projectionStart = clock();
+        var projected=SaveGuardCameraSourceProjection.project(source,guard,options);source=null;guard();return {document:projected.document,rows:projected.rows,stats:{parseMillis:parseMillis,normalizationMillis:normalizationMillis,projectionMillis:clock()-projectionStart,expandedBytes:bytes,retainedChars:projected.retainedChars,selectedCameraRecords:true}};
+    }
+
+    function read(path,options){
+        options=options||{};if(options.lowMemoryMode===true)throw Error("Low RAM mode is not available in this isolated camera candidate");var raw=null,gz=null,clock=options.clock||function(){return new Date().getTime();},start=clock(),before,parsed;
+        function stat(){var i=new DzFileInfo(path);if(!i.exists()||!i.isFile()||!i.isReadable())fail("FILE_ACCESS","Saved DUF unavailable");return {bytes:Number(i.size()),stamp:String(i.lastModified())};}
+        var maxMillis=timeBudget(options);
+        function guard(){if(options.isCancelled&&options.isCancelled())fail("CANCELLED","Inspection cancelled");if(maxMillis!==null&&clock()-start>maxMillis)fail("LIMIT_TIME","Fast inspection exceeded its time budget");}
+        function phase(name){guard();if(typeof print==="function")print("SaveGuard fast inspect: "+name);if(options.onProgress)options.onProgress(0);guard();}
+        function readUnsignedByte(a,n){var v=a.byteAt(n);return v<0?v+256:v;}
+        try{
+            before=stat();if(!(isFinite(before.bytes)&&before.bytes>0&&Math.floor(before.bytes)===before.bytes&&before.bytes<=9007199254740991))fail("LIMIT_PHYSICAL","Source size is empty or not an exactly representable byte count");
+            raw=new DzFile(path);if(!raw.open(DzFile.ReadOnly))fail("OPEN","Cannot read saved DUF");var header=raw.read(2),gzip=readUnsignedByte(header,0)===31&&readUnsignedByte(header,1)===139,major=parseInt(String(App.longVersionString),10),text;
+            if(major!==4&&major!==6)fail("API","Fast inspection supports DAZ4/DAZ6 only");
+            if(gzip){
+                if(before.bytes<18||!raw.seek(before.bytes-4))fail("GZIP","Invalid gzip source");var trailer=raw.read(4),expected=readUnsignedByte(trailer,0)+readUnsignedByte(trailer,1)*256+readUnsignedByte(trailer,2)*65536+readUnsignedByte(trailer,3)*16777216;
+                // ISIZE is unsigned modulo 2^32, not an allocation estimate or size ceiling.
+                raw.close();raw=null;gz=new DzGZFile(path);if(typeof gz.read!=="function"||typeof gz.eof!=="function"||typeof gz.close!=="function")fail("API","Native gzip read/eof/close API unavailable; no fallback attempted");if(!gz.open(DzGZFile.ReadOnly))fail("OPEN","Cannot open gzip DUF");phase("native whole read (not interruptible)");var nativeStart=clock();text=gz.read();var nativeReadMillis=clock()-nativeStart;
+                if(typeof text!=="string"||!gz.eof()||(typeof gz.error==="function"&&gz.error()!==DzFile.NoError))fail("READ","Native gzip read failed");
+            }else{
+                if(!raw.seek(0))fail("SEEK","Cannot rewind saved DUF");phase("native plain UTF-8 bulk read");
+                var nativeStart=clock(),a=raw.read(before.bytes),len=typeof a.length==="number"?a.length:a.size;
+                if(len!==before.bytes||!raw.eof()||raw.error()!==DzFile.NoError)fail("READ","Incomplete plain DUF or native error");
+                if(typeof a.convertToStringFromUtf8!=="function")fail("API","Native UTF-8 conversion unavailable");
+                text=a.convertToStringFromUtf8();a=null;major=6;nativeReadMillis=clock()-nativeStart;
+                if(typeof text!=="string")fail("READ","Native plain read returned invalid text");
+                guard();
+            }
+            phase("native JSON parse and selected camera projection");parsed=scan(text,major,{maxBytes:options.maxBytes,maxMillis:options.maxMillis,isCancelled:options.isCancelled,resolveAssetDocument:options.resolveAssetDocument,sourceId:options.sourceId},clock);text=null;
+            if(gzip&&parsed.stats.expandedBytes%4294967296!==expected)fail("GZIP","Returned text size differs from gzip trailer");
+            var after=stat();if(before.bytes!==after.bytes||before.stamp!==after.stamp)fail("FILE_CHANGED","Saved DUF changed while reading");
+            var gcStart=clock();if(typeof gc==="function")gc();parsed.stats.garbageCollectionMillis=clock()-gcStart;
+            var doc=parsed.document,projected={document:doc,rows:parsed.rows},closed=false,groups=["node_library","scene.nodes","scene.extra"];
+            function alive(){if(closed)fail("CLOSED","Metadata provider closed");}
+            var provider={groups:function(){alive();return groups.slice(0);},readEnvelope:function(){alive();return {file_version:doc.file_version,scene:{}};},listRecords:function(group){alive();return group==="node_library"?doc.node_library:group==="scene.nodes"?doc.scene.nodes:group==="scene.extra"?doc.scene.extra:[];},
+                verifySource:function(){alive();var now=stat();if(now.bytes!==before.bytes||now.stamp!==before.stamp)fail("FILE_CHANGED","Saved DUF changed; inspect again");return true;},
+                selectCamera:function(id){alive();provider.verifySource();return SaveGuardCameraSourceProjection.select(projected,id,guard,options);},listCameras:function(){alive();return JSON.parse(JSON.stringify(projected.rows));},close:function(){closed=true;doc=null;projected=null;}};
+            parsed.stats.nativeReadMillis=nativeReadMillis||0;parsed.stats.totalMillis=clock()-start;if(typeof print==="function")print("SaveGuard fast inspect complete: "+JSON.stringify(parsed.stats));
+            return {provider:provider,stats:parsed.stats,previewOnly:false};
+        }catch(e){return {error:{code:e.code||"FAST_INSPECT",message:String(e.message||e)}};}
+        finally{if(raw&&typeof raw.close==="function")raw.close();if(gz&&typeof gz.close==="function")gz.close();}
+    }
+    return {read:read,scan:scan};
+}());

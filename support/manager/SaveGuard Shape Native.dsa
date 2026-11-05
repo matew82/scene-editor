@@ -1,0 +1,50 @@
+var SaveGuardShapeNative=(function(){
+ function need(v,m){if(!v)throw Error("Shape: "+m);}
+ function num(v){v=Number(v&&typeof v.valueOf==="function"?v.valueOf():v);need(isFinite(v),"Non-finite native value");return v;}
+ function count(v,label){var raw=v;v=v&&typeof v.valueOf==="function"?v.valueOf():v;need(typeof v==="number"&&isFinite(v)&&v>=0&&Math.floor(v)===v,"Invalid native count from "+(label||"unknown API")+": "+String(raw)+" ("+typeof raw+")");return v;}
+ function text(v){return v&&typeof v.toString==="function"?String(v.toString()):String(v||"");}
+ function close(a,b){return Math.abs(a-b)<=0.000001;}
+ function morphData(modifier,guard){
+  need(typeof modifier.getDeltas==="function","Cannot verify this embedded morph in this DAZ version");
+  var deltas=modifier.getDeltas();need(deltas&&typeof deltas.getTargetVertexCount==="function"&&typeof deltas.getNumDeltas==="function"&&typeof deltas.getDeltaIndex==="function"&&typeof deltas.getDeltaVec==="function","Embedded morph data unavailable");
+  var total=count(deltas.getNumDeltas(),"getNumDeltas: "+text(modifier.assetUri)),vertices=count(deltas.getTargetVertexCount(),"getTargetVertexCount: "+text(modifier.assetUri)),values=[],seen={};
+  need(vertices>0,"Embedded morph vertex count unavailable");
+  for(var i=0;i<total;i++){
+   if(guard)guard();var index=count(deltas.getDeltaIndex(i),"getDeltaIndex["+i+"]: "+text(modifier.assetUri)),v=deltas.getDeltaVec(i);
+   need(index<vertices&&!seen["$"+index]&&v,"Invalid target morph delta");seen["$"+index]=true;
+   values.push([index,num(v.x),num(v.y),num(v.z)]);
+  }
+  values.sort(function(a,b){return a[0]-b[0];});return {vertexCount:vertices,values:values};
+ }
+ function sameMorph(a,b){
+  if(a.vertexCount!==b.vertexCount||a.values.length!==b.values.length)return false;
+  for(var i=0;i<a.values.length;i++){if(a.values[i][0]!==b.values[i][0])return false;for(var j=1;j<4;j++)if(Math.abs(a.values[i][j]-b.values[i][j])>Math.max(0.0000001,Math.abs(a.values[i][j])*0.000001))return false;}
+  return true;
+ }
+ function state(p){
+  var keys=[],n=count(p.getNumKeys(),"getNumKeys on "+text(p.getName()));for(var i=0;i<n;i++){
+   var params=p.getKeyInterpolationTypeValues(i),values=[];need(params&&params.length===4,"Key interpolation metadata unavailable");
+   for(var j=0;j<params.length;j++)values.push(num(params[j]));
+   keys.push({time:num(p.getKeyTime(i)),value:num(p.getKeyValue(i)),interpolation:num(p.getKeyInterpolationType(i)),parameters:values});
+  }
+  return {raw:num(p.getRawValue()),value:num(p.getValue()),local:num(p.getLocalValue()),defaultValue:num(p.getDefaultValue()),keys:keys};
+ }
+ function sameState(a,b,evaluated){return close(a.raw,b.raw)&&close(a.defaultValue,b.defaultValue)&&JSON.stringify(a.keys)===JSON.stringify(b.keys)&&(!evaluated||close(a.value,b.value)&&close(a.local,b.local));}
+ function target(env){
+  var selected=SaveGuardSceneInventory.selected(env.Scene),primary=env.Scene.getPrimarySelection();
+  need(selected.length===1&&env.pointersAreEqual(selected[0],primary),"Select exactly one figure, wearable, or bone");
+  var node=primary;if(node.inherits("DzBone"))node=node.getSkeleton();
+  need(node&&node.inherits("DzFigure")&&node.isInScene(),"Select a figure or rigged wearable");
+  // Deliberately do not follow getFollowTarget(): garment shaping belongs to the garment.
+  var object=node.getObject();need(object&&count(object.getNumShapes(),"getNumShapes")===1,"Exactly one target shape required");
+  var shape=object.getCurrentShape();need(shape&&env.pointersAreEqual(shape.getNode(),node),"Target shape ownership changed");
+  var geometry=shape.getGeometry(),geometryUri="",candidates=[geometry];
+  if(typeof shape.getCurrentGeometry==="function")candidates.push(shape.getCurrentGeometry());
+  for(var gi=0;gi<candidates.length&&!geometryUri;gi++)if(candidates[gi]){
+   var identities=[candidates[gi].assetSource,candidates[gi].assetUri];
+   for(var ii=0;ii<identities.length&&!geometryUri;ii++)if(/^\/[^?#]+\.(dsf|duf)#/i.test(decodeURIComponent(text(identities[ii]))))geometryUri=SaveGuardShapePlan.uri(text(identities[ii]));
+  }
+  need(geometry&&geometryUri,"Target geometry asset identity unavailable");
+  return {node:node,selection:primary,object:object,shape:shape,geometry:geometry,geometryUri:geometryUri,uri:SaveGuardShapePlan.uri(text(node.assetUri))};
+ }
+return {target:target,state:state,morphData:morphData,sameMorph:sameMorph};}());

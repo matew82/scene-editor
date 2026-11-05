@@ -1,0 +1,43 @@
+var SaveGuardShapeManager=(function(){
+ function need(v,m){if(!v)throw Error("Shape: "+m);}
+ function create(env,info){
+  need(SaveGuardNativeRuntime.hostSupported(env),"Unsupported host");
+  need(info.context.lowMemoryMode===false,"Apply Shape requires Low RAM off");
+  var context=info.context,doc=context.planningDocument,provider=context.provider,resolver=info.resolver,id=info.request.sourceId,closed=false,busy=false,plan=null,prepared=null,summary=null,receipts=[];
+  var selected=env.Scene.getPrimarySelection();
+  function live(){need(!closed&&context===info.context&&context.planningDocument===doc&&context.provider===provider&&resolver===info.resolver&&info.request.sourceId===id,"Source context changed");need(provider.verifySource()===true&&resolver.verifyAll()===true,"Saved scene or definition changed");need(env.pointersAreEqual(selected,env.Scene.getPrimarySelection()),"Target selection changed");return true;}
+  function cancel(fn){if(fn&&fn()===true){var e=Error("Shape cancelled");e.code="CANCELLED";throw e;}}
+  var api={
+   buildShape:function(source,sourceId,resolveAsset,cancelled){
+    live();cancel(cancelled);need(source===doc&&sourceId===id,"Source identity changed");need(Number(env.Scene.getTime())===0,"Move to frame 0");
+    var definitionCache={},metrics={definitionFilesRead:0,definitionCacheHits:0,phases:[]};
+    function stage(label,fn){var began=new Date().getTime();try{return fn();}finally{var row={phase:label,milliseconds:new Date().getTime()-began};metrics.phases.push(row);if(typeof print==="function")print("SaveGuard shape phase: "+JSON.stringify(row));}}
+    function resolveDefinition(file){
+     cancel(cancelled);
+     if(Object.prototype.hasOwnProperty.call(definitionCache,"$"+file)){metrics.definitionCacheHits++;return definitionCache["$"+file];}
+     metrics.definitionFilesRead++;if(typeof resolver.visitFragments!=="function")return definitionCache["$"+file]=resolveAsset(file);
+     return definitionCache["$"+file]=resolver.visitFragments(file,function(get,document){
+      var projected={},groups=["node_library","modifier_library"],fields=["id","url","type","channel","presentation","geometries","name","parent"];
+      for(var gi=0;gi<groups.length;gi++){var group=groups[gi],rows=document[group]||[],out=[];for(var ri=0;ri<rows.length;ri++){cancel(cancelled);var row={};for(var fi=0;fi<fields.length;fi++)if(Object.prototype.hasOwnProperty.call(rows[ri],fields[fi]))row[fields[fi]]=rows[ri][fields[fi]];out.push(row);}projected[group]=out;}
+      // Detach small channel/identity metadata before the scoped provider is released.
+      return {verified:true,document:JSON.parse(JSON.stringify(projected))};
+     });
+    }
+    try{plan=stage("selected shape definitions",function(){return SaveGuardShapePlan.compile(doc,id,resolveDefinition,cancelled);});plan.fullDefinition=function(ref){var canonical=SaveGuardShapePlan.uri(ref),file=canonical.substring(0,canonical.indexOf("#")),resolved=resolveAsset(file);need(resolved&&resolved.verified===true,"Full morph definition unavailable");return SaveGuardShapePlan.definitions(doc,function(p){return p===file?resolved:resolveAsset(p);},cancelled).get(canonical,"modifier_library");};prepared=stage("target shape capture",function(){return SaveGuardShapePresetTarget.create(env,plan,doc,cancelled);});stage("source freshness",live);metrics.target={assignments:prepared.plan.rows.length};}finally{if(typeof print==="function")print("SaveGuard shape preparation: "+JSON.stringify(metrics));}
+    var assignments=prepared.plan.rows;
+    summary={metrics:metrics,ready:true,errors:[],warnings:prepared.warnings,assignments:assignments,definitionFiles:plan.definitionFiles,skippedDriven:0};
+    return {plan:summary};
+   },
+   prepare:function(request,cancelled){live();cancel(cancelled);need(!busy&&prepared&&request&&request.kind==="shape"&&request.plan===summary,"Unknown shape preparation");need(request.source.verify()===true&&prepared.check(),"Source or target changed");var receipt={kind:"shape"};receipts.push({receipt:receipt,source:request.source,used:false});return receipt;},
+   apply:function(receipt,cancelled){live();cancel(cancelled);need(!busy,"Shape action busy");var item=null;for(var i=0;i<receipts.length;i++)if(receipts[i].receipt===receipt)item=receipts[i];need(item&&!item.used,"Unknown or consumed shape receipt");item.used=true;busy=true;try{if(prepared.plan.rows.length===0){need(prepared.check()===true&&item.source.verify()===true,"No-op input changed");return {ok:true,status:"unchanged",nativeExecuted:false,mutationStarted:false,message:"All supported shaping inputs already match; no native load needed."};}var io=SaveGuardShapePresetIO.create(env),result=SaveGuardShapePresetRun.run(env,{source:{verify:function(){cancel(cancelled);return live()&&item.source.verify()===true;}},preflight:{check:prepared.check},stage:io.staging()},prepared.plan,"/SaveGuard/apply-"+new Date().getTime()+"-"+Math.floor(Math.random()*1000000000)+".duf");
+     result.ok=result.nativeSucceeded===true;result.mutationStarted=result.nativeExecuted;result.message=result.ok?"DAZ native preset loaded.":"Native preset failed; no automatic restoration is claimed.";
+     if(result.error)result.message+=" Undo/error: "+result.error;if(result.cleanupError)result.message+=" Temporary cleanup error: "+result.cleanupError+" ("+result.temporaryPath+")";
+     if(!result.ok&&result.cleanupError)result.error=String(result.error)+" Cleanup: "+result.cleanupError+" ("+result.temporaryPath+")";
+     if(!result.ok&&result.nativeExecuted)result.error=String(result.error)+" Scene may have changed; no automatic restoration.";
+     if(typeof print==="function")print("SaveGuard native Apply Shape RESULT: "+JSON.stringify(result));return result;}finally{busy=false;}},
+   release:function(receipt){for(var i=0;i<receipts.length;i++)if(receipts[i].receipt===receipt){receipts.splice(i,1);return true;}return false;},
+   close:function(){closed=true;receipts=[];plan=null;prepared=null;summary=null;}
+  };return api;
+ }
+ return {create:create};
+}());

@@ -1,0 +1,33 @@
+// No scene inspection, readback, or cancellation after doLoad.
+var SaveGuardShapePresetRun={run:function(env,ports,plan,assetId){
+ var r={nativeExecuted:false,nativeSucceeded:false,status:"stopped",restorationClaimed:false},token=null,held=false,acceptAttempted=false;
+ function need(v,m){if(!v)throw Error(m);}
+ function finishUndo(label){acceptAttempted=true;env.acceptUndo(label);held=false;r.undoAccepted=true;r.undoLabel=label;}
+ try{
+  need(ports.source.verify()===true,"Source changed");need(ports.preflight.check(plan)===true,"Target preflight failed");
+  var payload=SaveGuardShapePresetPlan.document(plan,assetId);token=ports.stage.create(payload);r.temporaryPath=token.path;
+  need(ports.stage.verify(token,payload)===true,"Staged payload differs");
+  need(ports.source.verify()===true&&ports.preflight.check(plan)===true,"Source or target changed before load");
+  var io=env.App.getAssetIOMgr();need(io&&io.isReadingOrWriting()===false&&!env.Scene.isLoading(),"Native I/O busy");
+  need(Number(env.Scene.getTime())===0,"Frame zero required");
+  need(!env.UndoStack.isInUndoRedo()&&!env.UndoStack.canPushItems(),"Undo busy");
+  need(typeof env.DzAssetIOMgr.MergeFile==="number","MergeFile unavailable");
+  r.undoBeginAttempted=true;env.beginUndo();held=true;
+  need(env.UndoStack.canPushItems()===true,"Undo hold did not open");
+  r.nativeExecuted=true;r.nativeStarted=new Date().getTime();
+  var code=io.doLoad(token.path,env.DzAssetIOMgr.MergeFile);code=code&&typeof code.valueOf==="function"?code.valueOf():code;
+  r.nativeCode=code;r.nativeElapsed=new Date().getTime()-r.nativeStarted;
+  need(typeof code==="number"&&code===0,"Native loader returned failure: "+code);
+  r.nativeSucceeded=true;r.status="loaded";
+  finishUndo("SaveGuard Apply Shape");
+ }catch(error){
+  r.error=String(error);if(error.cleanupError)r.cleanupError=String(error.cleanupError);if(error.temporaryPath)r.temporaryPath=String(error.temporaryPath);r.status=r.nativeSucceeded?"loaded-with-undo-error":r.nativeExecuted?"native-failed-state-unknown":"stopped";
+  // Preserve whatever the loader did. Never cancel or claim restored state.
+  if(held&&!acceptAttempted){try{finishUndo("SaveGuard Apply Shape - failed attempt");}catch(u){r.undoError=String(u);}}
+  if(r.undoBeginAttempted&&!r.undoAccepted)r.undoStateUnknown=true;
+ }finally{
+  if(r.nativeExecuted&&r.nativeElapsed===undefined)r.nativeElapsed=new Date().getTime()-r.nativeStarted;
+  if(token)try{r.temporaryRemoved=ports.stage.removeOwned(token)===true;if(!r.temporaryRemoved)r.cleanupError="Owned temporary file removal failed";}catch(c){r.temporaryRemoved=false;r.cleanupError=String(c);}
+ }
+ return r;
+}};
