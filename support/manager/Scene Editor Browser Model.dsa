@@ -23,6 +23,22 @@ var SceneEditorBrowserModel = (function () {
         if (mode !== 'exact' && mode !== undefined) fail('FILTER_MATCH', 'Unknown label match mode ' + mode);
         return a === b;
     }
+
+    // Same-directory filename change only. Never interpret user input as a path.
+    function renameTarget(source, name) {
+        source = slash(source); name = text(name);
+        if (!/\.duf$/i.test(source)) fail('RENAME_SOURCE', 'Choose a saved DUF scene.');
+        if (name !== trim(name)) fail('RENAME_NAME', 'The name cannot begin or end with spaces.');
+        name = name.replace(/\.duf$/i, '');
+        if (!name || name === '.' || name === '..' || /[\\\/<>:"|?*\x00-\x1f\x7f]/.test(name) ||
+                /[. ]$/.test(name) || /^(?:con|prn|aux|nul|com[0-9\u00b9\u00b2\u00b3]|lpt[0-9\u00b9\u00b2\u00b3])(?:\.|$)/i.test(name))
+            fail('RENAME_NAME', 'Enter a filename without path separators, reserved names, or trailing dots.');
+        if (name.length + 12 > 255) fail('RENAME_NAME', 'The filename is too long for its preview companions.');
+        var at = source.lastIndexOf('/');
+        if (at < 0) fail('RENAME_SOURCE', 'An absolute scene path is required.');
+        return source.substring(0, at + 1) + name + source.substring(source.length - 4);
+    }
+
     function normalizedState(input) {
         var s = input === undefined || input === null ? {} : copy(input), i, k;
         if (!s || typeof s !== 'object' || array(s)) fail('STATE', 'Central state is not an object');
@@ -86,6 +102,35 @@ var SceneEditorBrowserModel = (function () {
         return {name:'', importantOnly:false, recursive:false, objects:[], dateMin:null, dateMax:null, sizeMin:null, sizeMax:null,
             sort:filters.sort === 'date' || filters.sort === 'size' ? filters.sort : 'name', descending:filters.descending === true};
     }
+    // Persist browser controls only. Object clauses deliberately never cross a restart.
+    function sceneFilterSnapshot(filters) {
+        filters = filters && typeof filters === 'object' && !array(filters) ? filters : {};
+        var out = clearFilters(filters), names = ['dateMin', 'dateMax', 'sizeMin', 'sizeMax'], i, key, value;
+        delete out.objects;
+        out.name = typeof filters.name === 'string' ? filters.name : '';
+        out.importantOnly = filters.importantOnly === true;
+        out.recursive = filters.recursive === true;
+        for (i = 0; i < names.length; i++) {
+            key = names[i]; value = filters[key];
+            if (finite(value) && (key.indexOf('size') === 0 ? value >= 0 : Math.abs(value) <= 8640000000000000)) out[key] = value;
+        }
+        if (out.dateMin !== null && out.dateMax !== null && out.dateMin > out.dateMax) out.dateMin = out.dateMax = null;
+        if (out.sizeMin !== null && out.sizeMax !== null && out.sizeMin > out.sizeMax) out.sizeMin = out.sizeMax = null;
+        return out;
+    }
+    function restoreSceneFilters(settings) {
+        settings = settings || {};
+        var filters = settings.saveSceneFilters === false ? clearFilters() : sceneFilterSnapshot(settings.sceneFilters);
+        filters.objects = [];
+        return filters;
+    }
+    function rememberSceneFilters(settings, filters) {
+        var remembered = copy(settings || {});
+        remembered.saveSceneFilters = remembered.saveSceneFilters !== false;
+        if (remembered.saveSceneFilters) remembered.sceneFilters = sceneFilterSnapshot(filters);
+        else delete remembered.sceneFilters;
+        return remembered;
+    }
     function create(host, initialState) {
         if (!host || typeof host.canonical !== 'function' || typeof host.parent !== 'function' || typeof host.list !== 'function') fail('HOST', 'Browser filesystem host is incomplete');
         var state = normalizedState(initialState);
@@ -110,6 +155,29 @@ var SceneEditorBrowserModel = (function () {
             if (own(change, 'note')) m.note = change.note;
             m.path = canonical(path); next.metadata[k] = m; persist(next); return copy(m);
         }
+
+        function renameScene(path, name, guard) {
+            var requested = slash(path), source = canonical(path);
+            if (pathKey(requested) !== pathKey(source)) fail('RENAME_SOURCE_CHANGED', 'The selected scene path is now redirected. Select the scene again before renaming.');
+            var target = renameTarget(source, name);
+            if (source === target) return {success:true, committed:false, changed:false, sourcePath:source, scenePath:source};
+            if (typeof host.renameScene !== 'function') fail('RENAME_IO', 'Scene rename is unavailable.');
+            var next = copy(state), oldKey = '$' + pathKey(source), newKey = '$' + pathKey(target);
+            if (oldKey !== newKey && own(next.metadata, newKey))
+                fail('RENAME_METADATA_COLLISION', 'The new name already has scene annotations. Choose another name.');
+            if (own(next.metadata, oldKey)) {
+                var moved = next.metadata[oldKey];
+                if (oldKey !== newKey) delete next.metadata[oldKey];
+                moved.path = target; next.metadata[newKey] = moved;
+            }
+            if (next.settings.lastScene && key(next.settings.lastScene) === pathKey(source)) next.settings.lastScene = target;
+            var receipt = host.renameScene(source, target, copy(next), guard);
+            if (!receipt || receipt.success !== true || receipt.committed !== true || pathKey(receipt.scenePath) !== pathKey(target))
+                fail('RENAME_RECEIPT', 'Scene rename did not return a verified commit receipt.');
+            state = next;
+            return receipt;
+        }
+
         function recordSuccess(path, kind, receipt) {
             if (kind !== 'edit' && kind !== 'load' && kind !== 'apply') fail('HISTORY_EFFECT', 'Inspection/browsing does not qualify for recent folders');
             if (!receipt || receipt.success !== true || receipt.cancelled === true) return false;
@@ -248,10 +316,10 @@ var SceneEditorBrowserModel = (function () {
             } catch (error) { result.status = error && error.code === 'CANCELLED' ? 'cancelled' : 'partial-error'; result.error = String(error.message || error); }
             result.removedKnownBytes = total; return result;
         }
-        return {browse:browse, clearFilters:clearFilters, metadata:metadata, setMetadata:setMetadata, recordSuccess:recordSuccess, recentFolders:function(){return state.recentFolders.slice(0, 10);},
+        return {browse:browse, clearFilters:clearFilters, metadata:metadata, setMetadata:setMetadata, renameScene:renameScene, recordSuccess:recordSuccess, recentFolders:function(){return state.recentFolders.slice(0, 10);},
             getState:function(){return copy(state);}, settings:function(){return copy(state.settings);}, setSettings:function(settings){if(!settings || typeof settings !== 'object' || array(settings))fail('SETTINGS','Invalid settings');var next=copy(state);next.settings=copy(settings);persist(next);},
             cacheUsage:cacheUsage, cleanupPlan:cleanupPlan, cleanup:cleanup, canonical:canonical, pathKey:function(path){return key(path);}};
     }
-    return {create:create, clearFilters:clearFilters, pathKey:pathKey, labelBase:labelBase, labelMatches:labelMatches, objectMatch:objectMatch,
+    return {create:create, renameTarget:renameTarget, clearFilters:clearFilters, sceneFilterSnapshot:sceneFilterSnapshot, restoreSceneFilters:restoreSceneFilters, rememberSceneFilters:rememberSceneFilters, pathKey:pathKey, labelBase:labelBase, labelMatches:labelMatches, objectMatch:objectMatch,
         filterSemantics:'Name is literal case-insensitive filename substring, not @Participants syntax. Date bounds are inclusive epoch milliseconds; size bounds inclusive bytes. All object clauses combine with AND. Exact labels are case-insensitive after trimming and removing only a terminal numeric (N) instance suffix. Prefix is a literal case-insensitive label prefix, not a substring. Unknown inspection/date/size retains the scene with an explicit diagnostic; cancellation publishes no partial result. Recursive search follows canonical directories once. Clear Filters resets name/Important/date/size/object/recursive filters, retaining folder and sort. Cache cleanup never receives central state or source DUFs.'};
 }());

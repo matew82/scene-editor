@@ -109,5 +109,8 @@ function usageContext(editor){var index={},owners={},i,p,chain=editor.chain||[];
   if(!index||index.nodes!==nodes){index={nodes:nodes,ids:{},labels:{}};for(var ni=0;ni<nodes.length;ni++){var node=nodes[ni];if(!node||typeof node.id!=='string')continue;var key='$'+node.id,label=String(node.label||node.name||node.id);if(!own(index.ids,key))index.ids[key]={node:node,count:0,label:label};index.ids[key].count++;index.labels['$'+label]=(index.labels['$'+label]||0)+1;}editor._nodeDisplayIndex=index;}
   var found=index.ids['$'+id];if(!found||found.count!==1)return 'Unknown';return found.label+(index.labels['$'+found.label]>1?' ('+id+')':'');
  }
- return{nodeReferenceDisplay:nodeReferenceDisplay,usageContext:usageContext,Editor:Editor,Document:Document,parse:parse,parseDocument:parseDocument,scan:scan,equal:equal,diff:diff,validate:validate,projectAsset:projectAsset,projectLibraries:projectLibraries,locate:locate,valueSpan:valueSpan,fail:fail};
+ // Display-only fallback for legacy morphs authored under /Hidden without channel flags.
+ // Explicit channel visibility wins; inferred state never changes saved metadata.
+ function propertyHidden(p){var m=p.meta||{};if(m.visible===false||m.hidden===true)return true;if(m.visible===true||m.hidden===false)return false;var source=p.keyframe&&p.keyframe.source||p,group=source.morph&&source.morph.group;if(typeof group!=='string')return false;var parts=group.split('/');for(var i=0;i<parts.length;i++)if(parts[i])return parts[i].toLowerCase()==='hidden';return false;}
+ return{propertyHidden:propertyHidden,nodeReferenceDisplay:nodeReferenceDisplay,usageContext:usageContext,Editor:Editor,Document:Document,parse:parse,parseDocument:parseDocument,scan:scan,equal:equal,diff:diff,validate:validate,projectAsset:projectAsset,projectLibraries:projectLibraries,locate:locate,valueSpan:valueSpan,fail:fail};
 }());

@@ -86,6 +86,112 @@ var SceneEditorManagerHost=(function(){
 
   function loadState(){assertProjectRoot();if(info(statePath).isSymLink())fail('Metadata symlink is not readable');if(!exists(statePath)){if(exists(statePath+'.previous')){if(info(statePath+'.previous').isSymLink())fail('Metadata recovery symlink is not readable');var recoveryIdentity=identity(statePath+'.previous'),recovered=readJSON(statePath+'.previous');if(!SceneEditorCore.equal(recoveryIdentity,identity(statePath+'.previous')))fail('Recovery settings changed while reading');stateIdentity=null;return recovered;}stateIdentity=null;return{recentFolders:[],metadata:{},settings:{propertySource:'DAZ',propertyView:'Controls'}};}var before=identity(statePath),value=readJSON(statePath);if(!SceneEditorCore.equal(before,identity(statePath)))fail('Settings changed while reading');stateIdentity=before;return value;}
   function saveState(value){writeJSON(statePath,value,stateIdentity);return true;}
+
+  // A rename never overwrites/deletes scene bytes. A durable plan precedes all moves.
+  // On interruption, the plan identifies every original, intermediate and final path.
+  function renameScene(source,target,nextState,guard){
+   guard=typeof guard==='function'?guard:function(){};
+   source=absolute(source);target=absolute(target);
+   var journalPath=root+'/settings/scene-rename-journal.json',journalIdentity=null,journal=null,plan=[],critical=false,stateCommitted=false,journalReady=false,problems=[],i;
+   function pulse(label){if(!critical)guard(label);}
+   function occupied(path){return exists(path)||info(path).isSymLink();}
+   function error(code,message){var e=Error(message);e.code=code;return e;}
+   function directParent(path){
+    var folder=absolute(String(info(path).path())),f=info(folder);
+    if(!f.exists()||!f.isDir()||f.isSymLink()||literalKey(canonical(folder))!==literalKey(folder))throw error('RENAME_PARENT','Scene folder changed or is redirected: '+folder);
+    return folder;
+   }
+   var parentPath=directParent(source),parentKey=literalKey(parentPath);
+   function pathGuard(path){
+    if(literalKey(directParent(path))!==parentKey)throw error('RENAME_PARENT','Rename must remain in the original folder.');
+    if(info(path).isSymLink()||exists(path)&&literalKey(canonical(path))!==literalKey(path))throw error('RENAME_LINK','Linked/redirected scene files are not renamed: '+path);
+   }
+   function snapshot(path){
+    pathGuard(path);var f=info(path);
+    if(!f.exists()||!f.isFile()||!f.isReadable())throw error('RENAME_SOURCE','File is missing or unreadable: '+path);
+    var before=String(f.lastModified().getTime()),digest=readSignature(env,path,pulse),after=String(info(path).lastModified().getTime());
+    if(before!==after)throw error('RENAME_CHANGED','File changed during rename verification: '+path);
+    return{bytes:digest.bytes,sha256:digest.sha256,modified:before};
+   }
+   function equal(a,b){return !!a&&!!b&&a.bytes===b.bytes&&a.sha256===b.sha256&&a.modified===b.modified;}
+   function assertFile(path,expected){if(!equal(snapshot(path),expected))throw error('RENAME_CHANGED','File changed; its current bytes were preserved: '+path);}
+   function saveJournal(status){
+    journal.status=status;journal.updatedEpochMs=new Date().getTime();
+    for(var j=0;j<plan.length;j++)journal.files[j].currentPath=plan[j].location;
+    writeJSON(journalPath,journal,journalIdentity);journalIdentity=identity(journalPath);journalReady=true;
+   }
+   function move(entry,from,to){
+    pathGuard(from);pathGuard(to);assertFile(from,entry.signature);
+    if(occupied(to))throw error('RENAME_COLLISION','Destination is occupied; nothing will be overwritten: '+to);
+    var moved=false,problem=null;
+    try{moved=new env.DzFile(from).rename(to);}catch(e){problem=e;}
+    if(moved){entry.location=to;assertFile(to,entry.signature);if(occupied(from))throw error('RENAME_CHANGED','The old path reappeared; its current file was preserved: '+from);return;}
+    // Some native failures may report after applying. Record only a verified outcome.
+    if(!occupied(from)&&occupied(to)){
+     try{assertFile(to,entry.signature);entry.location=to;}catch(uncertain){problems.push('Uncertain move retained at '+to);}
+    }else if(occupied(to)){problems.push('Uncertain native outcome; both current paths preserved: '+from+'; '+to);}
+    throw problem||error('RENAME_MOVE','Cannot rename '+from+' to '+to);
+   }
+   function rollback(){
+    var complete=true;
+    for(var j=plan.length-1;j>=0;j--){var entry=plan[j];if(entry.location===entry.source)continue;
+     try{if(occupied(entry.source))throw Error('Original path is occupied; current file preserved: '+entry.source);move(entry,entry.location,entry.source);}
+     catch(e){complete=false;problems.push(String(e.message||e));}
+    }
+    return complete&&problems.length===0;
+   }
+   try{
+    assertProjectRoot();
+    if(typeof SceneEditorBrowserModel==='undefined'||SceneEditorBrowserModel.renameTarget(source,String(info(target).fileName()))!==target)throw error('RENAME_NAME','Invalid scene rename target.');
+    if(source===target)return{success:true,committed:false,changed:false,sourcePath:source,scenePath:source};
+    if(literalKey(directParent(target))!==parentKey)throw error('RENAME_PARENT','Rename must remain in the original folder.');
+    if(info(journalPath).isSymLink())throw error('RENAME_JOURNAL','Rename recovery journal is a link; no files were changed.');
+    journalIdentity=identity(journalPath);
+    if(journalIdentity){
+     var previous=readJSON(journalPath);
+     if(!SceneEditorCore.equal(identity(journalPath),journalIdentity))throw error('RENAME_JOURNAL','Rename recovery journal changed.');
+     if(!previous||previous.schema!=='scene-editor-rename-1'||previous.status!=='committed'&&previous.status!=='rolled-back')throw error('RENAME_RECOVERY_REQUIRED','An unfinished rename requires recovery before another rename: '+journalPath);
+    }else if(occupied(journalPath+'.previous'))throw error('RENAME_RECOVERY_REQUIRED','Rename journal is missing but its recovery copy exists: '+journalPath+'.previous');
+    if(!SceneEditorCore.equal(identity(statePath),stateIdentity))throw error('RENAME_STATE_CHANGED','Settings changed in another window; reopen Scene Editor before renaming.');
+    var stem=source.replace(/\.duf$/i,''),newStem=target.replace(/\.duf$/i,''),
+        sources=[source,source+'.png',stem+'.tip.png',source+'.tip.png',stem+'.png',stem+'.jpg'],
+        targets=[target,target+'.png',newStem+'.tip.png',target+'.tip.png',newStem+'.png',newStem+'.jpg'];
+    for(i=0;i<sources.length;i++){
+     pulse('Prepare scene rename');pathGuard(sources[i]);pathGuard(targets[i]);
+     if(occupied(targets[i])&&literalKey(targets[i])!==literalKey(sources[i]))throw error('RENAME_COLLISION','Destination already exists: '+targets[i]);
+     if(!occupied(sources[i])){if(i===0)throw error('RENAME_SOURCE','Selected scene no longer exists.');continue;}
+     var signatureBefore=snapshot(sources[i]),stage=stageName(parentPath+'/.scene-rename','file');
+     pathGuard(stage);
+     plan.push({source:sources[i],target:targets[i],stage:stage,signature:signatureBefore,location:sources[i]});
+    }
+    pulse('Verify rename plan');for(i=0;i<plan.length;i++)assertFile(plan[i].source,plan[i].signature);
+    if(!SceneEditorCore.equal(identity(statePath),stateIdentity))throw error('RENAME_STATE_CHANGED','Settings changed while preparing rename.');
+    journal={schema:'scene-editor-rename-1',status:'prepared',sourcePath:source,targetPath:target,createdEpochMs:new Date().getTime(),files:[],intendedState:nextState};
+    for(i=0;i<plan.length;i++)journal.files.push({source:plan[i].source,target:plan[i].target,stage:plan[i].stage,signature:plan[i].signature,currentPath:plan[i].location});
+    saveJournal('prepared');
+    // No event pumping/cancellation once the durable transaction has begun.
+    critical=true;
+    for(i=0;i<plan.length;i++)move(plan[i],plan[i].source,plan[i].stage);
+    saveJournal('staged');
+    for(i=0;i<plan.length;i++)move(plan[i],plan[i].stage,plan[i].target);
+    saveJournal('files-published');
+    for(i=0;i<plan.length;i++){assertFile(plan[i].target,plan[i].signature);if(literalKey(plan[i].source)!==literalKey(plan[i].target)&&occupied(plan[i].source))throw error('RENAME_CHANGED','Original filename was reused during rename; its current file was preserved: '+plan[i].source);}
+    saveState(nextState);stateCommitted=true;
+    var receipt={success:true,committed:true,changed:true,sourcePath:source,scenePath:target,companions:plan.length-1,journalPath:journalPath};
+    try{saveJournal('committed');}catch(journalError){receipt.warning='The rename completed, but the recovery journal could not be finalized: '+journalPath+'. '+String(journalError.message||journalError);}
+    return receipt;
+   }catch(original){
+    if(!journalReady){if(original.code==='RENAME_RECOVERY_REQUIRED'){original.recoveryRequired=true;original.journalPath=journalPath;}throw original;}
+    if(stateCommitted)throw original;
+    // Uncertain metadata recovery must not be compounded by moving the scene back.
+    var restored=original.recoveryRequired===true?false:rollback();
+    journal.error=String(original.message||original);journal.problems=problems.slice(0);
+    try{saveJournal(restored?'rolled-back':'recovery-required');}catch(journalError){restored=false;problems.push('Recovery journal update failed: '+String(journalError.message||journalError));}
+    if(!restored){var recovery=error('RENAME_RECOVERY_REQUIRED','RECOVERY REQUIRED: '+String(original.message||original)+'; '+problems.join('; ')+'; recovery journal: '+journalPath);recovery.recoveryRequired=true;recovery.journalPath=journalPath;recovery.recoveryPaths=[];for(i=0;i<plan.length;i++)recovery.recoveryPaths.push({source:plan[i].source,stage:plan[i].stage,target:plan[i].target,current:plan[i].location});throw recovery;}
+    original.rollbackComplete=true;original.journalPath=journalPath;throw original;
+   }finally{critical=false;}
+  }
+
   function cacheFolder(source){assertCacheRoots();source=canonical(source);mkdir(inspectionRoot);var path=inspectionRoot+'/'+SceneEditorIO.hash(SceneEditorIO.encode(key(source))),owner=path+'/cache-owner.json';mkdir(path);if(exists(owner)){var meta=readJSON(owner);if(meta.schema!=='scene-editor-inspection-owner-1'||key(meta.sourcePath)!==key(source))fail('Cache owner mismatch');}else writeJSON(owner,{schema:'scene-editor-inspection-owner-1',sourcePath:source},null);return path;}
   function readComparisonCache(source,settings){source=canonical(source);try{assertCacheRoots();var before=signature(source),folder=inspectionRoot+'/'+SceneEditorIO.hash(SceneEditorIO.encode(key(source))),owner=folder+'/cache-owner.json';assertCacheTarget(folder);assertCacheTarget(owner);if(!exists(owner))return{ok:false,path:source,reason:'No scene cache. Inspect this scene first.'};var ownership=readJSON(owner);if(!ownership||ownership.schema!=='scene-editor-inspection-owner-1'||key(ownership.sourcePath)!==key(source))fail('Cache owner mismatch');settings=settings||{};var names=settings.recognizedCharacterNames||SaveGuardSettings.characterNames||[],manifest={sceneEditor:{schema:1,id:key(source),sourcePath:source,signature:before}},document=SaveGuardFastInspect.cachedOnly(source,{canonical:source,bytes:before.bytes,stamp:before.stamp},{inspectionCache:true,cacheDirectory:folder,cacheVersionId:key(source),cacheManifest:manifest,recognizedCharacterNames:names,deepValidation:settings.deepValidation===true});if(!document)return{ok:false,path:source,reason:'Scene cache is missing, stale or incompatible. Inspect this scene first.'};if(JSON.stringify(before)!==JSON.stringify(signature(source)))fail('Source changed while reading its cache');return{ok:true,path:source,signature:before,document:document};}catch(e){return{ok:false,path:source,reason:String(e.message||e)};}}
   function walkCache(path,guard){var stack=[path],files=[],bytes=0;while(stack.length){var dir=stack.pop();assertCacheTarget(dir);var rows=entries(dir);for(var i=0;i<rows.length;i++){if(guard)guard('Inspect owned cache files');if(rows[i].symLink)fail('Cache symlink refused: '+rows[i].path);if(rows[i].directory)stack.push(rows[i].path);else{files.push(rows[i].path);bytes+=rows[i].size;}}}return{files:files,bytes:bytes};}
@@ -123,7 +229,7 @@ var SceneEditorManagerHost=(function(){
    var error=Error('No available configured DAZ content folder. Choose Folder to browse a scene directory, or configure an existing content directory in DAZ Content Directory Manager.');error.code='BROWSER_FOLDER_UNAVAILABLE';error.diagnostics=diagnostics;throw error;
   }
   function parent(path){path=canonical(path);if(/^(?:[A-Za-z]:\/|\/|\/\/[^/]+\/[^/]+)$/.test(path))return null;var p=String(info(path).path()).replace(/\\/g,'/');return key(p)===key(path)?null:p;}
-  return{root:root,cacheRoot:cacheRoot,statePath:statePath,migrationMarkerPath:migrationMarkerPath,protectedPaths:[statePath,migrationMarkerPath],definitionIndexPath:definitionsRoot+'/definition-index-v3.json',canonical:canonical,key:key,parent:parent,configuredContentRoots:configuredContentRoots,classifyContentPath:classifyContentPath,defaultBrowserFolder:defaultBrowserFolder,list:entries,entries:entries,exists:exists,isDir:function(p){return exists(p)&&info(p).isDir();},readJSON:readJSON,saveState:saveState,loadState:loadState,cacheFolder:cacheFolder,readComparisonCache:readComparisonCache,cacheEntries:cacheEntries,isOwnedCache:isOwnedCache,removeCacheEntry:removeCacheEntry,signature:signature,signatureStats:function(){return JSON.parse(JSON.stringify(signatureCounters));},bindRuntime:bindRuntime,inspect:inspect,migrateOwnIndex:migrateOwnIndex,iconPath:function(name){return root+'/icons/'+String(name).replace(/^SaveGuard /,'Scene Editor ')+'.png';},thumbnail:function(p){var stem=p.replace(/\.duf$/i,''),candidates=[stem+'.png',p+'.png'];for(var i=0;i<candidates.length;i++)if(exists(candidates[i]))return candidates[i];return'';}};
+  return{root:root,cacheRoot:cacheRoot,statePath:statePath,migrationMarkerPath:migrationMarkerPath,protectedPaths:[statePath,migrationMarkerPath],definitionIndexPath:definitionsRoot+'/definition-index-v3.json',canonical:canonical,key:key,parent:parent,configuredContentRoots:configuredContentRoots,classifyContentPath:classifyContentPath,defaultBrowserFolder:defaultBrowserFolder,list:entries,entries:entries,exists:exists,isDir:function(p){return exists(p)&&info(p).isDir();},readJSON:readJSON,saveState:saveState,loadState:loadState,renameScene:renameScene,cacheFolder:cacheFolder,readComparisonCache:readComparisonCache,cacheEntries:cacheEntries,isOwnedCache:isOwnedCache,removeCacheEntry:removeCacheEntry,signature:signature,signatureStats:function(){return JSON.parse(JSON.stringify(signatureCounters));},bindRuntime:bindRuntime,inspect:inspect,migrateOwnIndex:migrateOwnIndex,iconPath:function(name){return root+'/icons/'+String(name).replace(/^SaveGuard /,'Scene Editor ')+'.png';},thumbnail:function(p){var stem=p.replace(/\.duf$/i,''),candidates=[stem+'.png',p+'.png'];for(var i=0;i<candidates.length;i++)if(exists(candidates[i]))return candidates[i];return'';}};
  }
  return{create:create,readSignature:readSignature};
 }());
