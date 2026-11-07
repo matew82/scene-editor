@@ -1,0 +1,4 @@
+# Stable source/bundle parity across Windows and Unix checkouts.
+*.dsa text eol=lf
+*.cjs text eol=lf
+*.md text eol=lf
