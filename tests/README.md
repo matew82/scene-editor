@@ -348,3 +348,171 @@ resizable); when the text-widget API is absent, an information dialog is used.
 The rename icon now follows the heading immediately, with trailing stretch after
 the icon instead of stretching the heading. No native DAZ session was launched
 for these changes; in-memory regressions cover fallback and report access.
+
+
+### Comparison parameter transfer (2026-11-07)
+Run `node tests/compare-transfer.cjs` and `node tests/compare-transfer-ui.cjs`.
+After Compare Selected, select individual changed parameter rows and choose
+Copy values A to B or Copy values B to A. The confirmation identifies source,
+destination and proposed values. Several objects/bones can be staged together;
+only one atomic install is performed. Source files are never written. A verified
+byte-for-byte `.before-transfer-<timestamp>-<random>.duf` backup stays beside the
+destination. The comparison closes after saving; reopen it for fresh results.
+Only known, uniquely bound compatible static values are supported. Animated,
+formula-driven, locked, unresolved, missing-side, material, file/reference and
+alias values are rejected, as are incompatible enum domains or out-of-range
+values. No implicit clamping or copying of animation/assets. Existing saved
+morph bindings are supported; creating missing morph bindings is not.
+All selected values must pass validation before anything is saved. Original
+source/destination bytes and asset definitions are rechecked before publishing.
+Native DAZ 6.26 tests verified plain/gzip two-value writes, preserved source and
+compression, and exact backups on synthetic fixtures. The isolated process
+produced both passing results but did not exit via delayedExit, so the runner
+terminated only its owned PID after 60 seconds. This is a native writer pass,
+not a crash-free GUI lifecycle claim. Existing DAZ processes and shared settings
+were unchanged. Evidence: C:/Users/Andrii/Documents/Codex/2026-11-07/compare-transfer/native/.
+
+Transfer availability now uses the complete writer dry-run independently for
+A -> B and B -> A. Unsafe selections disable the corresponding button, with
+a reason in its tooltip and the selection summary. Destination locks/limits
+can permit only one direction. A mixed selection is all-or-nothing. Pending
+selection changes disable both buttons immediately; a 150 ms debounce avoids
+rebuilding plans for every rapid click. Unchanged selections reuse only the
+availability result, never a write plan. Final preparation and byte/asset checks
+still run before writing. Safety/transfer suite: 32 cases; UI harness: 9 modes.
+
+
+### Selected animation-key transfer (2026-11-08)
+Select individual key rows under a compared parameter; buttons become Copy keys
+A to B / B to A. Static values and animation keys are separate selections.
+Known identical positive FPS is required in both scenes. Saved seconds are
+preserved exactly; rounded times need not be exact integral frame numbers.
+Only scalar float/int/enum/bool channels with existing verified property bindings
+are supported. Node/bone/morph tracks may use uniquely resolved local or
+asset-qualified URLs. Inline keys, vector tracks, ambiguous bindings, unknown
+formats, aliases, formula dependencies and coupled camera channels fail closed.
+Raw implicit tuples and documented LINEAR, CONST, TCB and HERMITE tuples are
+copied intact, including tangents/TCB coefficients. Undocumented CONSTANT
+spelling is currently read-only in transfer, although comparison recognizes it.
+The DSON implicit default is Catmull-Rom for float and Linear for other channels;
+implicit tuples are not expanded into explicit interpolation. Format reference:
+https://docs.daz3d.com/public/dson_spec/object_definitions/channel_animation/start
+Existing destination keys require an explicit Overwrite N keys confirmation.
+Insertion preserves neighbor keys and track metadata; selected keys across
+channels compose in a single exact-byte-guarded transaction with the existing
+verified backup. Copying a key can change interpolation around it; matching
+surrounding animation is not promised. Scene range/settings are not changed.
+Real saved DUF inspection found implicit/LINEAR keys at FPS 30, including
+asset-qualified bone and modifier URLs and rounded times such as 2.333333 s.
+TCB/HERMITE/CONST schema support is based on the official DSON specification.
+
+Validation: all 14 tests/*.cjs suites pass, including 27 key-transfer cases,
+3 Core/IO/Morphs integration cases, 11 compare UI modes and 35 shared transfer
+cases. Diagnostics/test-key-transfer-real.cjs prepares B -> A on the real
+Scene Editor Test Compare scenes, lForearmBend frame 15 [0.5,-21,["LINEAR"]],
+without installing it; both original SHA256 hashes and mtimes remain unchanged.
+No DAZ process was started for this extension. Almost-coincident distinct times
+within 1e-6 seconds are rejected rather than silently merged or duplicated.
+
+### Comparison B column visibility (2026-11-08)
+Native DzListView default auto-sizing grew column A to 12575 px for long detailed
+text after Compare Selected, pushing B offscreen. clear() retained both columns.
+Both columns now use Manual width mode before setting their initial 450 px widths.
+A separate native probe confirmed 450/450 before/after clear and long text, with
+no script errors. Its process required owned-PID timeout cleanup after producing
+the report; existing DAZ processes and shared settings remained unchanged.
+The compare UI harness now models automatic content growth and checks Manual
+mode/widths, including a long-property scenario. All 14 test suites passed.
+Evidence: C:/Users/Andrii/Documents/Codex/2026-11-08/compare-columns/.
+
+### Comparison toolbar and fast transfer selection (2026-11-08)
+Selection eligibility now inspects cached property types only: no file reads,
+serialization, deep prepare or dry-run. Static bool/color/float_color are supported.
+Full dependency, mapping, lock, limit, source-change and backup checks remain at
+write time. Mixed static/key batches stay unavailable. Tests exercise the real
+Core/ParameterCompare/CompareTransfer writer in both directions, including root
+node.channel and nested light colors; malformed vectors/types are rejected.
+
+The Comparison toolbar has six 52x52 icon buttons with 48x48 assets, a 20px group
+gap and a 52px-high Differences Only control. Four generated icons and their
+full-size source PNGs/prompts are retained in icons/. Cancel is a 32px cross icon
+before the extraction status. Close is 300px wide, right aligned with 10px inset.
+DUF Inspection has a 20px action-group gap (6px normal spacing + 14px spacer).
+
+Validation: all 16 tests/*.cjs suites and five Diagnostics comparison UI scenarios
+pass; deterministic bundle check passes for all 108 modules, ES3 and ES5. Native
+isolated toolbar probe confirmed geometry, but its synthetic comparison fixture
+failed and later screenshot capture stalled; full native visual verification is
+not claimed. No working DAZ sessions were changed by these final revisions.
+
+### Figure / Bones editor (2026-11-08)
+A Figure/Bones switch appears below the property toolbar for figures with saved
+bones. Figure keeps root properties; Bones shows translation, rotation and scale
+channels grouped by bone label hierarchy. Attached figures/props are not included.
+Switching views retains drafts; filters match property and bone names. The three
+presentation modes, Hidden/Used/Clamped controls and existing Animation mode remain.
+The Property report button is hidden; internal reports are still written.
+
+Save composes root and multiple bone changes into one guarded disk installation,
+using the existing backup/recovery contract. A later invalid bone or changed source
+blocks the entire operation and retains pending edits. Bone writes retain Core
+locks/limits and reject animated or formula-driven channels, including known root
+morph formula evidence. Rig orientation/center/end-point channels are not exposed.
+
+Validation: Bones model 22/22 and UI 42/42 checks pass, including repeated views,
+all presentation modes, unified save/reopen, and Animation Save/Discard/Cancel.
+A read-only real fixture yields 170 own bones / 1700 transform properties with
+unchanged source hash. Separate native DAZ6 TreeView smoke passed switching and
+multi-node Save/reopen on a synthetic fixture, errors=[], working DAZ processes
+and shared settings unchanged. The owned test process required timeout cleanup
+after its completed report, so this is not a long-running crash-stability claim.
+Evidence: C:/Users/Andrii/Documents/Codex/2026-11-08/bones-native/.
+
+Bone/group filter follow-up: inherited bone names/labels now come from resolved
+node definitions when absent from the saved instance. Bone-name matches include
+all that bone's visible properties, not unrelated descendants. Slash-separated
+hierarchy paths select their terminal bone (full path or suffix). Figure filters
+also match group paths, including child groups, while preserving property-name
+matches and the existing Hidden/Used visibility intersection. Enter and Apply
+use the same matching rule in TreeView and both slider presentations.
+
+### Native inherited field insertion guard (2026-11-08)
+DAZ exposes inherited enumerable inherits/className/deleteLater/name on ordinary
+objects. The patch collision check now inspects own insertion fields only, while
+still rejecting true collisions. Previously a new Hip general_scale override
+could fail with PATCH Cannot insert existing field name before any disk install.
+The exact error was reproduced in native DAZ at scene.nodes[114], without injected
+prototype properties. Five regression checks cover prototype fields, byte parity,
+metadata retention, multiple inserts and genuine collision protection.
+
+### Explicit Save closes editors (2026-11-09)
+Explicit Save now closes the shared Parameters/Materials dialog after verified
+installation, without a second model reload or success popup. No-change Save also
+closes. Save prompted during a mode switch retains its existing refresh workflow.
+Source changes, cancellation and publish failures leave the window and pending
+edits intact. Existing save-speed changes are preserved.
+Validation: save-close UI30/30, Bones UI54/54, all20 tests suites. Native isolated
+DAZ smoke verified both editors' saved values/closed dialogs and an injected
+failure retaining the window, draft and original file. No user scenes/settings
+were modified. Evidence: Documents/Codex/2026-11-08/save-close-native/.
+
+# Inspection projection schema and unavailable comparison
+
+Run `node tests/inspection-cache-schema.cjs` and `node tests/comparison-unavailable-summary.cjs`.
+The cache test uses the actual FastInspect producer with an in-memory native-file adapter:
+current settings projections publish and warm-read without source reads; owned legacy
+projections are replaceable but never reused as the current schema; unknown/foreign
+caches remain untouched and malformed settings snapshots are rejected.
+The comparison remains cache-only. Missing/incompatible caches display Comparison
+unavailable, not a false zero-differences result. Partial Unknown evidence is visible
+in the summary. Selecting scenes normally rebuilds incompatible inspection caches.
+
+# Comparison toolbar and optimized projection
+
+Comparison headers now carry A/B filenames for a shared folder, otherwise full
+paths. Transfer actions use96x48 directional icons in100x52 buttons, preserving
+key/value-specific accessibility and final writer checks. Test coverage includes
+both modes and quick/partial/detailed rich summaries.
+`tests/parameter-compare-optimization.cjs` covers fast-parser control-character
+validation, cancellation in long strings/member names, and bounded bulk parsing.
+Optimized bulk parsing remains enabled; invalid JSON is not silently accepted.

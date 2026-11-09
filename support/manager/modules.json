@@ -85,7 +85,9 @@
     "SaveGuard Light Actions.dsa",
     "Scene Editor Inspection Dialogs.dsa",
     "Scene Editor Manager Runtime.dsa",
-    "Scene Editor Inspection Pane.dsa"
+    "Scene Editor Inspection Pane.dsa",
+    "Scene Editor Compare Transfer.dsa",
+    "Scene Editor Key Transfer.dsa"
   ],
   "lazyResources": [
     "SaveGuard Native Profiles.dsa"

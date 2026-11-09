@@ -1,0 +1,25 @@
+// Explicit Save-and-close contract, using real parameter/material models and in-memory native IO.
+const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('assert');
+const root=path.resolve(__dirname,'..'),scope={require,__dirname,console,process};
+const setup=fs.readFileSync(path.join(__dirname,'bones-ui.cjs'),'utf8').split('\nfor(const mode')[0];
+vm.runInNewContext(setup+';this.ctx=ctx;this.fixture=fixture;',scope);const ctx=scope.ctx;
+vm.runInNewContext(fs.readFileSync(path.join(root,'support/manager/Scene Editor Material Editor.dsa'),'utf8'),ctx);
+let hs=fs.readFileSync(path.join(__dirname,'helpers/property-ui.cjs'),'utf8').replace('close(){}','close(){this.closed=true;}');
+hs=hs.replace('if(hooks.textEditor)',"class Combo extends W{constructor(p){super(p);this.items=[];}clear(){this.items=[];}addItem(t){this.items.push(t);}}env.DzComboBox=Combo;if(hooks.textEditor)");
+hs=hs.replace("ctx.SceneEditorUI.show(env,'/project',hooks.editorOptions);","if(hooks.invoke)hooks.invoke(env);else ctx.SceneEditorUI.show(env,'/project',hooks.editorOptions);");
+const moduleScope={module:{exports:{}},require};vm.runInNewContext(hs,moduleScope);const harness=moduleScope.module.exports(ctx),results=[];
+function test(name,fn){try{fn();results.push({name,passed:true});}catch(e){results.push({name,passed:false,error:e.stack});}}
+function fixture(kind){const s=scope.fixture();if(kind==='materials'){s.data.scene.nodes[0].geometries=[{id:'G',url:'#Geo'}];s.data.geometry_library=[{id:'Geo'}];s.data.material_library=[{id:'Shader',extra:[{type:'studio_material_channels',channels:[{channel:{id:'Roughness',label:'Roughness',type:'float',value:0.5,min:0,max:1}}]}]}];s.data.scene.materials=[{id:'Face',geometry:'#G',url:'#Shader',groups:['Face']}];s.files['/scene.duf']=JSON.stringify(s.data);}return s;}
+function live(w){for(let p=w;p;p=p.parent)if(p.destroyed||p.visible===false)return false;return true;}
+for(const kind of ['parameters','materials'])for(const mode of ['Controls','PlainControls','TreeView'])for(const action of ['save','noop','race','cancel','write-failure'])test(kind+' '+mode+' explicit Save '+action,()=>{
+ const s=fixture(kind),before=s.files['/scene.duf'],label=kind==='materials'?'Roughness':'Root Move',target=kind==='materials'?0.25:17;let receipts=0,refreshes=0,cancelled=false;const oldP=ctx.SceneEditorObjects.Session.prototype.saved,oldM=ctx.SceneEditorMaterialEditor.Session.prototype.saved;
+ ctx.SceneEditorObjects.Session.prototype.saved=function(){refreshes++;return oldP.apply(this,arguments);};ctx.SceneEditorMaterialEditor.Session.prototype.saved=function(){refreshes++;return oldM.apply(this,arguments);};
+ const hooks={editorOptions:{path:'/scene.duf',objectId:'Person',propertySource:'Own',propertyView:mode,settingsManaged:true,sessionFactory(path,io,guard){return new ctx.SceneEditorObjects.Session(path,s.io,guard,null);},onSaved(){receipts++;}}};Object.defineProperty(hooks,'cancelled',{get(){return cancelled;}});if(kind==='materials')hooks.invoke=env=>ctx.SceneEditorMaterialEditor.show(env,'/project','/scene.duf','Person',{propertyView:mode},()=>{receipts++;});
+ let out;try{out=harness(s,h=>{function r(){return mode==='TreeView'?h.lists()[0].items.find(x=>x.texts[0]===label):h.controls.find(x=>x.label===label&&live(x));}assert(r(),'Missing property '+label);if(action!=='noop'){if(mode==='TreeView')h.fire(h.lists()[0],'itemRenamed(DzListViewItem*,int,const QString&)',r(),1,String(target));else r().value=target;}
+ if(action==='race')s.files['/scene.duf']+=' ';if(action==='cancel'){cancelled=true;let tick=Date.now();ctx.Date=class extends Date{getTime(){return tick+=300;}};}if(action==='write-failure')s.n.flags.failPublish=true;h.fire(h.button('Save'),'clicked()');if(action==='cancel')ctx.Date=Date;
+ if(action==='save'||action==='noop'){assert(h.controls.some(w=>w.closed),'Dialog must close');assert.equal(h.warn.length,0,h.warn.join('\n'));assert.equal(h.info.length,0,'No success modal');assert.equal(receipts,action==='save'?1:0);assert.equal(refreshes,0,'No Session.saved/reopen after explicit Save');}
+ else{assert(!h.controls.some(w=>w.closed),'Failed/cancelled save must stay open');assert.equal(receipts,0);assert.equal(refreshes,0);assert.equal(mode==='TreeView'?Number(r().texts[1]):r().value,target,'Draft retained');assert.equal(s.files['/scene.duf'],action==='race'?before+' ':before);cancelled=false;h.fire(h.button('Close'),'clicked()');}
+ },[1],true,hooks);}finally{ctx.SceneEditorObjects.Session.prototype.saved=oldP;ctx.SceneEditorMaterialEditor.Session.prototype.saved=oldM;}
+ if(action==='save'){assert.notEqual(s.files['/scene.duf'],before);const d=JSON.parse(s.files['/scene.duf']);if(kind==='parameters')assert.equal(d.scene.nodes[0].translation[0].current_value,target);else assert.equal(d.scene.materials[0].extra[0].channels[0].channel.current_value,target);}if(action==='noop')assert.equal(s.files['/scene.duf'],before);
+});
+console.log(JSON.stringify({total:results.length,passed:results.filter(x=>x.passed).length,nativeExecuted:false,userSceneWrites:false,results},null,2));if(results.some(x=>!x.passed))process.exitCode=1;
