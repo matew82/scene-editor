@@ -1,7 +1,7 @@
 // In-memory scene-filter persistence regressions. No DAZ process, user settings or real scenes.
 const assert=require('assert'),fs=require('fs'),path=require('path'),vm=require('vm'),Module=require('module');
 const root=path.resolve(__dirname,'..');
-const files=['Scene Editor Browser Model.dsa','Scene Editor Manager Main.dsa','Scene Editor Manager Settings.dsa'];
+const files=['Scene File Workbench Browser Model.dsa','Scene File Workbench Manager Main.dsa','Scene File Workbench Manager Settings.dsa'];
 const sources=files.map(file=>fs.readFileSync(path.join(root,'support/manager',file),'utf8').replace(/\r\n/g,'\n'));
 const ac=new Module('acorn');ac._compile(process.binding('natives')['internal/deps/acorn/acorn/dist/acorn'],'acorn');
 const ast=ac.exports.parse(sources[1],{ecmaVersion:5});
@@ -49,7 +49,7 @@ function settingsDialog(initial,steps,liveFilters=fixture,{failSave=false}={}){
  function PushButton(parent){Widget.call(this,parent);this.kind='DzPushButton';}PushButton.prototype=Object.create(Widget.prototype);PushButton.prototype.constructor=PushButton;
  Widget.prototype.setCheckable=function(value){this.checkable=value===true;};
  for(const method of ['getWidget'])Widget.prototype[method]=function(){return this;};
- for(const method of ['showHelpButton','showCancelButton','setCancelButtonText','setAcceptButtonText','addWidget','addStretch','setFixedSize'])Widget.prototype[method]=function(){};
+ for(const method of ['showHelpButton','showCancelButton','setCancelButtonText','setAcceptButtonText','showAcceptButton','addButton','setAcceptButton','setDefaultButton','addWidget','addSpacing','addStretch','setFixedSize'])Widget.prototype[method]=function(){};
  Widget.prototype.exec=function(){const step=steps[index++];assert(step,'Unexpected exec');const toggle=widgets.find(w=>w.text==='Remember scene filters and sorting');assert(toggle);assert.equal(toggle.kind,'DzPushButton');assert.equal(toggle.checkable,true);assert.equal(typeof toggle.checked,'boolean');assert.equal(toggle.styleSheet,widgets.find(w=>w.text==='DAZ Cache').styleSheet);assert(/QPushButton\s*\{[^}]*background-color:\s*#37383C/i.test(toggle.styleSheet));assert(/QPushButton:checked\s*\{[^}]*background-color:\s*#33483D/i.test(toggle.styleSheet));if(step.expect!==undefined)assert.equal(toggle.checked,step.expect);if(step.click!==undefined){const values=Array.isArray(step.click)?step.click:[step.click];for(const value of values){toggle.checked=value;const link=links.find(l=>l.o===toggle&&l.signal==='clicked()');assert(link);link.fn();assert.equal(toggle.checked,value);}}return step.accept===true;};
  const env={DzBasicDialog:Widget,DzLabel:Widget,DzGroupBox:Widget,DzHBoxLayout:Widget,DzVBoxLayout:Widget,DzPushButton:PushButton,DzLineEdit:Widget,DzWidget:{},connect(o,signal,fn){links.push({o,signal,fn});},disconnect(o,signal,fn){const i=links.findIndex(l=>l.o===o&&l.signal===signal&&l.fn===fn);assert(i>=0);links.splice(i,1);},MessageBox:{warning(message){warnings.push(message);}}};
  env.DzCheckBox=function(){throw Error('Scene-filter persistence must use the shared checkable DzPushButton, not a checkbox');};
@@ -67,6 +67,6 @@ test('Settings failed write can cancel without changing central state',()=>{cons
 test('Settings failed write retry retains requested toggle and valid snapshot',()=>{const r=settingsDialog({},[{click:true,accept:true},{expect:true,accept:true}],fixture,{failSave:true});assert.equal(r.result.saved,true);assert.equal(r.saves,2);assert.deepEqual(r.settings.sceneFilters,expected);});
 test('Settings uses the shared green/gray toggle-button even when a checkbox constructor exists',()=>{const r=settingsDialog({},[{expect:true,click:false,accept:true}]);const toggle=r.widgets.find(w=>w.text==='Remember scene filters and sorting');assert.equal(toggle.kind,'DzPushButton');assert.equal(toggle.checkable,true);assert.equal(r.settings.saveSceneFilters,false);});
 test('all changed modules remain ES3 and ES5 compatible',()=>{for(const s of sources){ac.exports.parse(s,{ecmaVersion:3,allowReserved:false});ac.exports.parse(s,{ecmaVersion:5});}});
-if(process.argv.includes('--bundle-check'))test('standalone bundle contains each exact current source module',()=>{const bundle=fs.readFileSync(path.join(root,'Scene Editor.dsa'),'utf8').replace(/\r\n/g,'\n');for(const [i,s] of sources.entries())assert.equal(bundle.split(s).length,2,files[i]);});
+if(process.argv.includes('--bundle-check'))test('standalone bundle contains each exact current source module',()=>{const bundle=fs.readFileSync(path.join(root,'Scene File Workbench.dsa'),'utf8').replace(/\r\n/g,'\n');for(const [i,s] of sources.entries())assert.equal(bundle.split(s).length,2,files[i]);});
 console.log(JSON.stringify({status:failed?'failed':'passed',passed,failed,nativeDAZExecuted:false,realScenesModified:false}));if(failed)process.exitCode=1;
 

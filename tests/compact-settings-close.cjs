@@ -1,0 +1,24 @@
+// Regression for closing a compact settings dialog while native text entry is active.
+// In-memory fixtures only: no DAZ process, user settings, shortcuts, or scene files.
+const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('assert');
+const setup=fs.readFileSync(path.join(__dirname,'timeline-integer-controls.cjs'),'utf8').split("for(const kind of ['frame','range','fps'])")[0];
+const sc={require,__dirname,console,process};vm.runInNewContext(setup.replace(".replace('class W{constructor(parent){'",".replace('close(){}','close(){this.closed=true;}').replace('class W{constructor(parent){'")+ ';this.testHarness=harness;this.testFixture=fixture;this.testContext=ctx;',sc);
+const harness=sc.testHarness,fixture=sc.testFixture,ctx=sc.testContext,results=[];
+function test(name,fn){try{fn();results.push({name,passed:true});}catch(e){results.push({name,passed:false,error:e.stack});}}
+function opts(kind,m,compact=true){return{settingsManaged:true,fitContent:true,hidePropertyFilters:compact,compactSettingsActions:compact,path:'/scene.duf',objectId:'render:static',propertyView:'Controls',sessionFactory(path,io,guard){const session=new ctx.SceneEditorSavedSettings.RenderSession(path,io,guard,kind);m.editor=session.select(0).editor;return session;}};}
+for(const kind of ['frame','range','fps'])for(const action of ['discard','cancel','window-close','save-unfinished','save-finished'])test(kind+' '+action+' during native entry',()=>{
+ const s=fixture(),before=s.files['/scene.duf'],m={},answers=action==='cancel'?[2,1]:[1];
+ const out=harness(s,h=>{const w=h.controls.find(w=>w.signal==='valueChanged(int)'&&!w.destroyed);assert(w);w.value+=1;const changed=w.value;w.isEditing=true;
+ assert(!h.controls.some(w=>typeof w.text==='string'&&/\d+ properties \(\d+ hidden\)/.test(w.text)),'Compact property counts must be absent');
+ if(action==='window-close')return;
+ if(action==='save-unfinished'){h.fire(h.button('Save'),'clicked()');assert.equal(h.warn.length,1);assert(h.warn[0].includes('CONTROL_EDIT'));assert(!h.controls.some(w=>w.closed));assert.equal(s.files['/scene.duf'],before);h.warn.length=0;}
+ if(action==='save-finished'){w.isEditing=false;h.fire(h.button('Save'),'clicked()');assert(h.controls.some(w=>w.closed));return;}
+ if(action==='cancel'){h.fire(h.button('Close'),'clicked()');assert(!h.controls.some(w=>w.closed));assert.equal(w.value,changed);assert.equal(w.isEditing,true);assert.equal(Object.keys(m.editor.pending).length,1);assert.deepEqual(h.warn,[]);}
+ h.fire(h.button('Close'),'clicked()');assert(h.controls.some(w=>w.closed),'Discard must close without requiring Enter');
+ },answers,true,{editorOptions:opts(kind,m)});
+ assert.deepEqual(out.warn,[]);if(action==='save-finished')assert.notEqual(s.files['/scene.duf'],before);else{assert.equal(s.files['/scene.duf'],before);assert.equal(s.installs,0);}
+});
+test('focused but unchanged FPS can be discarded without warning or write',()=>{const s=fixture(),m={},before=s.files['/scene.duf'];const out=harness(s,h=>{h.controls.find(w=>w.signal==='valueChanged(int)').isEditing=true;h.fire(h.button('Close'),'clicked()');assert(h.controls.some(w=>w.closed));},[1],true,{editorOptions:opts('fps',m)});assert.deepEqual(out.warn,[]);assert.equal(s.files['/scene.duf'],before);assert.equal(s.installs,0);});
+for(const kind of ['render-type','render-quality','render-size','frame','range','fps','render'])test(kind+' compact header scope',()=>{const s=fixture(),m={},compact=kind!=='render';s.data.scene.extra.push({type:'studio_render_settings',render_options:{isCurrentFrameRender:true,imageSize:[1920,1080],aspect_ratio:[16,9],isAspectConstrained:true,renderViewport:false,quality:{channel:{id:"Max Samples",type:"int",value:128}}}});s.files['/scene.duf']=JSON.stringify(s.data);const out=harness(s,h=>{const header=h.controls.find(w=>typeof w.text==='string'&&w.text.startsWith('<b>'));assert(header);assert.equal(/properties \(\d+ hidden\)/.test(header.text),!compact);h.fire(h.button('Close'),'clicked()');},[1],true,{editorOptions:opts(kind,m,compact)});assert.deepEqual(out.warn,[]);});
+test('Active View remains a separate count-free dialog',()=>{const src=fs.readFileSync(path.join(__dirname,'../support/manager/Scene File Workbench Saved Settings.dsa'),'utf8');const active=src.slice(src.indexOf("dlg=new env.DzBasicDialog();dlg.caption='Scene File Workbench - Active View'"));assert(active.startsWith('dlg='));assert(!active.includes(' properties ('));});
+console.log(JSON.stringify({total:results.length,passed:results.filter(x=>x.passed).length,nativeExecuted:false,userSceneWrites:false,results},null,2));if(results.some(x=>!x.passed))process.exitCode=1;

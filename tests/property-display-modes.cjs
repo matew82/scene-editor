@@ -3,9 +3,9 @@ const fs = require('fs'), path = require('path'), vm = require('vm'), assert = r
 const native = require('./helpers/native-daz-files.cjs');
 const root = path.resolve(__dirname, '..'), context = {};
 for (const name of ['Gzip', 'Core', 'IO', 'Morphs', 'Objects', 'Controls', 'UI']) {
-  vm.runInNewContext(fs.readFileSync(path.join(root, 'support', 'Scene Editor ' + name + '.dsa'), 'utf8'), context);
+  vm.runInNewContext(fs.readFileSync(path.join(root, 'support', 'Scene File Workbench ' + name + '.dsa'), 'utf8'), context);
 }
-vm.runInNewContext(fs.readFileSync(path.join(root, 'support/manager/Scene Editor Key Editor.dsa'), 'utf8'), context);
+vm.runInNewContext(fs.readFileSync(path.join(root, 'support/manager/Scene File Workbench Key Editor.dsa'), 'utf8'), context);
 const C = context.SceneEditorCore, U = context.SceneEditorUI;
 const uiHarness = require('./helpers/property-ui.cjs')(context);
 const results = [];
@@ -97,11 +97,11 @@ test('Animation replaces the Keys mode caption and still switches back to Parame
  run(fixture(),'Controls',h=>{assert(!h.button('Keys'));assert(h.button('Animation'));h.fire(h.button('Animation'),'clicked()');assert(h.button('Animation').checked);h.fire(h.button('Parameters'),'clicked()');assert(h.button('Parameters').checked);},{animationEditing:true});
 });
 // Exercise the actual Settings dialog with no filesystem-backed settings.
-vm.runInNewContext(fs.readFileSync(path.join(root,'support/manager/Scene Editor Manager Settings.dsa'),'utf8'),context);
+vm.runInNewContext(fs.readFileSync(path.join(root,'support/manager/Scene File Workbench Manager Settings.dsa'),'utf8'),context);
 context.SaveGuardManagerModel={figureNames:n=>n||[]};context.SceneEditorManagerWidgets={applyButtonIcon(){}};
 context.SceneEditorBrowserModel={restoreSceneFilters:()=>({}),rememberSceneFilters:s=>s};
 function settings(initial,select,accept=true){let stored=clone(initial),widgets=[],links=[],calls=0;
- class W{constructor(){this.font={pointSize:12};widgets.push(this);}getWidget(){return this;}showHelpButton(){}showCancelButton(){}setCancelButtonText(){}setAcceptButtonText(){}setCheckable(){}addWidget(){}addStretch(){}exec(){calls++;assert.equal(calls,1);const expected=initial.propertyView==='TreeView'?'TreeView':initial.propertyView==='PlainControls'?'Plain sliders':'Sliders with icons';assert.equal(widgets.find(w=>w.text===expected).checked,true);if(select){const w=widgets.find(w=>w.text===select);links.find(l=>l.o===w).f();for(const text of ['Sliders with icons','Plain sliders','TreeView'])assert.equal(widgets.find(w=>w.text===text).checked,text===select);}return accept;}}
+ class W{constructor(){this.font={pointSize:12};widgets.push(this);}getWidget(){return this;}showHelpButton(){}showCancelButton(){}setCancelButtonText(){}setAcceptButtonText(){}showAcceptButton(){}addButton(){}setAcceptButton(){}setDefaultButton(){}setCheckable(){}addWidget(){}addSpacing(){}addStretch(){}exec(){calls++;assert.equal(calls,1);const expected=initial.propertyView==='TreeView'?'TreeView':initial.propertyView==='PlainControls'?'Plain sliders':'Sliders with icons';assert.equal(widgets.find(w=>w.text===expected).checked,true);if(select){const w=widgets.find(w=>w.text===select);links.find(l=>l.o===w).f();for(const text of ['Sliders with icons','Plain sliders','TreeView'])assert.equal(widgets.find(w=>w.text===text).checked,text===select);}return accept;}}
  const env={DzBasicDialog:W,DzGroupBox:W,DzHBoxLayout:W,DzVBoxLayout:W,DzLabel:W,DzPushButton:W,DzLineEdit:W,DzCheckBox:W,DzWidget:{},connect(o,s,f){links.push({o,s,f});},disconnect(){},MessageBox:{warning(e){throw Error(e);}}};
  const model={getState:()=>({settings:stored}),cacheUsage:()=>({bytes:0,files:0}),setSettings:s=>stored=clone(s)};
  context.SceneEditorManagerSettings.show(env,model,{},'',{});return stored;
@@ -116,7 +116,7 @@ test('Missing optional DAZ cache falls back without warning and preserves report
 test('Unreadable DAZ cache still emits actionable diagnostics',()=>{const s=fixture();s.files['/cache/data/V/Tank.cache.dsf']='invalid json';const selected=s.session().select(0,'DAZ');assert(selected.diagnostics.some(s=>s.includes('DAZ cache could not be read')));assert.equal(selected.editor.propertySource.effective,'Own');});
 
 test('Property report opens a compact read-only text viewer',()=>{
- const s=fixture();uiHarness(s,h=>{h.fire(h.button('Property report'),'clicked()');const popup=h.controls.find(w=>w.caption==='Scene Editor - Property report');assert(popup);assert.equal(popup.minWidth,480);assert.equal(popup.minHeight,280);const viewer=h.controls.find(w=>w.parent===popup&&w.readOnly);assert(viewer);assert.equal(viewer.acceptRichText,false);assert(viewer.plainText.includes('object-properties-'));assert(viewer.plainText.includes('Workout Tank')||viewer.plainText.includes('Tank'));assert.equal(h.warn.length,0);},[],true,{textEditor:true,editorOptions:{path:'/scene.duf',objectId:'Tank',settingsManaged:true,propertyView:'PlainControls'}});
+ const s=fixture();uiHarness(s,h=>{h.fire(h.button('Property report'),'clicked()');const popup=h.controls.find(w=>w.caption==='Scene File Workbench - Property report');assert(popup);assert.equal(popup.minWidth,480);assert.equal(popup.minHeight,280);const viewer=h.controls.find(w=>w.parent===popup&&w.readOnly);assert(viewer);assert.equal(viewer.acceptRichText,false);assert(viewer.plainText.includes('object-properties-'));assert(viewer.plainText.includes('Workout Tank')||viewer.plainText.includes('Tank'));assert.equal(h.warn.length,0);},[],true,{textEditor:true,editorOptions:{path:'/scene.duf',objectId:'Tank',settingsManaged:true,propertyView:'PlainControls'}});
 });
 console.log(JSON.stringify({total:results.length,passed:results.filter(x=>x.passed).length,failures:results.filter(x=>!x.passed),nativeDAZExecuted:false,realScenesModified:false},null,2));
 if(results.some(x=>!x.passed))process.exitCode=1;

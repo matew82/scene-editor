@@ -1,8 +1,8 @@
 // Bones UI regression suite. In-memory fixtures only; never starts DAZ or writes user scenes.
 const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('assert');
 const root=path.resolve(__dirname,'..'),ctx={};
-for(const name of ['Gzip','Core','IO','Morphs','Objects','Controls','Bones','UI'])vm.runInNewContext(fs.readFileSync(path.join(root,'support','Scene Editor '+name+'.dsa'),'utf8'),ctx);
-vm.runInNewContext(fs.readFileSync(path.join(root,'support/manager/Scene Editor Key Editor.dsa'),'utf8'),ctx);
+for(const name of ['Gzip','Core','IO','Morphs','Objects','Controls','Bones','UI'])vm.runInNewContext(fs.readFileSync(path.join(root,'support','Scene File Workbench '+name+'.dsa'),'utf8'),ctx);
+vm.runInNewContext(fs.readFileSync(path.join(root,'support/manager/Scene File Workbench Key Editor.dsa'),'utf8'),ctx);
 const native=require('./helpers/native-daz-files.cjs'),harness=instrumentedHarness(ctx),results=[];
 function instrumentedHarness(context){const m={exports:{}};vm.runInNewContext(fs.readFileSync(path.join(__dirname,'helpers/property-ui.cjs'),'utf8').replace('close(){}','close(){this.closed=true;}'),{module:m,require});return m.exports(context);}
 function test(name,fn){try{fn();results.push({name,passed:true});}catch(e){results.push({name,passed:false,error:e.stack});}}

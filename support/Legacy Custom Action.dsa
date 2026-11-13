@@ -1,0 +1,20 @@
+// Compatibility entry for existing Scene Editor custom actions. No settings or hotkeys are edited.
+(function () {
+    var script = null;
+    try {
+        var folder = String(new DzFileInfo(getScriptFileName()).path());
+        var parent = String(new DzFileInfo(folder).path()).replace(/\\/g, '/');
+        var target = parent + '/Scene File Workbench/Scene File Workbench.dsa';
+        var info = new DzFileInfo(target);
+        if (!info.exists() || !info.isFile() || !info.isReadable()) {
+            throw Error('Scene File Workbench is missing or unreadable: ' + target);
+        }
+        script = new DzScript();
+        if (!script.loadFromFile(target)) { throw Error('Cannot load Scene File Workbench: ' + target); }
+        if (!script.execute()) { throw Error('Scene File Workbench did not finish successfully. See the DAZ Studio log.'); }
+    } catch (error) {
+        MessageBox.warning(String(error.message || error), 'Scene File Workbench', 'OK');
+    } finally {
+        if (script && typeof script.deleteLater === 'function') { script.deleteLater(); }
+    }
+}());

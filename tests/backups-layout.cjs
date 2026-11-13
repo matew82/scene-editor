@@ -1,6 +1,6 @@
 // Backup heading/render regressions. In-memory widgets only; no DAZ or real scene access.
 const fs = require('fs'), path = require('path'), vm = require('vm'), assert = require('assert'), Module = require('module');
-const root = path.resolve(__dirname, '..'), source = fs.readFileSync(path.join(root, 'support/manager/Scene Editor Manager Main.dsa'), 'utf8');
+const root = path.resolve(__dirname, '..'), source = fs.readFileSync(path.join(root, 'support/manager/Scene File Workbench Manager Main.dsa'), 'utf8');
 const acorn = new Module('acorn');
 acorn._compile(process.binding('natives')['internal/deps/acorn/acorn/dist/acorn'], 'acorn');
 const tree = acorn.exports.parse(source, {ecmaVersion: 3, allowReserved: false});
@@ -140,7 +140,7 @@ test('Manager source passes ES3 and ES5 parsers', () => {
   acorn.exports.parse(source, {ecmaVersion: 3, allowReserved: false}); acorn.exports.parse(source, {ecmaVersion: 5});
 });
 if (process.argv.includes('--bundle-check')) test('Built standalone script contains exact current manager source', () => {
-  const bundle = fs.readFileSync(path.join(root, 'Scene Editor.dsa'), 'utf8');
+  const bundle = fs.readFileSync(path.join(root, 'Scene File Workbench.dsa'), 'utf8');
   assert.equal(bundle.split(source.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n')).length, 2);
 });
 console.log(JSON.stringify({status: failed ? 'failed' : 'passed', tests: passed + failed, passed, failed, nativeDAZExecuted: false, realScenesModified: false}));

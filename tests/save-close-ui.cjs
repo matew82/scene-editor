@@ -3,7 +3,7 @@ const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('ass
 const root=path.resolve(__dirname,'..'),scope={require,__dirname,console,process};
 const setup=fs.readFileSync(path.join(__dirname,'bones-ui.cjs'),'utf8').split('\nfor(const mode')[0];
 vm.runInNewContext(setup+';this.ctx=ctx;this.fixture=fixture;',scope);const ctx=scope.ctx;
-vm.runInNewContext(fs.readFileSync(path.join(root,'support/manager/Scene Editor Material Editor.dsa'),'utf8'),ctx);
+vm.runInNewContext(fs.readFileSync(path.join(root,'support/manager/Scene File Workbench Material Editor.dsa'),'utf8'),ctx);
 let hs=fs.readFileSync(path.join(__dirname,'helpers/property-ui.cjs'),'utf8').replace('close(){}','close(){this.closed=true;}');
 hs=hs.replace('if(hooks.textEditor)',"class Combo extends W{constructor(p){super(p);this.items=[];}clear(){this.items=[];}addItem(t){this.items.push(t);}}env.DzComboBox=Combo;if(hooks.textEditor)");
 hs=hs.replace("ctx.SceneEditorUI.show(env,'/project',hooks.editorOptions);","if(hooks.invoke)hooks.invoke(env);else ctx.SceneEditorUI.show(env,'/project',hooks.editorOptions);");

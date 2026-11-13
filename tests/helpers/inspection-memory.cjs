@@ -1,7 +1,7 @@
 // Isolated native-shaped filesystem and real manager modules. No local scene reads or disk writes.
 module.exports=function(){
 const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('assert'),crypto=require('crypto'),zlib=require('zlib');
-const base=path.resolve(__dirname,'../..'),mods=path.join(base,'support/manager'),source=fs.readFileSync(path.join(mods,'Scene Editor Manager Host.dsa'),'utf8');
+const base=path.resolve(__dirname,'../..'),mods=path.join(base,'support/manager'),source=fs.readFileSync(path.join(mods,'Scene File Workbench Manager Host.dsa'),'utf8');
 function mockFS(){const nodes=new Map(),ops=[],signatureReads=[],jsonReads=[];let tick=100;const api={nodes,ops,signatureReads,jsonReads,onJSON:null,onSignature:null,onInfo:null,onFileName:null,onIsFile:null,onRename:null,onCopy:null,failRemove:null,failRename:null,shortWrite:false};
  function norm(p){p=String(p).replace(/\\/g,'/');if(p.startsWith('//')){let q=path.win32.normalize(p).replace(/\\/g,'/');return q.replace(/\/$/,'');}if(/^[A-Za-z]:\//.test(p)){let q=path.win32.normalize(p).replace(/\\/g,'/');return /^[A-Za-z]:\/$/.test(q)?q:q.replace(/\/$/,'');}return path.posix.normalize(p);}
  function key(p){return norm(p).toLowerCase();}function parent(p){p=norm(p);if(/^[A-Za-z]:\/$/.test(p)||/^\/\/[^/]+\/[^/]+$/.test(p)||p==='/')return p;return norm(path.win32.dirname(p));}
@@ -20,7 +20,7 @@ function mockFS(){const nodes=new Map(),ops=[],signatureReads=[],jsonReads=[];le
 
 let m=mockFS(),ctx=m.ctx,env=m.env,manifest=JSON.parse(fs.readFileSync(path.join(mods,'modules.json'))),fixture='C:/fixtures/empty.duf',original=Buffer.from(JSON.stringify({scene:{nodes:[],extra:[]}}));m.put(fixture,original);m.mkdir('C:/SE');
 let F=env.DzFile,oldOpen=F.prototype.open;F.ReadOnly=1;F.prototype.open=function(mode){if(mode===1){this.pos=0;return m.exists(this.p);}return oldOpen.call(this,mode);};F.prototype.read=function(n){let b=m.read(this.p).subarray(this.pos,this.pos+n);this.pos+=b.length;return{length:b.length,byteAt:i=>b[i],toHex:()=>({convertToString:()=>b.toString('hex')}),convertToStringFromUtf8:()=>b.toString('utf8')};};F.prototype.seek=function(n){this.pos=n;return true;};F.prototype.eof=function(){return this.pos===m.read(this.p).length;};F.prototype.exists=function(){return m.exists(this.p);};env.DzFileInfo.prototype.isReadable=function(){return this.isFile();};function GZ(p){this.p=p;}GZ.ReadOnly=1;GZ.prototype.open=function(mode){assert.equal(mode,1);return true;};GZ.prototype.read=function(){return zlib.gunzipSync(m.read(this.p)).toString('utf8');};GZ.prototype.eof=function(){return true;};GZ.prototype.close=function(){};env.DzGZFile=GZ;env.App={versionString:'6.25',longVersionString:'6.25.mock',getContentMgr(){return{findFile(){return '';}};}};Object.assign(ctx,env,{print(){}});
-for(let n of ['Gzip','Core','IO'])vm.runInNewContext(fs.readFileSync(path.join(base,'support','Scene Editor '+n+'.dsa'),'utf8'),ctx);for(let n of manifest.modules)vm.runInNewContext(fs.readFileSync(path.join(mods,n),'utf8'),ctx);vm.runInNewContext(fs.readFileSync(path.join(mods,'Scene Editor Manager Host.dsa'),'utf8'),ctx);
+for(let n of ['Gzip','Core','IO'])vm.runInNewContext(fs.readFileSync(path.join(base,'support','Scene File Workbench '+n+'.dsa'),'utf8'),ctx);for(let n of manifest.modules)vm.runInNewContext(fs.readFileSync(path.join(mods,n),'utf8'),ctx);vm.runInNewContext(fs.readFileSync(path.join(mods,'Scene File Workbench Manager Host.dsa'),'utf8'),ctx);
 
 return {m,ctx,env,F,GZ};
 };

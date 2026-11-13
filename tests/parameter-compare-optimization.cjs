@@ -1,5 +1,5 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert'),path=require('path');
-const root=path.resolve(__dirname,'..'),c={};for(const f of ['support/Scene Editor Core.dsa','support/manager/Scene Editor Parameter Compare.dsa'])vm.runInNewContext(fs.readFileSync(path.join(root,f),'utf8'),c);
+const root=path.resolve(__dirname,'..'),c={};for(const f of ['support/Scene File Workbench Core.dsa','support/manager/Scene File Workbench Parameter Compare.dsa'])vm.runInNewContext(fs.readFileSync(path.join(root,f),'utf8'),c);
 const parse=c.SceneEditorParameterCompare.projectText;let count=0;function test(n,f){f();count++;console.log('PASS',n);}
 test('all raw JSON control characters in keys reject, even omitted members',()=>{for(let i=0;i<32;i++)assert.throws(()=>parse('{"scene":{"nodes":[],"bad'+String.fromCharCode(i)+'key":1}}'));});
 test('valid escaped control and Unicode member names remain supported',()=>{const o={scene:{nodes:[],animations:[{url:'#a?value',keys:[], 'tab\t':1,'雪':2}]}};assert.deepEqual(JSON.parse(JSON.stringify(parse(JSON.stringify(o)))),o);});

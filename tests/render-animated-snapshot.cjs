@@ -1,0 +1,13 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert'),path=require('path');let checks=0;
+for(const file of [path.resolve(__dirname,'../support/manager/SaveGuard Render Settings.dsa'),path.resolve(__dirname,'../../SaveGuard 2/support/SaveGuard Render Settings.dsa')]){
+ const ctx={};vm.runInNewContext(fs.readFileSync(file,'utf8'),ctx);const R=ctx.SaveGuardRenderSettings;
+ function fixture(){return {file_version:'0.6.0.0',node_library:[{id:'Env',extra:[{type:'studio/node/environment'},{type:'studio_node_channels',channels:[{channel:{id:'Environment Intensity',type:'float',value:1,current_value:2}},{channel:{id:'Dome Rotation',type:'float',value:22}}]}]}],scene:{nodes:[{id:'Env-instance',url:'#Env'}],extra:[{type:'studio_render_settings',render_options:{active_renderer:'DzIrayRenderer',imageSize:[100,100],aspect_ratio:[1,1],isAspectConstrained:true,render_elements:[]}}],animations:[{url:'Env-instance:#Env?extra/studio_node_channels/channels/Environment%20Intensity/value',keys:[[0,1],[1,3]]}]}};}
+ function ch(d){return d.node_library[0].extra[1].channels[0].channel;}
+ let d=fixture(),before=JSON.stringify(d),p=R.selectSource(d,true);assert.equal(ch(p).current_value,2);assert.equal(JSON.stringify(d),before);checks++;
+ assert.throws(()=>R.selectSource(d),/Animated environment/);assert.throws(()=>R.selectSource(d,false),/Animated environment/);checks++;
+ d=fixture();delete ch(d).current_value;p=R.selectSource(d,true);assert.strictEqual(ch(p).current_value,null);assert.equal(p.node_library[0].extra[1].channels[1].channel.value,22);assert(!('current_value' in p.node_library[0].extra[1].channels[1].channel));const env=R.rows(p).find(g=>g.label==='ENVIRONMENT / HDRI');assert.equal(env.children.find(c=>c.label==='Environment Intensity').value,'Not recorded');checks++;
+ d=fixture();delete ch(d).current_value;d.scene.nodes[0].extra=[{type:'studio_node_channels',channels:[{channel:{id:'Environment Intensity',current_value:0}}]}];p=R.selectSource(d,true);assert.equal(p.scene.nodes[0].extra[0].channels[0].channel.current_value,0);assert(!('current_value' in ch(p)));checks++;
+ d=fixture();delete ch(d).current_value;d.scene.animations[0].url='#Env-instance?extra/studio_node_channels/channels/Environment%20Intensity/value';assert.strictEqual(ch(R.selectSource(d,true)).current_value,null);checks++;
+ d=fixture();delete ch(d).current_value;d.scene.animations[0].url='#Unrelated?extra/studio_node_channels/channels/Environment%20Intensity/value';assert(!('current_value' in ch(R.selectSource(d,true))));checks++;
+}
+console.log('PASS '+checks+' animated render snapshot checks across Workbench and SaveGuard; source untouched.');

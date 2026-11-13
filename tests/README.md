@@ -62,7 +62,7 @@ Do not Save for a visual check; discard pending edits when closing.
 # Backup date headings
 
 Run `node tests/backups-layout.cjs` from the repository root. After rebuilding
-`Scene Editor.dsa`, add `--bundle-check` to verify the bundled manager matches
+`Scene File Workbench.dsa`, add `--bundle-check` to verify the bundled manager matches
 its current source.
 
 The in-memory checks cover the centered horizontal thumbnail/date group, local
@@ -138,7 +138,7 @@ The presentation thumbnail button now applies a local transparent, borderless, z
 
 Settings now has a default-on Remember scene filters and sorting toggle button.
 It uses the shared green checked / gray unchecked Settings style.
-On normal close, Scene Editor saves the applied scene-name query, Important
+On normal close, Scene File Workbench saves the applied scene-name query, Important
 filter, date/size limits, Include subfolders, and sort key/direction in its
 existing central settings. Saving Settings also captures the current filters.
 Scene-object clauses, the parameter-editor filter, and the All Objects filter
@@ -409,7 +409,7 @@ TCB/HERMITE/CONST schema support is based on the official DSON specification.
 Validation: all 14 tests/*.cjs suites pass, including 27 key-transfer cases,
 3 Core/IO/Morphs integration cases, 11 compare UI modes and 35 shared transfer
 cases. Diagnostics/test-key-transfer-real.cjs prepares B -> A on the real
-Scene Editor Test Compare scenes, lForearmBend frame 15 [0.5,-21,["LINEAR"]],
+Scene File Workbench Test Compare scenes, lForearmBend frame 15 [0.5,-21,["LINEAR"]],
 without installing it; both original SHA256 hashes and mtimes remain unchanged.
 No DAZ process was started for this extension. Almost-coincident distinct times
 within 1e-6 seconds are rejected rather than silently merged or duplicated.
@@ -516,3 +516,144 @@ both modes and quick/partial/detailed rich summaries.
 `tests/parameter-compare-optimization.cjs` covers fast-parser control-character
 validation, cancellation in long strings/member names, and bounded bulk parsing.
 Optimized bulk parsing remains enabled; invalid JSON is not silently accepted.
+
+# Rename preview roundtrip and compact actions
+
+`node tests/backup-preview-roundtrip.cjs` checks that A-to-B-to-A restores the
+original path's screenshot eligibility without migrating or changing backups.
+`node tests/tab-lifecycle.cjs` covers deferred Scene Information refresh and
+preview retry after a cancelled/cleared request; missing inspection is retried.
+Rename dialog tests cover only the filename field, green Rename and Cancel
+buttons at 52px, Enter acceptance, cancellation and compact content sizing.
+
+# Saved settings dialog content sizing
+
+`node tests/property-dialog-sizing.cjs` covers small/large settings, screen caps,
+Controls/PlainControls/TreeView, filter refitting, and an external Save/Close footer.
+Only Saved Settings opt in to content fitting; ordinary object/material editors
+keep their existing dimensions. Individual value edits do not resize the dialog.
+
+
+## Bone-parent wearable preparation
+
+Run `node tests/wearable-bone-parent.cjs`. The in-memory fixture exercises the
+actual Selected Context path for externally defined, unknown-type props
+parented to a figure bone. It checks the exported verifier, source immutability,
+strict ancestry and dependency guards, ownership, cancellation and cleanup,
+plus ES3/ES5 syntax and exact bundled module parity. No DAZ process is launched,
+no real scene is loaded, and no DAZ settings or hotkeys are accessed.
+
+The verifier delegates to the existing bone-parent planner; unsupported bindings
+remain rejected. Full native import and rendering are not covered by this suite.
+
+
+## Animated bone-parent wearables
+
+Bone-parent props now retain their selected scalar animation tracks instead of
+rejecting any nonempty scene.animations array. Extraction remaps only selected
+descendants and their definitions. The native animation guard checks ownership;
+the wearable guard requires finite numeric keys on supported transform, morph
+and numeric extra channels, with distinct representable native ticks. Key times,
+values and authored interpolation tuples are preserved, never flattened.
+
+The wearable native path uses the existing undoable timeline helper to widen
+animation/play ranges only when imported keys need it. Destination FPS and
+cursor stay unchanged; source scene-wide settings are not imported. A lost
+Undo hold blocks further context changes and Undo acceptance. Cancel before
+the native load restores any range expansion inside the owned hold.
+
+Run node tests/wearable-bone-parent.cjs and
+node tests/wearable-bone-animation.cjs. Native DAZ import and key playback are
+not verified by the Node harness. No DAZ process, user scene, shared settings
+or hotkeys are touched by these tests.
+
+
+## Close after full-scene Load or Merge
+
+Run `node tests/scene-load-close.cjs --bundle-check`. The main Scene File Workbench
+dialog closes after the native full-scene action reports success. Native Save
+Changes cancellation, failed or unknown results, and blocked operations leave
+it open. Recent-folder warnings are still shown after a successful action.
+Other successful edit/apply actions retain their existing dialog behavior.
+
+The 42 in-memory checks cover Load/Merge success, cancellation, failure, retry,
+busy/reentrant/repeated clicks, close ordering, normal teardown and exact bundle
+parity. They include ES3/ES5 parsing, but do not verify native DAZ rendering or
+execute real scene actions. No DAZ process, user scene, settings or hotkeys are
+touched.
+
+## Recent scene markers and compact scene list
+
+Settings now offers With icons (the default) and Filenames only. The filename
+mode uses compact native text rows and does not decode scene thumbnail images.
+Both views retain complete native filename text, built-in type-to-select and
+truncated-name tooltip inputs, the same selection, and deferred rename path.
+Double-clicking the filename uses the existing rename dialog. Settings applies
+the choice without rescanning directories or replacing rows. Preparing a failed
+or cancelled switch leaves the previous display intact; a failed native publish
+restores the previously applied row presentation. Cancel leaves Settings intact.
+
+Recent scenes have a pale-yellow six-pixel bar across the bottom of their
+thumbnail in icon mode, or a slim 6 x 22 yellow bar before the native filename in
+compact mode. The filename itself remains native theme text, not raster artwork.
+DzListViewItem does not expose a foreground-color setter; this preserves native
+text behavior instead of replacing filenames with images. If marker graphics
+are unavailable, native text includes [Recent]. Cached thumbnails are not mutated.
+
+A scene qualifies when either DzFileInfo.created() or lastModified() is within
+the preceding 86,400,000 milliseconds, inclusive. Missing, invalid and future
+timestamps do not qualify. This is elapsed time, not a calendar-day calculation.
+Date filtering and sorting still use modification only. Successful reinspection
+refreshes that row's timestamps, including after a save; Refresh rescans external
+changes. An idle 60-second timer ages out markers without reading scene files,
+changing selection, or recreating unchanged artwork. It is stopped/disconnected
+with the main window; native text handles resizing without a repaint timer.
+
+Reference APIs: https://docs.daz3d.com/public/software/dazstudio/4/referenceguide/scripting/api_reference/object_index/listviewitem_dz
+and https://docs.daz3d.com/public/software/dazstudio/4/referenceguide/scripting/api_reference/object_index/fileinfo_dz
+
+Run node tests/scene-list-modes.cjs. Its 37 checks cover timestamps, DST/bounds,
+Settings save/cancel/reopen, native filenames, yellow markers, both modes,
+rename, selection preservation, graphics fallback, transactional switch failures,
+aging, post-save refresh, closing/busy guards, and ES3/ES5 parsing. Add
+--bundle-check after rebuilding. The scene-load-close suite also checks exactly
+one stop for the added timer during normal modal teardown.
+These are in-memory tests. Native DAZ painting and physical keyboard/accessibility
+interaction have not been exercised for this change. No DAZ process was launched
+or user scene/settings/hotkey modified by the tests.
+
+## Product rename and SaveGuard integration
+
+Run `node tests/product-rename.cjs` from the Scene File Workbench root.
+The 22 checks cover renamed launcher/artwork pairs, module availability, new and
+legacy SaveGuard discovery, complete-install fallback, source-signature cache
+invalidation, existing read-only comparison restrictions, semantic icon mapping,
+unchanged state/API identities, and legacy custom-action forwarding/error paths.
+They also verify exact embedded bridge sources and syntax compatibility.
+The launcher tests are mocks, not a native DAZ invocation. No real scene, backup,
+settings, menu or hotkey is written by these tests.
+
+## Workbench Settings layout
+
+Settings titles and row labels are centered. Save Settings is a green, fixed
+52-pixel-high custom button connected through the documented DzDialog
+setAcceptButton API, with the existing Cancel and save-error retry flow intact.
+Clear current-folder caches and Include subfolders share one horizontal row.
+The explanatory paragraphs are removed. Cleanup scope remains in tooltips;
+cache usage is retained and cleanup result feedback appears only after cleanup.
+
+Run `node tests/settings-layout.cjs --bundle-check`. The 17 in-memory checks cover
+alignment, Save dimensions/style/acceptance, row membership, absent explanations,
+Save/Cancel/window close/retry, recursion and missing-folder scope, confirmation,
+nonreentrant cleanup, errors, stale callbacks, ES3/ES5 syntax and bundle parity.
+The scene-filter, property-mode and scene-list regressions remain applicable.
+These tests do not launch DAZ or change real settings, caches, or user scenes.
+Native pixel/layout and keyboard verification remain untested for this change.
+
+Native API references:
+https://docs.daz3d.com/public/software/dazstudio/4/referenceguide/scripting/api_reference/object_index/basicdialog_dz
+https://docs.daz3d.com/public/software/dazstudio/4/referenceguide/scripting/api_reference/object_index/dialog_dz
+
+## Scene-switch projection memory cache
+
+Run `node tests/scene-switch-projection-cache.cjs` and `node tests/inspection-cache-schema.cjs`. These use in-memory scenes only. They cover no-JSON memory reuse, same-key refresh replacement, explicit invalidation, source timestamp and motion dependency changes, bounded eight-scene LRU behavior, and refreshing older projection schemas. `product-rename.cjs --installed-legacy` additionally requires the optional sibling legacy launcher installation; without that option its absence is an explicit skip, not an application failure.

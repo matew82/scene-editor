@@ -1,0 +1,12 @@
+const fs=require('fs'),vm=require('vm'),path=require('path');
+let s=fs.readFileSync(path.join(__dirname,'compare-transfer-ui.cjs'),'utf8');let a=s.indexOf("for(const name of ['Copy values A to B'"),b=s.indexOf("assert(!button('Remove B from comparison'));",a);s=s.slice(0,a)+"assert(!button('Copy values A to B'));"+s.slice(b);
+s=s.replace("['normal','cancel','close','sourcechange','transfer','deny','blocked','direction','mixed','keytransfer','keydeny','columns']","['normal']");
+s=s.replace("{onError(e,meta){","{readOnly:true,columnLabels:paths=>paths.map((p,i)=>(i?'B: ':'A: ')+({A:'First date',B:'Fixed date',C:'Other date'}[p])),versionChoices:[{path:'A',label:'Earlier A'},{path:'C',label:'Earlier C'}],onError(e,meta){");
+s=s.replace('let stamps={A:1,B:1}', 'let stamps={A:1,B:1,C:1}');
+s=s.replace('class Button extends W{}','class Button extends W{}class Combo extends W{addItem(v){this.entries.push(v);}}');
+s=s.replace('addColumn(){}','addColumn(){}setColumnText(i,t){this.titles=this.titles||{};this.titles[i]=t;}');
+s=s.replace('DzPushButton:Button,','DzPushButton:Button,DzComboBox:Combo,');
+s=s.replace("assert(o instanceof Button&&s==='clicked()'", "assert(o instanceof Combo&&s==='activated(int)'||o instanceof Button&&s==='clicked()'");
+s=s.replace("assert.equal(errors.length,0,JSON.stringify(errors));",`assert.equal(errors.length,0,JSON.stringify(errors));const picker=widgets.find(w=>w.objectName==='Comparison saved version');assert(picker.enabled);const oldItems=all();picker.currentItem=1;links.find(l=>l.o===picker&&l.s==='activated(int)').f(1);assert(oldItems.every(i=>i.dead));finish();assert.equal(tree.titles[0],'A: Other date');assert.equal(tree.titles[1],'B: Fixed date');assert(!all().some(i=>i.values[0]==='Parameters'));assert(!button('Compare Selected').enabled);assert(picker.enabled);fire(button('Select All'));fire(button('Compare Selected'));finish();assert.equal(reads,4);assert.equal(errors.length,0,JSON.stringify(errors));`);
+new Function('require','__dirname',s)(require,__dirname);
+console.log('PASS embedded saved-version switch resets rows, selections, detailed cache and headers in the same dialog');

@@ -1,6 +1,6 @@
-Scene Editor - native DAZ saved DUF editor
+Scene File Workbench - native DAZ saved DUF editor
 
-Run Scene Editor.dsa from this project. Open only inspects the saved DUF object list; select an object for its properties. No DAZ scene load or scene graph mutation.
+Run Scene File Workbench.dsa from this project. Open only inspects the saved DUF object list; select an object for its properties. No DAZ scene load or scene graph mutation.
 
 DAZ Cache / Own Cache stays in the main window. DAZ is preferred, with explicit own fallback when missing/corrupt; readable partial DAZ cache does not trigger full DSF scans. Bones use Direct inherited node properties and never installed morph discovery.
 

@@ -1,6 +1,6 @@
 // Summary contract uses actual shipped model and refreshSummary function; no DAZ/cache writes.
 const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('assert');
-const source=fs.readFileSync(path.join(__dirname,'../support/manager/Scene Editor Compare.dsa'),'utf8'),c={};vm.runInNewContext(source,c);
+const source=fs.readFileSync(path.join(__dirname,'../support/manager/Scene File Workbench Compare.dsa'),'utf8'),c={};vm.runInNewContext(source,c);
 const refresh=source.split(/\r?\n/).find(line=>line.includes('function refreshSummary()'));assert(refresh);
 const results=[];function test(name,fn){try{fn();results.push({name,passed:true});}catch(e){results.push({name,passed:false,error:e.stack});}}
 function render(snapshots,rows=[],base=[],details={}){const env={comparisonSummary:c.SceneEditorCompare.comparisonSummary,baseRows:base,details,rows,snapshots,comparisonType:{},differenceSummary:{},status:{},parameterNotice:''};vm.runInNewContext(refresh+';refreshSummary();',env);return env;}

@@ -83,11 +83,13 @@
     "SaveGuard Light Manager.dsa",
     "SaveGuard Camera Actions.dsa",
     "SaveGuard Light Actions.dsa",
-    "Scene Editor Inspection Dialogs.dsa",
-    "Scene Editor Manager Runtime.dsa",
-    "Scene Editor Inspection Pane.dsa",
-    "Scene Editor Compare Transfer.dsa",
-    "Scene Editor Key Transfer.dsa"
+    "Scene File Workbench Inspection Dialogs.dsa",
+    "Scene File Workbench Manager Runtime.dsa",
+    "Scene File Workbench Inspection Pane.dsa",
+    "Scene File Workbench Render Transfer.dsa",
+    "Scene File Workbench Render Map Transfer.dsa",
+    "Scene File Workbench Compare Transfer.dsa",
+    "Scene File Workbench Key Transfer.dsa"
   ],
   "lazyResources": [
     "SaveGuard Native Profiles.dsa"
@@ -675,9 +677,9 @@
     ]
   },
   "customModules": [
-    "Scene Editor Inspection Dialogs.dsa",
-    "Scene Editor Manager Runtime.dsa",
-    "Scene Editor Inspection Pane.dsa"
+    "Scene File Workbench Inspection Dialogs.dsa",
+    "Scene File Workbench Manager Runtime.dsa",
+    "Scene File Workbench Inspection Pane.dsa"
   ],
   "mutableSourceContract": {
     "previewCache": "inspection-projection.json",

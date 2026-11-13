@@ -1,0 +1,8 @@
+const fs=require('fs'),path=require('path'),vm=require('vm'),assert=require('assert'),zlib=require('zlib');
+const root=path.resolve(__dirname,'..'),c={};for(const f of ['support/Scene File Workbench Core.dsa','support/manager/Scene File Workbench Saved Settings.dsa'])vm.runInNewContext(fs.readFileSync(path.join(root,f),'utf8'),c);const C=c.SceneEditorCore,S=c.SceneEditorSavedSettings,guard=()=>{};
+function doc(text){const d=Object.create(C.Document.prototype);Object.assign(d,{text,data:C.parseDocument(text,guard),guard});return d;}
+let passed=0;for(const text of ['{ "scene" : { "current_camera" : "#old", "nodes":[] }, "opaque":[1,2] }','{"scene":{"nodes":[]},"opaque":1}','{"scene":{"current_camera":"#ignored","current_camera":"#old","nodes":[]}}'])for(const gzip of [false,true]){const raw=gzip?zlib.gzipSync(text):Buffer.from(text),source=(gzip?zlib.gunzipSync(raw):raw).toString(),d=doc(source),value='#Camera%20%22new%22',p=S.planActiveView(d,value),old=S.plan(d,[{path:['scene','current_camera'],value}]);assert.equal(p.text,old.text);assert.equal(JSON.parse(p.text).scene.current_camera,value);const encoded=gzip?zlib.gzipSync(p.text):Buffer.from(p.text);assert.equal((gzip?zlib.gunzipSync(encoded):encoded).toString(),p.text);assert.equal(S.planActiveView(doc(p.text),value).diff.length,0);passed++;}
+assert.throws(()=>S.planActiveView(doc('{"scene":{"current_camera":12}}'),'#new'),/type/);passed++;
+assert.throws(()=>S.planActiveView(doc('{"scene":{}}'),'external'),/reference/);passed++;
+const mismatch=doc('{"scene":{"current_camera":"#old"}}');mismatch.data.scene.current_camera='#different';assert.throws(()=>S.planActiveView(mismatch,'#new'),/mismatch/);passed++;
+console.log(JSON.stringify({passed,total:9}));

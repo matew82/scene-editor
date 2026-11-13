@@ -1,6 +1,6 @@
 // In-memory startup reveal regressions. No DAZ process or real scene access.
 const assert=require('assert'),fs=require('fs'),path=require('path'),vm=require('vm'),Module=require('module');
-const root=path.resolve(__dirname,'..'),source=fs.readFileSync(path.join(root,'support/manager/Scene Editor Manager Main.dsa'),'utf8');
+const root=path.resolve(__dirname,'..'),source=fs.readFileSync(path.join(root,'support/manager/Scene File Workbench Manager Main.dsa'),'utf8');
 const ac=new Module('acorn');ac._compile(process.binding('natives')['internal/deps/acorn/acorn/dist/acorn'],'acorn');
 const ast=ac.exports.parse(source,{ecmaVersion:3,allowReserved:false});ac.exports.parse(source,{ecmaVersion:5});
 function all(node,predicate,out=[]){if(!node||typeof node!=='object')return out;if(predicate(node))out.push(node);for(const value of Object.values(node)){if(Array.isArray(value))for(const child of value)all(child,predicate,out);else if(value&&typeof value==='object')all(value,predicate,out);}return out;}
@@ -22,5 +22,5 @@ test('nested timeout from native ensure cannot reenter reveal',()=>{const c=setu
 test('close from native ensure has no following native work',()=>{const c=setup();c.hook=()=>{c.closing=true;};c.requestInitialSceneReveal();c.revealInitialScene();const stops=c.initialRevealTimer.stops;c.revealInitialScene();assert.equal(c.calls.length,1);assert.equal(c.initialRevealTimer.stops,stops);});
 test('startup wiring queues only before exec and cleanup cancels pending reveal',()=>{assert.equal(all(ast,n=>n.type==='CallExpression'&&n.callee.name==='requestInitialSceneReveal').length,1);assert(source.includes('requestInitialSceneReveal();dlg.exec();}finally{closing=true;initialRevealPath=\'\';initialRevealTimer.stop();'));assert(source.includes("connect(initialRevealTimer,'timeout()',revealInitialScene)"));assert(source.includes("initialRevealTimer.singleShot=true"));});
 test('native API is minimal ensure, never centering or scrollbar positioning',()=>{const body=code.slice(code.indexOf('function revealInitialScene'));assert(body.includes('scenes.ensureItemVisible(card.item)'));assert(!/processEvents|setCurrentItem|setSelected|selectedItem|scrollTo|setContentsPos/.test(body));});
-test('bundle contains exact current manager source',()=>{const bundle=fs.readFileSync(path.join(root,'Scene Editor.dsa'),'utf8');assert.equal(bundle.split(source).length,2);});
+test('bundle contains exact current manager source',()=>{const bundle=fs.readFileSync(path.join(root,'Scene File Workbench.dsa'),'utf8');assert.equal(bundle.split(source).length,2);});
 console.log(JSON.stringify({passed,nativeDAZExecuted:false,realScenesModified:false}));

@@ -1,0 +1,137 @@
+// Copied applicable dialogs and exact-label live selection from current SaveGuard Manager UI. No catalog, protection, import or maintenance entrypoints.
+var SaveGuardSceneLabelSearch=(function(){
+    function select(env,label){
+        if(typeof label!=='string'||!label.length)return {ok:false,message:'The saved row has no label to search for.'};
+        var scene=env.Scene,same=env.pointersAreEqual;
+        if(!scene||typeof same!=='function')throw Error('Scene selection APIs are unavailable.');
+        function matches(){var nodes=SaveGuardSceneInventory.nodes(scene),out=[],i;for(i=0;i<nodes.length;i++){if(typeof nodes[i].getLabel!=='function')throw Error('A scene node label cannot be read.');if(String(nodes[i].getLabel())===label)out.push(nodes[i]);}return out;}
+        var found=matches();if(!found.length)return {ok:false,message:'No current-scene object has the exact label "'+label+'".'};
+        if(found.length!==1)return {ok:false,message:found.length+' current-scene objects have the label "'+label+'". Select the intended object manually.'};
+        var target=found[0],selected=SaveGuardSceneInventory.selected(scene),primary=scene.getPrimarySelection(),again=matches();
+        if(again.length!==1||!same(again[0],target))throw Error('Scene labels changed during search; retry.');
+        if(typeof scene.selectAllNodes!=='function'||typeof scene.setPrimarySelection!=='function'||typeof target.select!=='function')throw Error('Scene selection APIs are unavailable.');
+        try{scene.selectAllNodes(false);target.select(true);scene.setPrimarySelection(target);var after=SaveGuardSceneInventory.selected(scene);if(after.length!==1||!same(after[0],target)||!same(scene.getPrimarySelection(),target))throw Error('Scene selection was not confirmed.');}
+        catch(e){try{scene.selectAllNodes(false);for(var i=0;i<selected.length;i++)selected[i].select(true);scene.setPrimarySelection(primary);var restored=SaveGuardSceneInventory.selected(scene);if(restored.length!==selected.length||!same(scene.getPrimarySelection(),primary))throw Error('Selection restoration mismatch');for(i=0;i<selected.length;i++){var foundRestored=false;for(var j=0;j<restored.length;j++)if(same(selected[i],restored[j]))foundRestored=true;if(!foundRestored)throw Error('Selection restoration mismatch');}}catch(restoreError){throw Error('Search selection failed and the prior selection could not be restored: '+String(e));}throw e;}
+        return {ok:true,message:'Selected current-scene object "'+label+'".'};
+    }
+    return {select:select};
+}());
+var SceneEditorInspectionDialogs=(function(){
+function chooseSavedSourceFrame(version,inspection,caption){
+        var captured=SaveGuardTimeline.normalize(version.timelineInfo),saved=SaveGuardTimeline.normalize(inspection&&inspection.timeline);
+        function value(key){var v=captured&&captured[key];return typeof v==='number'&&isFinite(v)?v:saved&&saved[key];}
+        var current=value('currentFrame'),low=value('animationStartFrame'),high=value('animationEndFrame'),fps=value('fps'),rangeName='Animation range';
+        if(typeof current!=='number'||!isFinite(current))current=version.savedFrame;
+        if(typeof low!=='number'||typeof high!=='number'){low=value('playStartFrame');high=value('playEndFrame');rangeName='Saved play range';}
+        if(typeof current!=='number'||!isFinite(current)||typeof low!=='number'||!isFinite(low)||typeof high!=='number'||!isFinite(high)||high<low)throw Error('Saved frame/range is unavailable for the source frame slider.');
+        var originalLow=low,originalHigh=high,originalCurrent=current;low=Math.floor(low);high=Math.ceil(high);current=Math.round(current);low=Math.min(low,current);high=Math.max(high,current);if(low < -2147483648 || high > 2147483647)throw Error('Saved range exceeds integer slider limits.');
+        var popup=new DzBasicDialog();popup.caption='Scene File Workbench - '+caption;popup.showHelpButton(false);
+        var hint=new DzLabel(popup);hint.wordWrap=true;hint.text='Choose a frame from the source scene. Apply at the current target frame; retain other target keys.';hint.setFixedSize(424,44);popup.addWidget(hint);
+        var slider=new DzIntSlider(popup);
+        // Expand native defaults before narrowing so entirely negative ranges work too.
+        slider.min=Math.min(Number(slider.min),low);slider.max=Math.max(Number(slider.max),high);slider.min=low;slider.max=high;
+        slider.clamped=true;slider.sensitivity=1;slider.textVisible=true;slider.textEditable=true;slider.label='Source frame';slider.labelVisible=true;slider.value=current;slider.setFixedSize(424,30);popup.addWidget(slider);
+        var info=new DzLabel(popup);info.wordWrap=true;info.text=rangeName+': '+originalLow+' to '+originalHigh+(typeof fps==='number'?' | '+fps+' FPS':'')+(originalCurrent!==current?'\nCurrent frame rounded to nearest integer.':low!==originalLow||high!==originalHigh?'\nInteger bounds include the saved range/current frame.':'');info.setFixedSize(424,38);popup.addWidget(info);
+        popup.showAcceptButton(false);popup.showCancelButton(false);var row=panel(popup,true),cancel=button(row.widget,'Cancel'),apply=button(row.widget,'Apply'),links=connections(),accepted=false;row.layout.margin=0;row.layout.spacing=10;cancel.setFixedSize(110,34);apply.setFixedSize(110,34);cancel.getWidget().styleSheet=colorButtonStyle('close');apply.getWidget().styleSheet=colorButtonStyle('save');row.layout.addStretch(1);row.layout.addWidget(cancel);row.layout.addWidget(apply);popup.addWidget(row.widget);popup.setFixedSize(460,220);links.add(cancel,'clicked()',function(){popup.close();});links.add(apply,'clicked()',function(){accepted=true;popup.close();});try{popup.exec();}finally{links.clear();}
+        if(!accepted)return null;var frame=Number(slider.value);if(!isFinite(frame)||Math.floor(frame)!==frame||frame<low||frame>high)throw Error('Source frame is outside the saved range.');return frame;
+    }
+function errorText(error){var code="",stage="",message="",recovery="";try{if(error!==null&&error!==undefined){if(error.code)code="["+String(error.code)+"] ";if(error.stage)stage="@"+String(error.stage)+" ";if(error.message)message=String(error.message);if(error.recoveryRequired===true)recovery=" [recovery required]";}}catch(ignoredErrorField){}if(!message&&error&&typeof error==='object'&&error.error){message=String(error.error.message||error.error);}if(!message){try{message=String(error);}catch(ignoredErrorText){message="Unprintable error";}}var details=[],fields=['error','cleanupError','undoError','cursorReturnError'];if(error&&typeof error==='object')for(var i=0;i<fields.length;i++)if(error[fields[i]]&&String(error[fields[i]].message||error[fields[i]])!==message)details.push(fields[i]+': '+String(error[fields[i]].message||error[fields[i]]));return (code+stage+message+recovery+(details.length?' | '+details.join(' | '):'')).substring(0,4000);}
+function esc(value) { return String(value === null || typeof value === "undefined" ? "" : value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"); }
+function label(parent, value) { var w = new DzLabel(parent); w.text = value || ""; w.wordWrap = true; return w; }
+function panel(parent, horizontal) {
+        var w = new DzGroupBox(parent); w.title = ""; w.flat = true;
+        var layout = horizontal ? new DzHBoxLayout(w) : new DzVBoxLayout(w);
+        layout.margin = 6; layout.spacing = 8; return { widget: w, layout: layout };
+    }
+function imageButtonPixmap(control, pixmap, width, height) {
+        control.pixmap = pixmap;
+        var nativeButton = control.getWidget(), current = nativeButton && nativeButton.iconSize;
+        if (!current || typeof Size !== "function") { throw Error("Native image-button icon sizing is unavailable."); }
+        nativeButton.iconSize = new Size(width, height);
+        current = nativeButton.iconSize;
+        if (!current || Number(current.width) !== width || Number(current.height) !== height) { throw Error("Native image-button icon size was not applied."); }
+    }
+function dialog(title, width, height) {
+        var w = new DzBasicDialog(); w.caption = title; var available = null; try { if (typeof DzDesktopWidget !== "undefined") { available = new DzDesktopWidget().availableGeometry(); } } catch (ignoredDesktop) {}
+        var desktopWidth = Number(available && available.width), desktopHeight = Number(available && available.height);
+        if (desktopWidth > 100 && desktopHeight > 100) { width = Math.min(width, desktopWidth - 32); height = Math.min(height, desktopHeight - 64); w.maxWidth = desktopWidth - 32; w.maxHeight = desktopHeight - 64; }
+        w.minWidth = width; w.minHeight = height;
+        if (available && desktopWidth > 100 && desktopHeight > 100) { w.setGeometry(Number(available.x) + 16, Number(available.y) + 16, width, height); } w.sizeGripEnabled = true;
+        w.setAcceptButtonText("Close"); w.showCancelButton(false); w.showHelpButton(false);
+        var font = w.font; font.pointSize = Math.max(12, Number(font.pointSize) || 12);
+        try { if (typeof font.families === "function") { var families=font.families(); for(var fi=0;fi<families.length;fi+=1){if(String(families[fi]).toLowerCase()==="georgia"){font.family="Georgia";break;}} } } catch (ignoredFont) {} w.font = font;
+        return w;
+    }
+function connections() {
+        var all = [], active = true;
+        return { add: function (object, signal, callback) { var guarded=function(){if(active)return callback.apply(null,arguments);};connect(object, signal, guarded); all.push([object, signal, guarded]); },
+            clear: function () { active=false;for (var i = all.length - 1; i >= 0; i -= 1) { try { disconnect(all[i][0], all[i][1], all[i][2]); } catch (ignore) {} } all = []; } };
+    }
+function button(parent, text, adapter, icon) {
+        var w = new DzPushButton(parent); w.text = text; w.minHeight = 34;
+        if (adapter && typeof adapter.iconPath === "function" && icon) {
+            try { var p = adapter.iconPath(icon); if (p && new DzFileInfo(p).exists()) { w.pixmap = new Pixmap(p); } } catch (ignore) {}
+        }
+        return w;
+    }
+function plainArea(parent, value) {
+        var w = new DzTextEdit(parent); w.readOnly = true; w.acceptRichText = false;
+        w.plainText = String(value || ""); w.minHeight = 100; return w;
+    }
+function displayName(value) { return SaveGuardManagerModel.displayText(value.label || value.name || value.internalName || value.id || "Unnamed"); }
+function describe(value) { return typeof value === "string" ? value : JSON.stringify(value, null, 2); }
+function isArray(value) { return Object.prototype.toString.call(value) === "[object Array]"; }
+function confirmAction(definition, request, prepared) {
+        var preview = prepared.preview;
+        if (!preview || !isArray(preview.includedNodes)) { throw Error("Action adapter did not return an included-node/dependency preview."); }
+        var confirmation = dialog("Scene File Workbench - Action preview", 720, 540), lines = [
+            definition.label, "Selected saved item: " + request.rowLabel + " [" + request.sourceId + "]",
+            "Source scene: " + request.manifestPath, ""], i, node;
+        if (preview.summary) { lines.push(String(preview.summary), ""); }
+        if (request.actionKey === "loadObject" || request.actionKey === "loadCharacter" || request.actionKey === "loadWearable") { lines.push("Loads the selected object or supported figure with required ancestors and descendants. Saved pose, morphs, materials and fitted links are retained; compare appearance before saving.", ""); }
+        lines.push("Included saved objects and required ancestors:");
+        if (!preview.includedNodes.length) { lines.push("  No scene objects listed."); }
+        for (i = 0; i < preview.includedNodes.length; i += 1) {
+            node = preview.includedNodes[i];
+            if (typeof node === "string") { lines.push("  " + node); continue; }
+            lines.push("  " + displayName(node) + (node.id ? " [" + node.id + "]" : "") +
+                (isArray(node.reasons) && node.reasons.length ? " - " + node.reasons.join(", ") : node.reason ? " - " + node.reason : ""));
+        }
+        lines.push("", "Additional dependencies:");
+        if (!isArray(preview.dependencies) || !preview.dependencies.length) { lines.push("  None reported."); }
+        else { for (i = 0; i < preview.dependencies.length; i += 1) { lines.push("  " + describe(preview.dependencies[i])); } }
+        if (preview.changes) { lines.push("", "Planned changes:", describe(preview.changes)); }
+        if (preview.warnings && preview.warnings.length) { lines.push("", "Notes:", isArray(preview.warnings) ? preview.warnings.join("\n") : String(preview.warnings)); }
+        confirmation.addWidget(label(confirmation, "<font color='#65b8e8'><h2>" + esc(definition.label) + "</h2></font>"));
+        confirmation.addWidget(plainArea(confirmation, lines.join("\n")), 1);
+        confirmation.setAcceptButtonText(definition.label); confirmation.showCancelButton(true); confirmation.setCancelButtonText("Cancel");
+        confirmation.setCancelButtonAsDefault();
+        return confirmation.exec() === true;
+    }
+function colorButtonStyle(kind) {
+        var colors={maintenance:["#a7790a","#F2D986"],save:["#33483D","#69B58A"],close:["#483638","#B5787E"],remove:["#483638","#B5787E"],restore:["#391ec4","#9280E8"],important:["#37383C","#696A70"]},c=colors[kind],toggle=kind==="important";
+        return "QPushButton { color: "+(kind==="maintenance"?"#24221B":"#F0F0F0")+"; font-weight: "+(toggle?"normal":"bold")+"; background-color: "+c[0]+"; border: 1px solid "+c[1]+"; border-radius: 4px; padding: 3px "+(toggle?"5":"9")+"px; }"+
+            (toggle?" QPushButton:checked { color: #F1F1F1; font-weight: bold; background-color: #4A4030; border: 1px solid #C49B59; }":"")+
+            " QPushButton:hover:enabled { border-width: 2px; } QPushButton:pressed:enabled { background-color: #55565A; } QPushButton:disabled { color: #929397; background-color: #292A2D; border: 1px solid #515256; font-weight: normal; }";
+    }
+function openFigureManager(names,defaults,adapter){
+        var model=SaveGuardManagerModel,draft=model.figureNames(names),result=null,dlg=dialog('Scene File Workbench - Supported Figures',720,540),links=connections(),entries=[],selectedName=null;
+        var figureTitle=label(dlg,"<h2><font color='#B9A0E8'>Supported Figures</font></h2>");figureTitle.alignment=DzWidget.AlignCenter;dlg.addWidget(figureTitle);
+        var list=new DzListView(dlg);list.selectionMode=DzListView.Single;list.rootIsDecorated=false;list.addColumn('Figure family');list.addColumn('Internal name');list.setSorting(-1);list.setColumnWidth(0,270);list.setColumnWidth(1,320);dlg.addWidget(list,1);
+        var row=panel(dlg,true),add=button(row.widget,'Add Selected Figure'),remove=button(row.widget,'Remove'),reset=button(row.widget,'Restore missing defaults');row.layout.addWidget(add);row.layout.addWidget(remove);row.layout.addWidget(reset);dlg.addWidget(row.widget);
+
+        var status=label(dlg,'');status.hide();dlg.addWidget(status);dlg.showAcceptButton(false);var actions=panel(dlg,true),cancel=button(actions.widget,'Close without saving'),use=button(actions.widget,'Use this list');actions.layout.spacing=10;cancel.setFixedHeight(34);use.setFixedHeight(34);cancel.minWidth=180;use.minWidth=140;cancel.getWidget().styleSheet=colorButtonStyle("close");use.getWidget().styleSheet=colorButtonStyle("save");actions.layout.addStretch(1);actions.layout.addWidget(cancel);actions.layout.addWidget(use);dlg.addWidget(actions.widget);
+        function populate(){selectedName=null;entries=[];list.clear();for(var i=draft.length-1;i>=0;i--){var item=new DzListViewItem(list);item.setText(0,model.figureFamily(draft[i]));item.setText(1,draft[i]);entries.push({item:item,name:draft[i]});}remove.enabled=false;}
+        function selected(){return selectedName;}
+        function action(fn){status.show();try{fn();populate();status.text=esc('Draft updated. Use this list, then Save Settings to apply.');}catch(e){status.text=esc(errorText(e));}}
+        links.add(list,'currentChanged(DzListViewItem*)',function(item){selectedName=null;for(var i=0;i<entries.length;i++)if(entries[i].item===item)selectedName=entries[i].name;remove.enabled=selectedName!==null;});
+        links.add(add,'clicked()',function(){action(function(){draft=model.addFigureName(draft,model.selectedFigureName(Scene.getPrimarySelection()));});});
+
+        links.add(remove,'clicked()',function(){action(function(){var name=selected(),at=draft.indexOf(name);if(at<0)throw Error('Select a registry entry.');draft.splice(at,1);});});
+        links.add(reset,'clicked()',function(){action(function(){draft=model.resetFigureNames(draft,defaults);});});
+        links.add(cancel,'clicked()',function(){dlg.close();});links.add(use,'clicked()',function(){result=model.figureNames(draft);dlg.close();});
+        try{populate();dlg.exec();}finally{links.clear();}return result;
+    }
+function findLabelInput(value){var popup=new DzBasicDialog(),caption=new DzLabel(popup),edit=new DzLineEdit(popup);popup.caption="Scene File Workbench - Find by label";popup.setFixedWidth(380);popup.showHelpButton(false);caption.text="Exact object label:";popup.addWidget(caption);edit.text=String(value);popup.addWidget(edit);popup.setAcceptButtonText("Find");popup.showCancelButton(true);popup.setCancelButtonText("Cancel");var wrapped=popup.getWidget();wrapped.objectName="SaveGuardFindLabelInput";var hint=wrapped.minimumSizeHint;if(hint&&Number(hint.height)>0)popup.setFixedHeight(Number(hint.height));return popup.exec()?String(edit.text):null;}
+return{findLabelInput:findLabelInput,chooseSourceFrame:chooseSavedSourceFrame,confirmAction:confirmAction,openFigureManager:openFigureManager,errorText:errorText,esc:esc,panel:panel,dialog:dialog,button:button,imageButtonPixmap:imageButtonPixmap};
+}());

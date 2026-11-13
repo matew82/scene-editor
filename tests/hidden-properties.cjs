@@ -3,9 +3,9 @@ const fs = require('fs'), path = require('path'), vm = require('vm'), assert = r
 const native = require('./helpers/native-daz-files.cjs');
 const root = path.resolve(__dirname, '..'), context = {};
 for (const name of ['Gzip', 'Core', 'IO', 'Morphs', 'Objects', 'Controls', 'UI']) {
-  vm.runInNewContext(fs.readFileSync(path.join(root, 'support', 'Scene Editor ' + name + '.dsa'), 'utf8'), context);
+  vm.runInNewContext(fs.readFileSync(path.join(root, 'support', 'Scene File Workbench ' + name + '.dsa'), 'utf8'), context);
 }
-vm.runInNewContext(fs.readFileSync(path.join(root, 'support/manager/Scene Editor Key Editor.dsa'), 'utf8'), context);
+vm.runInNewContext(fs.readFileSync(path.join(root, 'support/manager/Scene File Workbench Key Editor.dsa'), 'utf8'), context);
 const C = context.SceneEditorCore, U = context.SceneEditorUI;
 const uiHarness = require('./helpers/property-ui.cjs')(context);
 const results = [];
@@ -153,7 +153,7 @@ for(const view of ['TreeView','Controls']) test(view+': concise hover omits sour
 });
 
 test('installed bundle and all shipped source tooltips contain no removed phrase',()=>{
-  const paths=[path.join(root,'Scene Editor.dsa')];
+  const paths=[path.join(root,'Scene File Workbench.dsa')];
   function walk(dir){for(const n of fs.readdirSync(dir,{withFileTypes:true})){const p=path.join(dir,n.name);if(n.isDirectory())walk(p);else if(n.name.endsWith('.dsa'))paths.push(p);}}
   walk(path.join(root,'support'));
   for(const p of paths)assert(!fs.readFileSync(p,'utf8').includes('visibility not authored'),p);

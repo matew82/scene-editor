@@ -1,7 +1,7 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert'),path=require('path'),zlib=require('zlib');
 const root=path.resolve(__dirname,'..');process.chdir(root);
-const source=fs.readFileSync('support/manager/Scene Editor Parameter Compare.dsa','utf8');
-function context(){const c={};for(const n of ['Gzip','Core','IO'])vm.runInNewContext(fs.readFileSync('support/Scene Editor '+n+'.dsa','utf8'),c);vm.runInNewContext(source,c);return c;}
+const source=fs.readFileSync('support/manager/Scene File Workbench Parameter Compare.dsa','utf8');
+function context(){const c={};for(const n of ['Gzip','Core','IO'])vm.runInNewContext(fs.readFileSync('support/Scene File Workbench '+n+'.dsa','utf8'),c);vm.runInNewContext(source,c);return c;}
 const clone=x=>JSON.parse(JSON.stringify(x)),pairs=[{key:'p',aId:'p',bId:'p'}];
 function fixture(docs,resolve){const c=context(),reads={},stamps={};const engine=c.SceneEditorParameterCompare.create({stamp:p=>{if(!docs[p])throw Error('Missing '+p);return stamps[p]||1;},read(p,g){reads[p]=(reads[p]||0)+1;if(!docs[p])throw Error('Missing '+p);return c.SceneEditorParameterCompare.projectText(JSON.stringify(docs[p]),g);},resolve(file,scope){const p=resolve?resolve(file,scope):file;if(!docs[p])throw Error('Missing '+p);return p;}});return{c,reads,stamps,engine,compare:()=>engine.compare(['A','B'],pairs)};}
 function modifierDocs(){const scene=ref=>({modifier_library:[{id:'M',source:ref}],scene:{nodes:[{id:'p',type:'node',name:'Prop'}],modifiers:[{id:'mi',url:'#M',parent:'#p'}]}});return{A:scene('/first#M'),B:scene('/second#M'),'/first':{modifier_library:[{id:'M',channel:{id:'value',label:'Amount',type:'float',value:1}}]},'/second':{modifier_library:[{id:'M',channel:{id:'value',label:'Amount',type:'float',value:2}}]}};}

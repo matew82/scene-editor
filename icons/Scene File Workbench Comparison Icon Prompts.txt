@@ -1,0 +1,19 @@
+Generator: built-in image_gen.imagegen, transparent_background=true. Four separate generation calls. No external API or CLI generation.
+
+Expand Differences:
+Create a single transparent-background square PNG desktop toolbar icon, no words or letters. Function: Expand Differences in a scene comparison tree. Design: a compact dark slate blue tree/list panel with three pale blue horizontal branches, two highlighted yellow/orange differing rows and small cyan outward expansion arrows beside them. Match a DAZ Scene File Workbench toolbar style: crisp pixel-friendly 2D icon, strong cyan/light-blue outlines, dark navy interiors, subtle beveled highlights, tiny charcoal outline, sparse golden yellow accents. Not photoreal, not glossy 3D. Large simple forms legible when reduced to 48x48, centered composition filling 85% of square with transparent padding. No background tile, no text, no watermark.
+
+Shared prompt for the remaining three (replace SUBJECT below):
+Create one transparent-background square PNG desktop toolbar icon, no text. Function and subject: SUBJECT. Match DAZ Scene File Workbench toolbar: crisp simple pixel-friendly 2D, cyan/light-blue outlines, dark navy interiors, subtle beveled highlight, fine charcoal outer outline and sparse golden yellow accent only where specified. Simple large forms legible at 48x48, centered fills 85% square, transparent outer padding, no background tile, no words, letters, watermark.
+
+Select All SUBJECT:
+Select All: a compact dark slate checklist with THREE large bright cyan checked boxes and pale blue short horizontal lines
+
+Unselect All SUBJECT:
+Unselect All: a compact dark slate checklist with THREE EMPTY square cyan outlined boxes and pale blue short horizontal lines, clearly no checkmarks
+
+Compare Selected SUBJECT:
+Compare Selected: TWO overlapping dark slate blue document panels with pale blue lines, small cyan checkmarks indicating selected rows and a single golden yellow double-headed horizontal arrow connecting the panels
+
+Sources: generated 1254x1254 RGBA PNG, preserved unchanged as Source.png.
+Finals: Pillow LANCZOS resize only to48x48, alpha retained. All PNGs decoded and visual thumbnails reviewed.
